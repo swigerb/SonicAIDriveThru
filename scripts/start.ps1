@@ -1,13 +1,13 @@
+# Production mode: pass -Production flag to skip frontend rebuild and use gunicorn
+param(
+    [switch]$Production
+)
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Resolve-Path (Join-Path $scriptRoot "..")
-
-# Production mode: pass -Production flag to skip frontend rebuild and use gunicorn
-param(
-    [switch]$Production
-)
 
 Push-Location $repoRoot
 try {
