@@ -1,14 +1,14 @@
-# Sonic Voice Chat Assistant
+# Sonic AI Drive Thru
 
-Sonic Voice Chat Assistant is a Sonic Drive-In–themed, voice-driven ordering experience that showcases Microsoft best practices for Azure OpenAI GPT-4o Realtime, Azure AI Search, and Azure Container Apps. The experience emulates a Sonic carhop who can search the official menu, hold multilingual conversations, and keep orders in sync across devices.
+Sonic AI Drive Thru is a Sonic Drive-In–themed, voice-driven ordering experience that showcases Microsoft best practices for Azure OpenAI GPT-4o Realtime, Azure AI Search, and Azure Container Apps. The experience emulates a Sonic carhop who can search the official menu, hold multilingual conversations, and keep orders in sync across devices.
 
 As guests speak, real-time transcription, translation, and order management provide a transparent view of every choice...from slushes and shakes to burgers and tots. The UI applies Sonic's vibrant design language so stakeholders can picture how voice AI augments drive-in, carhop, and kiosk flows.
 
-Beyond coffee fans, this sample demonstrates how Microsoft’s Responsible AI guidance plus Azure-first tooling enable inclusive, hands-free interactions for franchise teams, accessibility scenarios, and mixed fleet deployments across the Inspire Brands portfolio.
+Beyond the drive-in experience, this sample demonstrates how Microsoft’s Responsible AI guidance plus Azure-first tooling enable inclusive, hands-free interactions for franchise teams, accessibility scenarios, and mixed fleet deployments across the Inspire Brands portfolio.
 
 ## Table of Contents
 
-- [Sonic Voice Chat Assistant](#sonic-voice-chat-assistant)
+- [Sonic AI Drive Thru](#sonic-ai-drive-thru)
   - [Table of Contents](#table-of-contents)
   - [Acknowledgment](#acknowledgment)
   - [Visual Demonstrations](#visual-demonstrations)
@@ -103,7 +103,7 @@ You can run the project in your local VS Code Dev Container using the [Dev Conta
 
 ### From JSON
 
-If you have a JSON file containing the menu items for your café, you can use the provided Jupyter notebook to ingest the data into Azure AI Search.
+If you have a JSON file containing the menu items for your drive-in, you can use the provided Jupyter notebook to ingest the data into Azure AI Search.
 
 #### Steps (JSON)
 
@@ -118,7 +118,7 @@ This notebook demonstrates how to configure Azure OpenAI and Azure AI Search ser
 
 ### From PDF
 
-If you have a PDF file of a café's menu that you would like to use, you can use the provided Jupyter notebook to extract text from the PDF, parse it into structured JSON format, and ingest the data into Azure AI Search.
+If you have a PDF file of a drive-in's menu that you would like to use, you can use the provided Jupyter notebook to extract text from the PDF, parse it into structured JSON format, and ingest the data into Azure AI Search.
 
 #### Steps (PDF)
 

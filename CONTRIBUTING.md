@@ -1,6 +1,6 @@
 # Contributing Guidelines
 
-Thank you for helping improve the Sonic Voice Chat Assistant! These steps keep the repository healthy as it moves into its new GitHub home.
+Thank you for helping improve the Sonic AI Drive Thru! These steps keep the repository healthy as it moves into its new GitHub home.
 
 ## Getting started
 
