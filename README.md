@@ -96,7 +96,7 @@ You can run the project in your local VS Code Dev Container using the [Dev Conta
   The script installs the Azure CLI, signs you in, and verifies Docker availability for you.
 
   Alternatively, manually install [Azure Developer CLI](https://aka.ms/azure-dev/install), [Node.js](https://nodejs.org/), [Python >=3.11](https://www.python.org/downloads/), [Git](https://git-scm.com/downloads), and [Docker Desktop](https://www.docker.com/products/docker-desktop).
-  2. Clone your GitHub repository (`git clone https://github.com/swigerb/sonic-ai-drive-thru.git`)
+  2. Clone your GitHub repository (`git clone https://github.com/swigerb/SonicAIDriveThru.git`)
   3. Proceed to the next section to [deploy the app](#deploying-to-azure).
 
 ## Ingesting Menu Items into Azure AI Search

@@ -4,7 +4,7 @@ Thank you for helping improve the Sonic AI Drive Thru! These steps keep the repo
 
 ## Getting started
 
-1. Fork the repository and clone your fork (`git clone https://github.com/swigerb/sonic-ai-drive-thru.git`).
+1. Fork the repository and clone your fork (`git clone https://github.com/swigerb/SonicAIDriveThru.git`).
 2. Install prerequisites listed in the README (Azure Developer CLI, Node.js 20+, Python 3.11+, Docker, and Git).
 3. Copy the backend and frontend `.env-sample` files to `.env` and supply your Azure resource details.
 4. Run `pwsh ./scripts/start.ps1` (or `./scripts/start.sh`) to launch the full stack locally before making UI or API changes.
