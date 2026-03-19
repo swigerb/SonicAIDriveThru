@@ -24,7 +24,7 @@
 
 - **Owner:** Brian Swiger
 - **Project:** Dunkin Voice Chat Assistant — an Inspire Brands–themed, voice-driven ordering experience showcasing Azure OpenAI GPT-4o Realtime, Azure AI Search, and Azure Container Apps. Emulates a Dunkin crew member who can search the menu, hold multilingual conversations, and keep orders in sync across devices.
-- **Repo:** https://github.com/swigerb/dunkin-chat-voice-assistant
+- **Repo:** https://github.com/swigerb/SonicAIDriveThru
 - **Stack:**
   - **Frontend:** React, TypeScript, Vite, Tailwind CSS, shadcn/ui
   - **Backend:** Python (aiohttp, WebSockets), Azure OpenAI GPT-4o Realtime API, Azure AI Search, Azure Speech SDK
