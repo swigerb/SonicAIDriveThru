@@ -105,6 +105,37 @@ The UI menu panel (`menuItems.json`) had only Small/Medium/Large for drinks, whi
 - UI and voice assistant now show consistent size options
 - Future price changes can be synced by re-running the script
 
+## Greeting Sent AFTER session.update (2026-03-19)
+
+**Author:** Summer (Backend Developer)
+
+### Problem
+The greeting was sent to OpenAI BEFORE the `session.update` message was forwarded. This caused three cascading issues:
+1. **No tools available** — AI couldn't call `update_order`, so items were never added to the ticket ($0.00 orders)
+2. **No system message** — AI used wrong closing phrases and didn't follow Sonic persona
+3. **Mid-conversation reconfiguration** — AI had to reconfigure after greeting, causing delays
+
+### Root Cause
+In `app/backend/rtmt.py`, the `from_client_to_server()` function sent the greeting BEFORE processing/forwarding the first `session.update` message (which contains tools, system message, and voice config).
+
+### Decision
+Reordered message flow in `rtmt.py`:
+1. Process and forward `session.update` first (with tools, system message, voice config)
+2. Then send greeting
+
+WebSocket messages are ordered, so OpenAI processes them in the correct sequence.
+
+### Related Changes
+Strengthened system prompt in `app.py`:
+- Made tool calling instruction explicit: "When a guest orders items, IMMEDIATELY call 'update_order'. The guest ordering IS confirmation."
+- Made closing phrase instruction emphatic: "you MUST say EXACTLY: [phrase] — Do NOT use any other closing phrase."
+
+### Impact
+- AI has tools available when generating responses → `update_order` calls work → items added to ticket
+- AI has system message from the start → uses correct closing phrases and Sonic persona
+- No mid-conversation reconfiguration → faster, smoother interactions
+- All 100 tests pass
+
 ## Previous Decisions (Archived)
 
 ### Copilot Directive (2026-02-25T22-39)
