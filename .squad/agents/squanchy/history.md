@@ -8,3 +8,10 @@
 ## Learnings
 
 <!-- Append new learnings below. Each entry is something lasting about the project. -->
+
+### 2026-03-19: Repository Creation
+- GitHub repo created at `brswig_microsoft/SonicAIDriveThru` (private — EMU accounts cannot create public repos)
+- Forked from `swigerb/dunkin-chat-voice-assistant` as starting codebase (208 files, 26K+ lines)
+- Local `.squad/`, `.copilot/`, `.github/` configs preserved over dunkin originals; `.gitignore` and `.gitattributes` merged
+- Remote: `https://github.com/brswig_microsoft/SonicAIDriveThru`
+- Branch: `main`
