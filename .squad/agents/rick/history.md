@@ -8,3 +8,4 @@
 ## Learnings
 
 - **Sonic Rebrand Scope (2026-03-20)**: Identified ~100+ Dunkin-specific references across frontend UI, backend prompts, menu data, docs, and team context. Critical changes needed in system prompts (`app.py`/`rtmt.py`), frontend components (`App.tsx`/`order-summary.tsx`), menu data files, and logo asset. No changes required in infrastructure, tests (logic remains), or upstream attribution. Scope documented in `.squad/decisions/inbox/rick-sonic-rebrand-scope.md`. Recommended 2–4 dev-days with team parallelization.
+- **Team Orchestration (2026-03-19T04-06)**: Morty completed frontend rebrand (13 tests pass), Summer completed backend rebrand (69 tests pass), Birdperson created verification tests (12 tests pass). All decisions merged to decisions.md.

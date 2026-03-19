@@ -14,3 +14,4 @@
 - The old dunkin-logo.svg is still in src/assets/ (unused, no longer imported). Safe to delete if desired.
 - Font changed from Fredoka to Nunito Sans for a cleaner, more energetic Sonic-aligned feel.
 - Test data (dummyOrder.json, dummyTranscripts.json) and test assertions must be kept in sync with branding — they reference specific menu items and branding text.
+- **Team Orchestration (2026-03-19T04-06)**: Rick provided scope analysis, Morty completed frontend rebrand (13 tests pass), Summer completed backend rebrand (69 tests pass), Birdperson created verification tests (12 tests pass).
