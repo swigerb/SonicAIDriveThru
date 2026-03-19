@@ -61,12 +61,16 @@ try {
     throw "Unable to determine Python version from output: $versionOutput"
   }
 
-  Write-Host 'Creating python virtual environment ".venv"'
-  & $pythonCmdPath @pythonCmdArgs -m venv ./.venv
-
   $venvPythonPath = Join-Path $projectRoot ".venv\scripts\python.exe"
   if ($IsLinux -or $IsMacOS) {
     $venvPythonPath = Join-Path $projectRoot ".venv/bin/python"
+  }
+
+  if (Test-Path $venvPythonPath) {
+    Write-Host 'Using existing virtual environment ".venv"'
+  } else {
+    Write-Host 'Creating python virtual environment ".venv"'
+    & $pythonCmdPath @pythonCmdArgs -m venv ./.venv
   }
 
   if (-not (Test-Path $venvPythonPath)) {
