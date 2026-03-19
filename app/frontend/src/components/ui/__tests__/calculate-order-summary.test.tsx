@@ -11,20 +11,20 @@ describe("calculateOrderSummary", () => {
 
     it("computes correct totals for a single item", () => {
         const items: OrderItem[] = [
-            { item: "Glazed Donut", size: "standard", quantity: 1, price: 1.49, display: "Glazed Donut" }
+            { item: "Large Tots", size: "standard", quantity: 1, price: 3.29, display: "Large Tots" }
         ];
         const result = calculateOrderSummary(items);
-        expect(result.total).toBeCloseTo(1.49);
-        expect(result.tax).toBeCloseTo(1.49 * 0.08);
-        expect(result.finalTotal).toBeCloseTo(1.49 * 1.08);
+        expect(result.total).toBeCloseTo(3.29);
+        expect(result.tax).toBeCloseTo(3.29 * 0.08);
+        expect(result.finalTotal).toBeCloseTo(3.29 * 1.08);
     });
 
     it("computes correct totals for multiple items with quantities", () => {
         const items: OrderItem[] = [
-            { item: "Latte", size: "medium", quantity: 2, price: 4.99, display: "Medium Latte" },
-            { item: "Bagel", size: "standard", quantity: 3, price: 2.49, display: "Bagel" }
+            { item: "Cherry Limeade", size: "medium", quantity: 2, price: 2.99, display: "Medium Cherry Limeade" },
+            { item: "Chili Cheese Coney", size: "standard", quantity: 3, price: 3.99, display: "Chili Cheese Coney" }
         ];
-        const expectedTotal = 2 * 4.99 + 3 * 2.49;
+        const expectedTotal = 2 * 2.99 + 3 * 3.99;
         const result = calculateOrderSummary(items);
         expect(result.total).toBeCloseTo(expectedTotal);
         expect(result.tax).toBeCloseTo(expectedTotal * 0.08);

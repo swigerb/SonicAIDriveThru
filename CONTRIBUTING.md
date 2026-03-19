@@ -1,10 +1,10 @@
 # Contributing Guidelines
 
-Thank you for helping improve the Dunkin Voice Chat Assistant! These steps keep the repository healthy as it moves into its new GitHub home.
+Thank you for helping improve the Sonic Voice Chat Assistant! These steps keep the repository healthy as it moves into its new GitHub home.
 
 ## Getting started
 
-1. Fork the repository and clone your fork (`git clone https://github.com/swigerb/dunkin-chat-voice-assistant.git`).
+1. Fork the repository and clone your fork (`git clone https://github.com/swigerb/sonic-ai-drive-thru.git`).
 2. Install prerequisites listed in the README (Azure Developer CLI, Node.js 20+, Python 3.11+, Docker, and Git).
 3. Copy the backend and frontend `.env-sample` files to `.env` and supply your Azure resource details.
 4. Run `pwsh ./scripts/start.ps1` (or `./scripts/start.sh`) to launch the full stack locally before making UI or API changes.

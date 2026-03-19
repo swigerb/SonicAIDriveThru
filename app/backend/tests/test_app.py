@@ -62,10 +62,10 @@ class CreateAppConfigTests(unittest.IsolatedAsyncioTestCase):
         _, kwargs = mock_cls.call_args
         self.assertEqual(kwargs["voice_choice"], "coral")
 
-    async def test_system_prompt_contains_pull_around_to_next_window(self):
+    async def test_system_prompt_contains_carhop_closing(self):
         _, mock_instance = await self._run_create_app()
         self.assertIn(
-            "Please pull around to the next window",
+            "Your carhop will have that right out to you",
             mock_instance.system_message,
         )
 

@@ -1,9 +1,9 @@
 [
-    { "item": "Caramel Craze Latte", "size": "Medium", "quantity": 2, "price": 4.99, "display": "Medium Caramel Craze Latte" },
-    { "item": "Brown Sugar Cream Cold Brew", "size": "Large", "quantity": 1, "price": 5.29, "display": "Large Brown Sugar Cream Cold Brew" },
-    { "item": "Strawberry Dragonfruit Refresher", "size": "Large", "quantity": 1, "price": 4.29, "display": "Large Strawberry Dragonfruit Refresher" },
-    { "item": "Glazed Donut", "size": "Standard", "quantity": 3, "price": 1.49, "display": "Glazed Donut" },
-    { "item": "Bacon Egg & Cheese on Croissant", "size": "Standard", "quantity": 2, "price": 4.99, "display": "Bacon Egg & Cheese on Croissant" },
-    { "item": "Flavor Swirl Add-On", "size": "Standard", "quantity": 2, "price": 0.75, "display": "Flavor Swirl Add-On" },
-    { "item": "Extra Espresso Shot", "size": "Standard", "quantity": 1, "price": 1.0, "display": "Extra Espresso Shot" }
+    { "item": "SuperSONIC® Double Cheeseburger", "size": "Standard", "quantity": 2, "price": 6.99, "display": "SuperSONIC® Double Cheeseburger" },
+    { "item": "Cherry Limeade", "size": "Large", "quantity": 2, "price": 3.49, "display": "Large Cherry Limeade" },
+    { "item": "Large Tots", "size": "Standard", "quantity": 2, "price": 3.29, "display": "Large Tots" },
+    { "item": "Oreo® Peanut Butter Shake", "size": "Medium", "quantity": 1, "price": 4.99, "display": "Medium Oreo® Peanut Butter Shake" },
+    { "item": "Chili Cheese Coney", "size": "Standard", "quantity": 2, "price": 3.99, "display": "Chili Cheese Coney" },
+    { "item": "Mozzarella Sticks", "size": "Standard", "quantity": 1, "price": 3.49, "display": "Mozzarella Sticks" },
+    { "item": "Add-In Flavor", "size": "Standard", "quantity": 2, "price": 0.50, "display": "Add-In Flavor" }
 ]

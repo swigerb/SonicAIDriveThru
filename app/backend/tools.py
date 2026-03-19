@@ -20,18 +20,19 @@ __all__ = ["attach_tools_rtmt"]
 
 # Extras may only be applied to specific beverage categories.
 EXTRAS_KEYWORDS = (
-    "flavor swirl",
+    "flavor add-in",
     "whipped cream",
-    "extra espresso shot",
-    "extra shot",
+    "extra patty",
+    "extra cheese",
+    "add bacon",
 )
-ALLOWED_EXTRA_CATEGORIES = {"signature lattes", "cold beverages"}
-BLOCKED_EXTRA_CATEGORIES = {"donuts & bakery", "breakfast sandwiches"}
+ALLOWED_EXTRA_CATEGORIES = {"slushes & drinks", "shakes & ice cream", "burgers & sandwiches", "drinks", "slushes", "shakes", "combos"}
+BLOCKED_EXTRA_CATEGORIES = {"hot dogs & tots", "sides", "hot dogs"}
 
 
 def _load_menu_category_map() -> dict[str, str]:
     env_override = (
-        os.environ.get("DUNKIN_MENU_ITEMS_PATH")
+        os.environ.get("SONIC_MENU_ITEMS_PATH")
         or os.environ.get("MENU_ITEMS_PATH")
     )
 
@@ -76,14 +77,18 @@ def _infer_category(item_name: str) -> str:
     normalized = item_name.lower()
     if normalized in MENU_CATEGORY_MAP:
         return MENU_CATEGORY_MAP[normalized]
-    if "latte" in normalized:
-        return "signature lattes"
-    if "cold brew" in normalized or "refresher" in normalized or "cold" in normalized:
-        return "cold beverages"
-    if "donut" in normalized or "bagel" in normalized or "munchkins" in normalized:
-        return "donuts & bakery"
-    if "sandwich" in normalized or "wrap" in normalized or "croissant" in normalized:
-        return "breakfast sandwiches"
+    if "slush" in normalized or "limeade" in normalized or "ocean water" in normalized:
+        return "slushes"
+    if "shake" in normalized or "blast" in normalized or "malt" in normalized:
+        return "shakes"
+    if "burger" in normalized or "combo" in normalized:
+        return "combos"
+    if "hot dog" in normalized or "coney" in normalized:
+        return "hot dogs"
+    if "tot" in normalized or "fries" in normalized or "onion rings" in normalized:
+        return "sides"
+    if "drink" in normalized or "tea" in normalized or "lemonade" in normalized:
+        return "drinks"
     return ""
 
 
@@ -194,7 +199,7 @@ update_order_tool_schema = {
             },
             "item_name": { 
                 "type": "string", 
-                "description": "Name of the item to update, e.g., 'Cappuccino'."
+                "description": "Name of the item to update, e.g., 'Cherry Limeade'."
             },
             "size": { 
                 "type": "string", 
@@ -234,13 +239,13 @@ async def update_order(args, session_id: str) -> ToolResult:
 
         if not has_allowed_base:
             apology = (
-                "I can add extras to signature lattes or cold beverages, "
-                "but not to donuts or breakfast sandwiches."
+                "I can add extras to drinks, slushes, shakes, or combos, "
+                "but not to sides or hot dogs on their own."
             )
             if has_blocked_base:
                 apology = (
-                    "I can add extras to signature lattes or cold beverages, "
-                    "but I can't add them to donuts or breakfast sandwiches."
+                    "I can add extras to drinks, slushes, shakes, or combos, "
+                    "but I can't add them to sides or hot dogs on their own."
                 )
             logger.info("Blocked extra '%s' for session %s", item_name, session_id)
             return ToolResult(apology, ToolResultDirection.TO_SERVER)

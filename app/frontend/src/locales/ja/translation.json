@@ -8,7 +8,7 @@
         "stopConversation": "会話を停止"
     },
     "status": {
-        "notRecordingMessage": "Contoso 従業員の福利厚生について質問してください",
+        "notRecordingMessage": "アメリカのドライブインで注文しよう！",
         "conversationInProgress": "会話が進行中"
     },
     "history": {

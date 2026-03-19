@@ -1,85 +1,85 @@
 [
-    { "text": "Morning! Is this the Dunkin drive-thru assistant?", "isUser": true, "timestamp": "2024-07-18T12:00:00Z", "translation": "Morning! Is this the Dunkin drive-thru assistant?" },
+    { "text": "Hey! Is this the Sonic drive-in ordering assistant?", "isUser": true, "timestamp": "2024-07-18T12:00:00Z", "translation": "Hey! Is this the Sonic drive-in ordering assistant?" },
     {
-        "text": "Absolutely! I'm your Dunkin Voice Crew member. Ready for your first sip?",
+        "text": "Welcome to Sonic, America's Drive-In! I'm your carhop assistant. What can I get started for you?",
         "isUser": false,
         "timestamp": "2024-07-18T12:00:05Z",
-        "translation": "Absolutely! I'm your Dunkin Voice Crew member. Ready for your first sip?"
+        "translation": "Welcome to Sonic, America's Drive-In! I'm your carhop assistant. What can I get started for you?"
     },
     {
-        "text": "Sí, necesito dos Caramel Craze lattes medianos y quiero saber si tienen cold foam de vainilla.",
+        "text": "Quiero dos SuperSONIC Double Cheeseburgers y dos limeadas de cereza grandes, por favor.",
         "isUser": true,
         "timestamp": "2024-07-18T12:00:20Z",
-        "translation": "Yes, I need two medium Caramel Craze lattes and I want to know if you have vanilla cold foam."
+        "translation": "I want two SuperSONIC Double Cheeseburgers and two large cherry limeades, please."
     },
     {
-        "text": "Claro, tenemos cold foam de vainilla. ¿Desea agregarlo a ambos lattes?",
+        "text": "¡Excelente elección! ¿Le gustaría agregar tots o papas fritas como acompañamiento?",
         "isUser": false,
         "timestamp": "2024-07-18T12:00:28Z",
-        "translation": "Of course, we have vanilla cold foam. Would you like it on both lattes?"
+        "translation": "Excellent choice! Would you like to add tots or fries as a side?"
     },
-    { "text": "Just the first latte, please.", "isUser": true, "timestamp": "2024-07-18T12:00:35Z", "translation": "Just the first latte, please." },
+    { "text": "Tots for sure, make it two large tots.", "isUser": true, "timestamp": "2024-07-18T12:00:35Z", "translation": "Tots for sure, make it two large tots." },
     {
-        "text": "Got it—first latte capped with vanilla cold foam. Want to pair them with a bakery item?",
+        "text": "Two large tots added! Our tots are a drive-in classic. Want to add a shake or dessert?",
         "isUser": false,
         "timestamp": "2024-07-18T12:00:40Z",
-        "translation": "Got it—first latte capped with vanilla cold foam. Want to pair them with a bakery item?"
+        "translation": "Two large tots added! Our tots are a drive-in classic. Want to add a shake or dessert?"
     },
     {
-        "text": "我看到有波士頓奶油甜甜圈，請加兩個，謝謝。",
+        "text": "オレオピーナッツバターシェイクのミディアムを一つお願いします。",
         "isUser": true,
         "timestamp": "2024-07-18T12:00:52Z",
-        "translation": "I saw the Boston Kreme donut, please add two, thanks."
+        "translation": "I'd like one medium Oreo Peanut Butter Shake, please."
     },
     {
-        "text": "已經為您添加兩個波士頓奶油甜甜圈，還需要點什麼早餐嗎？",
+        "text": "ミディアムのオレオピーナッツバターシェイクを追加しました。他に何かご注文はありますか？",
         "isUser": false,
         "timestamp": "2024-07-18T12:01:00Z",
-        "translation": "Two Boston Kreme donuts added. Would you like any breakfast sandwiches?"
+        "translation": "Medium Oreo Peanut Butter Shake added. Anything else for your order?"
     },
     {
-        "text": "Could you tell me the protein in the Power Breakfast sandwich?",
+        "text": "What's in the Chili Cheese Coney?",
         "isUser": true,
         "timestamp": "2024-07-18T12:01:12Z",
-        "translation": "Could you tell me the protein in the Power Breakfast sandwich?"
+        "translation": "What's in the Chili Cheese Coney?"
     },
     {
-        "text": "It packs turkey sausage plus egg whites for 24g of protein. Want me to add one?",
+        "text": "It's a premium beef hot dog topped with warm Sonic chili and melted shredded cheddar. A true carhop favorite! Want me to add some?",
         "isUser": false,
         "timestamp": "2024-07-18T12:01:20Z",
-        "translation": "It packs turkey sausage plus egg whites for 24g of protein. Want me to add one?"
+        "translation": "It's a premium beef hot dog topped with warm Sonic chili and melted shredded cheddar. A true carhop favorite! Want me to add some?"
     },
-    { "text": "Yes, add one more and make it a combo with a large cold brew.", "isUser": true, "timestamp": "2024-07-18T12:01:32Z", "translation": "Yes, add one more and make it a combo with a large cold brew." },
+    { "text": "Yes, add two Chili Cheese Coneys and some mozzarella sticks.", "isUser": true, "timestamp": "2024-07-18T12:01:32Z", "translation": "Yes, add two Chili Cheese Coneys and some mozzarella sticks." },
     {
-        "text": "Combo locked: Power Breakfast Sandwich and large Original Cold Brew. Anything to sweeten the drinks?",
+        "text": "Done! Two Chili Cheese Coneys and an order of Mozzarella Sticks. Want to add any flavor to your limeades?",
         "isUser": false,
         "timestamp": "2024-07-18T12:01:40Z",
-        "translation": "Combo locked: Power Breakfast Sandwich and large Original Cold Brew. Anything to sweeten the drinks?"
+        "translation": "Done! Two Chili Cheese Coneys and an order of Mozzarella Sticks. Want to add any flavor to your limeades?"
     },
     {
-        "text": "Ajoutez un shot supplémentaire d'espresso dans le cold brew, s'il vous plaît.",
+        "text": "Ajoutez de la vanille aux deux limeades, s'il vous plaît.",
         "isUser": true,
         "timestamp": "2024-07-18T12:01:55Z",
-        "translation": "Add an extra espresso shot in the cold brew, please."
+        "translation": "Add vanilla to both limeades, please."
     },
     {
-        "text": "Parfait, un shot supplémentaire ajouté. Voulez-vous le récapitulatif de la commande?",
+        "text": "Parfait, vanille ajoutée aux deux. Voulez-vous le récapitulatif de la commande?",
         "isUser": false,
         "timestamp": "2024-07-18T12:02:02Z",
-        "translation": "Perfect, an extra shot has been added. Would you like the order summary?"
+        "translation": "Perfect, vanilla added to both. Would you like the order summary?"
     },
     { "text": "Yes, give me the totals.", "isUser": true, "timestamp": "2024-07-18T12:02:10Z", "translation": "Yes, give me the totals." },
     {
-        "text": "You have 2 Caramel Craze Lattes (one with cold foam), 2 Boston Kreme donuts, 1 Power Breakfast Sandwich, and 1 large Cold Brew with an extra shot. Your total is $36.82 with tax.",
+        "text": "You have 2 SuperSONIC Double Cheeseburgers, 2 Large Cherry Limeades with vanilla, 2 Large Tots, 1 Medium Oreo PB Shake, 2 Chili Cheese Coneys, and Mozzarella Sticks. Your total is $48.49 with tax.",
         "isUser": false,
         "timestamp": "2024-07-18T12:02:18Z",
-        "translation": "You have 2 Caramel Craze Lattes (one with cold foam), 2 Boston Kreme donuts, 1 Power Breakfast Sandwich, and 1 large Cold Brew with an extra shot. Your total is $36.82 with tax."
+        "translation": "You have 2 SuperSONIC Double Cheeseburgers, 2 Large Cherry Limeades with vanilla, 2 Large Tots, 1 Medium Oreo PB Shake, 2 Chili Cheese Coneys, and Mozzarella Sticks. Your total is $48.49 with tax."
     },
     { "text": "Perfect, let's close it out.", "isUser": true, "timestamp": "2024-07-18T12:02:26Z", "translation": "Perfect, let's close it out." },
     {
-        "text": "Thanks for rolling with Dunkin today! Swing to the next window and we'll have your Inspire Brands order ready.",
+        "text": "Thanks for choosing Sonic, America's Drive-In! Your carhop will have your order out in just a moment. Enjoy!",
         "isUser": false,
         "timestamp": "2024-07-18T12:02:32Z",
-        "translation": "Thanks for rolling with Dunkin today! Swing to the next window and we'll have your Inspire Brands order ready."
+        "translation": "Thanks for choosing Sonic, America's Drive-In! Your carhop will have your order out in just a moment. Enjoy!"
     }
 ]

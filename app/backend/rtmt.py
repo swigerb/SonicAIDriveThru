@@ -12,7 +12,7 @@ from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 
 from order_state import SessionIdentifiers, order_state_singleton
 
-logger = logging.getLogger("coffee-chat")
+logger = logging.getLogger("sonic-drive-in")
 
 __all__ = ["RTMiddleTier", "RTToolCall", "Tool", "ToolResult", "ToolResultDirection"]
 
@@ -240,7 +240,7 @@ class RTMiddleTier:
                             "type": "message",
                             "role": "user",
                             "content": [
-                                {"type": "input_text", "text": "Please greet the guest with: 'Welcome to Dunkin! How may I help you today?'"}
+                                {"type": "input_text", "text": "Please greet the guest with: 'Welcome to Sonic Drive-In! What can I get started for you today?'"}
                             ]
                         }
                     })

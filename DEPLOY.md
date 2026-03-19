@@ -19,8 +19,8 @@
 From the root directory, execute the following commands:
 
 ```bash
-docker build -t coffee-chat-app -f ./app/Dockerfile ./app
-docker run -p 8000:8000 --env-file ./app/backend/.env coffee-chat-app:latest
+docker build -t sonic-drive-in-app -f ./app/Dockerfile ./app
+docker run -p 8000:8000 --env-file ./app/backend/.env sonic-drive-in-app:latest
 ```
 
 ## Deploy the Application
@@ -32,5 +32,5 @@ After testing locally, deploy the application with:
     --env-file ./app/backend/.env \
     --dockerfile ./app/Dockerfile \
     --context ./app \
-    coffee-chat-assistant
+    sonic-drive-in-assistant
 ```

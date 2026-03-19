@@ -26,9 +26,9 @@ import { AuthProvider, useAuth } from "@/context/auth-context";
 import dummyTranscriptsData from "@/data/dummyTranscripts.json";
 import dummyOrderData from "@/data/dummyOrder.json";
 import azureLogo from "@/assets/azurelogo.svg";
-import dunkinLogo from "@/assets/dunkin-logo.svg";
+import sonicLogo from "@/assets/sonic-logo.svg";
 
-type HighlightTone = "orange" | "pink" | "yellow";
+type HighlightTone = "red" | "blue" | "yellow";
 
 type SessionIdentifiersState = {
     sessionToken: string;
@@ -39,27 +39,27 @@ type SessionIdentifiersState = {
 const heroHighlights: Array<{ title: string; detail: string; tone: HighlightTone }> = [
     {
         title: "Rewards Ready",
-        detail: "Voice orders auto-sync with Dunkin' Rewards boosts",
-        tone: "orange"
+        detail: "Voice orders auto-sync with Sonic rewards and deals",
+        tone: "red"
     },
     {
         title: "Azure Infusion",
         detail: "Azure OpenAI + Speech keep conversations flowing",
-        tone: "pink"
+        tone: "blue"
     },
     {
         title: "Live Menu",
-        detail: "Azure AI Search keeps Dunkin' items current",
+        detail: "Azure AI Search keeps Sonic menu items current",
         tone: "yellow"
     }
 ];
 
 const heroCallouts = [
-    { label: "Donut of the Day", value: "Boston Kreme", accent: "#E3007F" },
-    { label: "Crew Pick", value: "Caramel Craze Latte", accent: "#FF671F" }
+    { label: "Slush of the Day", value: "Cherry Limeade", accent: "#E40046" },
+    { label: "Carhop Pick", value: "SuperSONIC Cheeseburger", accent: "#285780" }
 ];
 
-function CoffeeApp() {
+function SonicApp() {
     const [isRecording, setIsRecording] = useState(false);
     const [isMobile, setIsMobile] = useState(false);
     const { useAzureSpeechOn } = useAzureSpeechOnContext();
@@ -280,11 +280,11 @@ function CoffeeApp() {
             <div className="mx-auto max-w-7xl space-y-6">
                 <div className="flex flex-col gap-3 text-sm font-semibold text-primary md:flex-row md:items-center md:justify-between">
                     <a
-                        href="https://github.com/swigerb/dunkin-chat-voice-assistant"
+                        href="https://github.com/swigerb/sonic-voice-assistant"
                         target="_blank"
                         rel="noopener noreferrer"
                         className="inline-flex items-center gap-1 rounded-full bg-white/80 px-3 py-1 text-primary transition hover:text-accent"
-                        title="View Dunkin Voice Crew source"
+                        title="View Sonic Voice Ordering source"
                     >
                         <Github className="h-4 w-4" />
                         <span>Source on GitHub</span>
@@ -313,12 +313,12 @@ function CoffeeApp() {
                         <SheetTrigger asChild>
                             <Button variant="outline" className="mb-4 flex w-full items-center justify-center md:hidden">
                                 <Menu className="mr-2 h-4 w-4" />
-                                View Dunkin Menu
+                                View Sonic Menu
                             </Button>
                         </SheetTrigger>
                         <SheetContent side="left" className="w-[300px] sm:w-[400px]">
                             <SheetHeader>
-                                <SheetTitle>Dunkin Favorites</SheetTitle>
+                                <SheetTitle>Sonic Favorites</SheetTitle>
                             </SheetHeader>
                             <div className="h-[calc(100vh-4rem)] overflow-auto pr-4">
                                 <MenuPanel />
@@ -328,7 +328,7 @@ function CoffeeApp() {
 
                     {/* Desktop Menu Panel */}
                     <Card className="hidden p-6 md:block">
-                        <h2 className="mb-4 text-center font-semibold text-primary">Dunkin Favorites</h2>
+                        <h2 className="mb-4 text-center font-semibold text-primary">Sonic Favorites</h2>
                         <div className="h-[calc(100vh-13rem)] overflow-auto pr-4">
                             <MenuPanel />
                         </div>
@@ -342,7 +342,7 @@ function CoffeeApp() {
                                 <Button
                                     onClick={onToggleListening}
                                     className={`h-12 w-60 border-none font-semibold shadow-lg transition-colors ${
-                                        isRecording ? "bg-[#E3007F] text-white hover:bg-[#c2006c]" : "bg-[#FF671F] text-white hover:bg-[#d9551a]"
+                                        isRecording ? "bg-[#285780] text-white hover:bg-[#18344D]" : "bg-[#E40046] text-white hover:bg-[#C31B24]"
                                     }`}
                                     aria-label={isRecording ? t("app.stopRecording") : t("app.startRecording")}
                                 >
@@ -390,10 +390,10 @@ function CoffeeApp() {
                 </div>
             </div>
             <footer className="mx-auto mt-8 max-w-4xl space-y-2 text-center text-xs text-muted-foreground">
-                <p className="font-semibold uppercase tracking-[0.35em] text-[#C14200]/80">{t("app.footer")}</p>
-                <p className="text-[11px] leading-relaxed text-[#7A2E10]/80">
+                <p className="font-semibold uppercase tracking-[0.35em] text-[#285780]/80">{t("app.footer")}</p>
+                <p className="text-[11px] leading-relaxed text-[#18344D]/80">
                     Disclaimer: This project is a non-commercial demo application created for educational and illustrative purposes only. It is not
-                    affiliated with, endorsed, or sponsored by Inspire Brands, Inc. Any references to Dunkin' or use of Dunkin-inspired colors or
+                    affiliated with, endorsed, or sponsored by Inspire Brands, Inc. or Sonic Corp. Any references to Sonic Drive-In or use of Sonic-inspired colors or
                     themes are solely for demonstration and do not represent an official product.
                 </p>
             </footer>
@@ -403,19 +403,19 @@ function CoffeeApp() {
 
 function BrandHero() {
     return (
-        <section className="hero-card rounded-[32px] border border-white/40 bg-white/80 p-6 shadow-[0_25px_70px_rgba(255,103,31,0.18)] backdrop-blur-lg">
+        <section className="hero-card rounded-[32px] border border-white/40 bg-white/80 p-6 shadow-[0_25px_70px_rgba(40,87,128,0.18)] backdrop-blur-lg">
             <div className="flex flex-col gap-8 lg:flex-row lg:items-center">
                 <div className="flex-1 space-y-5">
                     <div className="flex flex-wrap items-center gap-3">
-                        <img src={dunkinLogo} alt="Dunkin logo" className="h-10 w-auto drop-shadow-sm" loading="lazy" />
-                        <span className="rounded-full bg-[#FFE3CB] px-3 py-1 text-xs font-black uppercase tracking-[0.3em] text-[#C14200]">
-                            Voice Crew Demo
+                        <img src={sonicLogo} alt="Sonic Drive-In logo" className="h-10 w-auto drop-shadow-sm" loading="lazy" />
+                        <span className="rounded-full bg-[#E40046]/10 px-3 py-1 text-xs font-black uppercase tracking-[0.3em] text-[#E40046]">
+                            Voice Ordering Demo
                         </span>
                     </div>
-                    <h1 className="text-4xl font-black leading-tight text-[#FF671F] sm:text-5xl">Dunkin ordering powered by Azure conversation intelligence</h1>
+                    <h1 className="text-4xl font-black leading-tight text-[#E40046] sm:text-5xl">Sonic ordering powered by Azure conversation intelligence</h1>
                     <p className="max-w-2xl text-base text-muted-foreground">
-                        Recreate the Dunkin drive-thru vibe with donuts, cold brew, and breakfast essentials styled after the current dunkindonuts.com
-                        experience—now voice activated with Azure OpenAI + Azure AI Search grounding.
+                        Recreate the Sonic Drive-In experience with slushes, burgers, and carhop favorites styled after America's Drive-In—now
+                        voice activated with Azure OpenAI + Azure AI Search grounding.
                     </p>
                     <div className="grid gap-3 sm:grid-cols-3">
                         {heroHighlights.map(highlight => (
@@ -428,19 +428,19 @@ function BrandHero() {
                     </div>
                 </div>
                 <div className="relative flex flex-1 items-center justify-center">
-                    <div className="absolute inset-0 -z-10 rounded-[32px] bg-gradient-to-br from-[#FFE0CF] via-[#FFF3EC] to-[#FFE4F5] opacity-80 blur-3xl"></div>
+                    <div className="absolute inset-0 -z-10 rounded-[32px] bg-gradient-to-br from-[#E40046]/10 via-[#F2F8FA] to-[#FEDD00]/15 opacity-80 blur-3xl"></div>
                     <div className="grid w-full gap-4 sm:grid-cols-2">
-                        <div className="rounded-3xl border border-[#FF9F45]/30 bg-white/90 p-4 shadow-[0_25px_45px_rgba(255,103,31,0.2)]">
+                        <div className="rounded-3xl border border-[#E40046]/20 bg-white/90 p-4 shadow-[0_25px_45px_rgba(228,0,70,0.12)]">
                             <div className="mb-3 flex items-center gap-3">
-                                <div className="rounded-2xl bg-[#FFF2E5] p-3">
-                                    <DonutArt />
+                                <div className="rounded-2xl bg-[#E40046]/10 p-3">
+                                    <SlushArt />
                                 </div>
                                 <div>
-                                    <p className="text-xs font-bold uppercase tracking-wide text-[#FF671F]">Fresh donuts</p>
-                                    <p className="text-sm font-semibold text-[#7A2E10]">MUNCHKINS assortment</p>
+                                    <p className="text-xs font-bold uppercase tracking-wide text-[#E40046]">Signature slushes</p>
+                                    <p className="text-sm font-semibold text-[#18344D]">Cherry Limeade & more</p>
                                 </div>
                             </div>
-                            <ul className="text-xs font-medium text-[#7A2E10]/80">
+                            <ul className="text-xs font-medium text-[#18344D]/80">
                                 {heroCallouts.map(callout => (
                                     <li key={callout.label} className="flex items-center justify-between rounded-full bg-white/80 px-3 py-1">
                                         <span>{callout.label}</span>
@@ -449,19 +449,19 @@ function BrandHero() {
                                 ))}
                             </ul>
                         </div>
-                        <div className="rounded-3xl border border-[#E3007F]/25 bg-gradient-to-br from-[#FFE5F2] to-[#FFECE0] p-4 shadow-[0_25px_45px_rgba(227,0,127,0.15)]">
+                        <div className="rounded-3xl border border-[#285780]/25 bg-gradient-to-br from-[#285780]/10 to-[#FEDD00]/10 p-4 shadow-[0_25px_45px_rgba(40,87,128,0.15)]">
                             <div className="mb-3 flex items-center gap-3">
                                 <div className="rounded-2xl bg-white/60 p-3">
-                                    <CoffeeArt />
+                                    <BurgerArt />
                                 </div>
                                 <div>
-                                    <p className="text-xs font-bold uppercase tracking-wide text-[#E3007F]">Crew favorite</p>
-                                    <p className="text-sm font-semibold text-[#7A2E10]">Brown Sugar Cream Cold Brew</p>
+                                    <p className="text-xs font-bold uppercase tracking-wide text-[#285780]">Carhop favorite</p>
+                                    <p className="text-sm font-semibold text-[#18344D]">SuperSONIC® Double Cheeseburger</p>
                                 </div>
                             </div>
-                            <div className="rounded-2xl bg-white/80 p-3 text-sm font-semibold text-[#7A2E10]">
-                                <p>Layered with cinnamon-sugar cold foam</p>
-                                <p className="text-xs text-[#E3007F]">Perfect pairing: Bacon Egg & Cheese</p>
+                            <div className="rounded-2xl bg-white/80 p-3 text-sm font-semibold text-[#18344D]">
+                                <p>100% pure beef with melty American cheese</p>
+                                <p className="text-xs text-[#E40046]">Perfect pairing: Large Tots & a Shake</p>
                             </div>
                         </div>
                     </div>
@@ -473,9 +473,9 @@ function BrandHero() {
 
 function HeroHighlightCard({ title, detail, tone }: { title: string; detail: string; tone: HighlightTone }) {
     const gradientMap: Record<HighlightTone, string> = {
-        orange: "from-[#FF671F] to-[#FF9F45]",
-        pink: "from-[#E3007F] to-[#FF9FC5]",
-        yellow: "from-[#FFD400] to-[#FFE784]"
+        red: "from-[#E40046] to-[#FF4D7A]",
+        blue: "from-[#285780] to-[#137AC9]",
+        yellow: "from-[#FEDD00] to-[#FFE84D]"
     };
 
     return (
@@ -493,14 +493,14 @@ function SessionTokenBanner({ identifiers }: { identifiers: SessionIdentifiersSt
     return (
         <div className="flex flex-wrap gap-2 rounded-3xl border border-white/40 bg-white/90 p-3 font-mono text-xs text-primary shadow-sm">
             <div className="flex items-center gap-2" title={identifiers.sessionToken}>
-                <span className="rounded-full bg-[#FFE3CB] px-2 py-1 font-semibold uppercase tracking-widest text-[#C14200]">Session Token</span>
-                <span className="text-sm text-[#7A2E10]">{truncatedSession}</span>
+                <span className="rounded-full bg-[#E40046]/10 px-2 py-1 font-semibold uppercase tracking-widest text-[#E40046]">Session Token</span>
+                <span className="text-sm text-[#18344D]">{truncatedSession}</span>
             </div>
             <div className="flex items-center gap-2" title={identifiers.roundTripToken}>
-                <span className="rounded-full bg-[#FEE6F3] px-2 py-1 font-semibold uppercase tracking-widest text-[#E3007F]">
+                <span className="rounded-full bg-[#285780]/10 px-2 py-1 font-semibold uppercase tracking-widest text-[#285780]">
                     Round {identifiers.roundTripIndex}
                 </span>
-                <span className="text-sm text-[#7A2E10]">{truncatedRoundTrip}</span>
+                <span className="text-sm text-[#18344D]">{truncatedRoundTrip}</span>
             </div>
         </div>
     );
@@ -516,30 +516,32 @@ function formatToken(token: string, prefix: number = 8, suffix: number = 4): str
     return `${token.slice(0, prefix)}…${token.slice(-suffix)}`;
 }
 
-function DonutArt() {
+function SlushArt() {
     return (
-        <svg width="48" height="48" viewBox="0 0 48 48" fill="none" role="img" aria-label="Dunkin donut illustration">
-            <circle cx="24" cy="24" r="22" fill="#FFE0EF" stroke="#E3007F" strokeWidth="2" />
-            <circle cx="24" cy="24" r="10" fill="#FFF8FB" stroke="#FF9FC5" strokeWidth="2" />
-            <path d="M12 22c3 4 8 6 12 4s8-1 12 1" stroke="#FF671F" strokeWidth="2" strokeLinecap="round" />
-            <path d="M16 30c2 1 4 1 6-1" stroke="#FFD400" strokeWidth="2" strokeLinecap="round" />
-            <circle cx="18" cy="16" r="1.2" fill="#FF671F" />
-            <circle cx="32" cy="18" r="1.2" fill="#FFD400" />
-            <circle cx="20" cy="33" r="1.2" fill="#E3007F" />
+        <svg width="48" height="48" viewBox="0 0 48 48" fill="none" role="img" aria-label="Sonic slush illustration">
+            <path d="M16 8h16l-2 32H18L16 8z" fill="#74D2E7" stroke="#285780" strokeWidth="2" />
+            <path d="M14 8h20v4H14z" fill="#285780" />
+            <path d="M20 16c2 3 6 3 8 0" stroke="#FEDD00" strokeWidth="2" strokeLinecap="round" />
+            <circle cx="22" cy="24" r="1.5" fill="#E40046" />
+            <circle cx="28" cy="20" r="1.5" fill="#E40046" />
+            <circle cx="24" cy="30" r="1.2" fill="#FEDD00" />
+            <path d="M24 4v4" stroke="#E40046" strokeWidth="2" strokeLinecap="round" />
+            <path d="M20 5l1 3" stroke="#285780" strokeWidth="1.5" strokeLinecap="round" />
         </svg>
     );
 }
 
-function CoffeeArt() {
+function BurgerArt() {
     return (
-        <svg width="48" height="48" viewBox="0 0 48 48" fill="none" role="img" aria-label="Dunkin iced coffee illustration">
-            <rect x="14" y="6" width="20" height="36" rx="10" fill="#FFE8D6" stroke="#FF671F" strokeWidth="2" />
-            <rect x="16" y="10" width="16" height="24" rx="8" fill="#F2C097" />
-            <rect x="16" y="18" width="16" height="8" fill="#D07A4A" opacity="0.8" />
-            <path d="M24 6V2" stroke="#E3007F" strokeWidth="2" strokeLinecap="round" />
-            <path d="M18 28l12-4" stroke="#FFECD1" strokeWidth="2" strokeLinecap="round" />
-            <circle cx="22" cy="24" r="1.2" fill="#FFECD1" />
-            <circle cx="26" cy="21" r="1.2" fill="#FFECD1" />
+        <svg width="48" height="48" viewBox="0 0 48 48" fill="none" role="img" aria-label="Sonic burger illustration">
+            <path d="M10 22c0-8 6-14 14-14s14 6 14 14H10z" fill="#FEDD00" stroke="#285780" strokeWidth="2" />
+            <rect x="9" y="22" width="30" height="4" rx="1" fill="#328500" />
+            <rect x="9" y="26" width="30" height="3" rx="1" fill="#E40046" />
+            <rect x="9" y="29" width="30" height="4" rx="1" fill="#C9CFD4" />
+            <path d="M10 33c0 4 6 7 14 7s14-3 14-7H10z" fill="#FEDD00" stroke="#285780" strokeWidth="2" />
+            <circle cx="16" cy="16" r="1" fill="#E40046" />
+            <circle cx="24" cy="13" r="1" fill="#E40046" />
+            <circle cx="32" cy="16" r="1" fill="#E40046" />
         </svg>
     );
 }
@@ -563,7 +565,7 @@ function App() {
         return null; // Auth provider will handle redirect
     }
 
-    return <CoffeeApp />;
+    return <SonicApp />;
 }
 
 export default function RootApp() {

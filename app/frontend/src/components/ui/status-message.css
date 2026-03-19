@@ -10,7 +10,7 @@
 .listening-equalizer .bar {
     width: 0.3rem;
     border-radius: 999px;
-    background: linear-gradient(180deg, #ff671f, #e3007f);
+    background: linear-gradient(180deg, #E40046, #285780);
     animation: barHeight1 1s ease-in-out infinite;
     opacity: 0.9;
 }

@@ -1,6 +1,6 @@
 {
     "app": {
-        "title": "Coffee Chat",
+        "title": "Sonic Voice Ordering",
         "footer": "Built with Azure AI, Azure OpenAI, and Azure Speech",
         "showTranscript": "Show transcript",
         "stopRecording": "Stop recording",
@@ -8,7 +8,7 @@
         "stopConversation": "Stop conversation"
     },
     "status": {
-        "notRecordingMessage": "Let's order some coffee!",
+        "notRecordingMessage": "Let's order from America's Drive-In!",
         "conversationInProgress": "Conversation in progress"
     },
     "history": {

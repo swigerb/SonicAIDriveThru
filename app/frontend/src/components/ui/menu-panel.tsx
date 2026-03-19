@@ -17,10 +17,11 @@ interface MenuCategory {
 }
 
 const categoryIcons: Record<string, string> = {
-    "Signature Lattes": "☕",
-    "Cold Beverages": "🧊",
-    "Donuts & Bakery": "🍩",
-    "Breakfast Sandwiches": "🥪",
+    "Burgers & Sandwiches": "🍔",
+    "Shakes & Ice Cream": "🥤",
+    "Slushes & Drinks": "🧊",
+    "Hot Dogs & Tots": "🌭",
+    "Combos": "🍟",
     Extras: "✨"
 };
 
@@ -33,7 +34,7 @@ export default function MenuPanel() {
             {menuItems.map(category => (
                 <div
                     key={category.category}
-                    className="rounded-3xl border border-primary/10 bg-white/80 p-4 shadow-[0_15px_35px_rgba(255,103,31,0.08)] dark:border-white/10 dark:bg-[#151317]/95 dark:shadow-[0_25px_55px_rgba(0,0,0,0.65)]"
+                    className="rounded-3xl border border-primary/10 bg-white/80 p-4 shadow-[0_15px_35px_rgba(40,87,128,0.08)] dark:border-white/10 dark:bg-[#0f1a24]/95 dark:shadow-[0_25px_55px_rgba(0,0,0,0.65)]"
                 >
                     <div className="mb-4 flex items-center justify-between gap-3">
                         <div className="flex flex-wrap items-center gap-2 sm:flex-nowrap sm:gap-3">
@@ -46,7 +47,7 @@ export default function MenuPanel() {
                                 </h3>
                             </div>
                         </div>
-                        <span className="whitespace-nowrap rounded-full bg-[#FFEBD2] px-3 py-1 text-xs font-bold text-[#C14200] dark:bg-[#2b1a13] dark:text-[#FFB38F]">
+                        <span className="whitespace-nowrap rounded-full bg-[#285780]/10 px-3 py-1 text-xs font-bold text-[#285780] dark:bg-[#152231] dark:text-[#74D2E7]">
                             {category.items.length} items
                         </span>
                     </div>

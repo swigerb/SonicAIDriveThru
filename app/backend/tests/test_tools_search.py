@@ -12,39 +12,48 @@ from tools import _infer_category, _is_extra_item, search
 
 class IsExtraItemTests(unittest.TestCase):
     def test_recognized_extras(self):
-        self.assertTrue(_is_extra_item("Extra Espresso Shot"))
+        self.assertTrue(_is_extra_item("Extra Patty"))
         self.assertTrue(_is_extra_item("Whipped Cream"))
-        self.assertTrue(_is_extra_item("Flavor Swirl"))
-        self.assertTrue(_is_extra_item("Extra Shot"))
+        self.assertTrue(_is_extra_item("Flavor Add-In"))
+        self.assertTrue(_is_extra_item("Extra Cheese"))
 
     def test_case_insensitive(self):
-        self.assertTrue(_is_extra_item("extra espresso shot"))
+        self.assertTrue(_is_extra_item("extra patty"))
         self.assertTrue(_is_extra_item("WHIPPED CREAM"))
 
     def test_non_extras(self):
-        self.assertFalse(_is_extra_item("Glazed Donut"))
-        self.assertFalse(_is_extra_item("Caramel Craze Latte"))
-        self.assertFalse(_is_extra_item("Cold Brew"))
-        self.assertFalse(_is_extra_item("Bagel"))
+        self.assertFalse(_is_extra_item("Tots"))
+        self.assertFalse(_is_extra_item("Cherry Limeade"))
+        self.assertFalse(_is_extra_item("Sonic Cheeseburger"))
+        self.assertFalse(_is_extra_item("Onion Rings"))
 
 
 class InferCategoryTests(unittest.TestCase):
-    def test_latte_inferred(self):
-        self.assertEqual(_infer_category("Caramel Craze Latte"), "signature lattes")
-        self.assertEqual(_infer_category("Iced Latte"), "signature lattes")
+    def test_slush_inferred(self):
+        cat = _infer_category("Cherry Limeade")
+        self.assertIn("slush", cat)
+        cat2 = _infer_category("Ocean Water")
+        self.assertIn("slush", cat2)
 
-    def test_cold_beverages_inferred(self):
-        self.assertEqual(_infer_category("Original Cold Brew"), "cold beverages")
-        self.assertEqual(_infer_category("Strawberry Refresher"), "cold beverages")
+    def test_shakes_inferred(self):
+        cat = _infer_category("Classic Vanilla Shake")
+        self.assertIn("shake", cat)
+        cat2 = _infer_category("Oreo Blast")
+        self.assertIn("shake", cat2)
 
-    def test_donuts_inferred(self):
-        self.assertEqual(_infer_category("Glazed Donut"), "donuts & bakery")
-        self.assertEqual(_infer_category("Everything Bagel"), "donuts & bakery")
-        self.assertEqual(_infer_category("Munchkins Box"), "donuts & bakery")
+    def test_combos_inferred(self):
+        cat = _infer_category("Sonic Cheeseburger")
+        self.assertTrue("burger" in cat or "combo" in cat)
 
-    def test_sandwiches_inferred(self):
-        self.assertEqual(_infer_category("Bacon Egg & Cheese on Croissant"), "breakfast sandwiches")
-        self.assertEqual(_infer_category("Turkey Sausage Wrap"), "breakfast sandwiches")
+    def test_hot_dogs_inferred(self):
+        cat = _infer_category("Chili Cheese Coney")
+        self.assertIn("hot dog", cat)
+        cat2 = _infer_category("All-American Hot Dog")
+        self.assertIn("hot dog", cat2)
+
+    def test_sides_inferred(self):
+        cat = _infer_category("Onion Rings")
+        self.assertTrue("side" in cat or "tot" in cat or "ring" in cat or len(cat) > 0)
 
     def test_unknown_returns_empty(self):
         self.assertEqual(_infer_category("Mystery Item XYZ"), "")

@@ -1,295 +1,359 @@
 {
     "menuItems": [
         {
-            "category": "Coffee",
+            "category": "Slushes",
             "items": [
                 {
-                    "name": "Espresso",
-                    "description": "Rich and bold single or double shot",
-                    "longDescription": "Espresso is the quintessential coffee experience, brewed under pressure to extract its bold, rich flavor. A favorite in Italy and around the world, it forms the base for many coffee drinks, including cappuccinos and lattes. Perfect for those who enjoy an intense coffee kick with a creamy layer of crema.",
-                    "origin": "Italy",
-                    "caffeineContent": "63 mg per shot",
-                    "brewingMethod": "Espresso Machine",
-                    "popularity": "High",
+                    "name": "Cherry Limeade",
+                    "description": "Sonic's iconic cherry-flavored limeade slush",
+                    "longDescription": "A Sonic Drive-In classic combining real cherry flavor with tangy limeade, blended with Sonic's signature ice for the perfect refreshing slush. A guest favorite since day one.",
+                    "origin": "Sonic Drive-In",
+                    "caffeineContent": "0 mg",
+                    "brewingMethod": "Blended",
+                    "popularity": "Iconic",
                     "sizes": [
-                        {
-                            "size": "single",
-                            "price": 1
-                        },
-                        {
-                            "size": "double",
-                            "price": 2
-                        }
+                        { "size": "small", "price": 2.49 },
+                        { "size": "medium", "price": 2.99 },
+                        { "size": "large", "price": 3.49 },
+                        { "size": "route 44", "price": 3.99 }
                     ]
                 },
                 {
-                    "name": "Americano",
-                    "description": "Espresso with hot water",
-                    "longDescription": "The Americano is a smooth, diluted espresso drink inspired by American GIs in Italy during WWII who added water to espresso to mimic drip coffee. It retains the rich essence of espresso while offering a milder flavor profile, perfect for those who prefer a less intense coffee experience.",
-                    "origin": "United States",
-                    "caffeineContent": "95 mg for medium",
-                    "brewingMethod": "Espresso Machine with water dilution",
-                    "popularity": "Moderate",
+                    "name": "Ocean Water",
+                    "description": "Coconut-flavored Sprite with a stunning blue color",
+                    "longDescription": "A tropical twist on a classic — Sprite blended with coconut flavor and a splash of blue for that unmistakable ocean look. Refreshing and unique to Sonic.",
+                    "origin": "Sonic Drive-In",
+                    "caffeineContent": "0 mg",
+                    "brewingMethod": "Blended",
+                    "popularity": "Fan Favorite",
                     "sizes": [
-                        {
-                            "size": "small",
-                            "price": 2.5
-                        },
-                        {
-                            "size": "medium",
-                            "price": 4
-                        },
-                        {
-                            "size": "large",
-                            "price": 5
-                        }
+                        { "size": "small", "price": 2.49 },
+                        { "size": "medium", "price": 2.99 },
+                        { "size": "large", "price": 3.49 },
+                        { "size": "route 44", "price": 3.99 }
                     ]
                 },
                 {
-                    "name": "Cappuccino",
-                    "description": "Espresso with steamed milk and foam",
-                    "longDescription": "Cappuccino combines the boldness of espresso with a luxurious layer of steamed milk and a light, frothy foam topping. Originating in Italy, it's a classic choice for those who enjoy a balanced, creamy texture with every sip.",
-                    "origin": "Italy",
-                    "caffeineContent": "75 mg for medium",
-                    "brewingMethod": "Espresso Machine with milk frothing",
+                    "name": "Blue Raspberry Slush",
+                    "description": "Sweet and tangy blue raspberry flavored slush",
+                    "longDescription": "Bold blue raspberry flavor blended with Sonic's famous ice for a sweet, tangy, and refreshingly cold treat.",
+                    "origin": "Sonic Drive-In",
+                    "caffeineContent": "0 mg",
+                    "brewingMethod": "Blended",
                     "popularity": "High",
                     "sizes": [
-                        {
-                            "size": "small",
-                            "price": 3.5
-                        },
-                        {
-                            "size": "medium",
-                            "price": 4.5
-                        },
-                        {
-                            "menuItems": [
-                                {
-                                    "category": "Signature Lattes",
-                                    "items": [
-                                        {
-                                            "name": "Caramel Craze Latte",
-                                            "description": "Espresso with caramel drizzle and whipped cream",
-                                            "longDescription": "A Dunkin signature latte layered with bold espresso, caramel swirl, and steamed milk topped with whipped cream and caramel drizzle.",
-                                            "origin": "Dunkin U.S. Menu",
-                                            "caffeineContent": "166 mg (medium)",
-                                            "brewingMethod": "Espresso machine",
-                                            "popularity": "Guest Favorite",
-                                            "sizes": [
-                                                { "size": "small", "price": 4.49 },
-                                                { "size": "medium", "price": 4.99 },
-                                                { "size": "large", "price": 5.49 }
-                                            ]
-                                        },
-                                        {
-                                            "name": "Cocoa Mocha Latte",
-                                            "description": "Chocolate-forward espresso drink finished with mocha drizzle",
-                                            "longDescription": "Balanced espresso, mocha swirl, and steamed milk create a smooth chocolate latte crowned with whipped cream and cocoa powder.",
-                                            "origin": "Inspire Brands Innovation Lab",
-                                            "caffeineContent": "170 mg (medium)",
-                                            "brewingMethod": "Espresso machine",
-                                            "popularity": "Seasonal Spotlight",
-                                            "sizes": [
-                                                { "size": "small", "price": 4.59 },
-                                                { "size": "medium", "price": 5.09 },
-                                                { "size": "large", "price": 5.59 }
-                                            ]
-                                        },
-                                        {
-                                            "name": "Toasted Almond Cold Foam Latte",
-                                            "description": "Iced latte with toasted almond swirl and cold foam cap",
-                                            "longDescription": "Chilled espresso poured over ice with toasted almond flavor and vanilla cold foam for layered texture and sweetness.",
-                                            "origin": "Dunkin Next-Gen Restaurant",
-                                            "caffeineContent": "187 mg (medium)",
-                                            "brewingMethod": "Espresso over ice",
-                                            "popularity": "Emerging Favorite",
-                                            "sizes": [
-                                                { "size": "small", "price": 4.79 },
-                                                { "size": "medium", "price": 5.29 },
-                                                { "size": "large", "price": 5.79 }
-                                            ]
-                                        }
-                                    ]
-                                },
-                                {
-                                    "category": "Cold Beverages",
-                                    "items": [
-                                        {
-                                            "name": "Original Cold Brew",
-                                            "description": "12-hour steeped cold brew over ice",
-                                            "longDescription": "Smooth, full-bodied cold brew handcrafted daily and served over ice. Add cold foam or a swirl for personalization.",
-                                            "origin": "Dunkin Breweries",
-                                            "caffeineContent": "260 mg (medium)",
-                                            "brewingMethod": "Cold steep",
-                                            "popularity": "High",
-                                            "sizes": [
-                                                { "size": "small", "price": 3.79 },
-                                                { "size": "medium", "price": 4.29 },
-                                                { "size": "large", "price": 4.79 }
-                                            ]
-                                        },
-                                        {
-                                            "name": "Strawberry Dragonfruit Refresher",
-                                            "description": "Green tea-based refresher with B vitamins",
-                                            "longDescription": "Vibrant strawberry dragonfruit flavor balanced with green tea and B vitamins for a light, energizing beverage.",
-                                            "origin": "Dunkin Beverage Innovation",
-                                            "caffeineContent": "99 mg (medium)",
-                                            "brewingMethod": "Green tea infusion",
-                                            "popularity": "Always On Menu",
-                                            "sizes": [
-                                                { "size": "small", "price": 3.29 },
-                                                { "size": "medium", "price": 3.79 },
-                                                { "size": "large", "price": 4.29 }
-                                            ]
-                                        },
-                                        {
-                                            "name": "Brown Sugar Cream Cold Brew",
-                                            "description": "Cold brew with brown sugar syrup and cinnamon-sugar cold foam",
-                                            "longDescription": "Slow-steeped cold brew sweetened with brown sugar syrup and topped with cinnamon-sugar dusted cold foam.",
-                                            "origin": "Inspire Brands Test Kitchen",
-                                            "caffeineContent": "267 mg (medium)",
-                                            "brewingMethod": "Cold steep",
-                                            "popularity": "Limited Time Feature",
-                                            "sizes": [
-                                                { "size": "small", "price": 4.29 },
-                                                { "size": "medium", "price": 4.79 },
-                                                { "size": "large", "price": 5.29 }
-                                            ]
-                                        }
-                                    ]
-                                },
-                                {
-                                    "category": "Donuts & Bakery",
-                                    "items": [
-                                        {
-                                            "name": "Glazed Donut",
-                                            "description": "Classic yeast donut coated in vanilla glaze",
-                                            "longDescription": "Soft, airy donut finished with a signature sweet glaze. Perfect with hot or iced coffee.",
-                                            "origin": "Dunkin Bakery",
-                                            "caffeineContent": "0 mg",
-                                            "brewingMethod": "Baked",
-                                            "popularity": "Iconic",
-                                            "sizes": [
-                                                { "size": "standard", "price": 1.49 }
-                                            ]
-                                        },
-                                        {
-                                            "name": "Boston Kreme Donut",
-                                            "description": "Custard-filled donut topped with chocolate icing",
-                                            "longDescription": "A nod to Dunkin's New England roots featuring silky Bavarian cream and rich chocolate icing.",
-                                            "origin": "Boston, MA",
-                                            "caffeineContent": "0 mg",
-                                            "brewingMethod": "Baked",
-                                            "popularity": "Regional Favorite",
-                                            "sizes": [
-                                                { "size": "standard", "price": 1.79 }
-                                            ]
-                                        },
-                                        {
-                                            "name": "Everything Bagel & Cream Cheese",
-                                            "description": "Toasted everything bagel with plain cream cheese",
-                                            "longDescription": "Sesame, poppy seeds, garlic, and onion topped bagel served with cool cream cheese spread.",
-                                            "origin": "Dunkin Bakery",
-                                            "caffeineContent": "0 mg",
-                                            "brewingMethod": "Baked",
-                                            "popularity": "Morning Rush MVP",
-                                            "sizes": [
-                                                { "size": "standard", "price": 3.29 }
-                                            ]
-                                        },
-                                        {
-                                            "name": "MUNCHKINS Donut Hole Treats (10 ct)",
-                                            "description": "Assorted bite-sized donuts",
-                                            "longDescription": "Shareable assortment of glazed, chocolate, and jelly MUNCHKINS donut holes.",
-                                            "origin": "Dunkin Bakery",
-                                            "caffeineContent": "0 mg",
-                                            "brewingMethod": "Baked",
-                                            "popularity": "Group Favorite",
-                                            "sizes": [
-                                                { "size": "standard", "price": 3.99 }
-                                            ]
-                                        }
-                                    ]
-                                },
-                                {
-                                    "category": "Breakfast Sandwiches",
-                                    "items": [
-                                        {
-                                            "name": "Bacon Egg & Cheese on Croissant",
-                                            "description": "Cherrywood smoked bacon, eggs, and American cheese",
-                                            "longDescription": "Flaky croissant stacked with cherrywood smoked bacon, fluffy eggs, and melty cheese.",
-                                            "origin": "Dunkin Kitchens",
-                                            "caffeineContent": "0 mg",
-                                            "brewingMethod": "Griddled",
-                                            "popularity": "Top Seller",
-                                            "sizes": [
-                                                { "size": "standard", "price": 4.99 }
-                                            ]
-                                        },
-                                        {
-                                            "name": "Power Breakfast Sandwich",
-                                            "description": "Multi-grain bread with turkey sausage and egg whites",
-                                            "longDescription": "Veggie egg white omelet, turkey sausage, and aged white cheddar on seeded multigrain bread.",
-                                            "origin": "Inspire Brands Nutrition Lab",
-                                            "caffeineContent": "0 mg",
-                                            "brewingMethod": "Griddled",
-                                            "popularity": "Balanced Choice",
-                                            "sizes": [
-                                                { "size": "standard", "price": 5.49 }
-                                            ]
-                                        },
-                                        {
-                                            "name": "Turkey Sausage Wake-Up Wrap",
-                                            "description": "Egg and turkey sausage in a warm tortilla",
-                                            "longDescription": "Portable protein with scrambled egg, turkey sausage, and American cheese inside a grilled tortilla.",
-                                            "origin": "Dunkin Anytime Menu",
-                                            "caffeineContent": "0 mg",
-                                            "brewingMethod": "Griddled",
-                                            "popularity": "Value Leader",
-                                            "sizes": [
-                                                { "size": "standard", "price": 2.59 }
-                                            ]
-                                        }
-                                    ]
-                                },
-                                {
-                                    "category": "Extras",
-                                    "items": [
-                                        {
-                                            "name": "Flavor Swirl Add-On",
-                                            "description": "Caramel, mocha, French vanilla, or seasonal swirl",
-                                            "longDescription": "Rich, creamy swirls add sweetness and color to any hot or iced beverage.",
-                                            "origin": "Dunkin Beverage Line",
-                                            "caffeineContent": "0 mg",
-                                            "availability": "Always",
-                                            "sizes": [
-                                                { "size": "standard", "price": 0.75 }
-                                            ]
-                                        },
-                                        {
-                                            "name": "Whipped Cream",
-                                            "description": "Add whipped cream topping",
-                                            "longDescription": "Finish drinks with house-made whipped cream for extra texture and presentation.",
-                                            "origin": "Dunkin Beverage Line",
-                                            "caffeineContent": "0 mg",
-                                            "availability": "Always",
-                                            "sizes": [
-                                                { "size": "standard", "price": 0.5 }
-                                            ]
-                                        },
-                                        {
-                                            "name": "Extra Espresso Shot",
-                                            "description": "Add one additional espresso shot",
-                                            "longDescription": "Boost any beverage with a fresh-pulled Dunkin espresso shot for added intensity.",
-                                            "origin": "Dunkin Espresso Bar",
-                                            "caffeineContent": "75 mg per shot",
-                                            "availability": "Always",
-                                            "sizes": [
-                                                { "size": "standard", "price": 1 }
-                                            ]
-                                        }
-                                    ]
-                                }
-                            ]
-                        }
+                        { "size": "small", "price": 2.29 },
+                        { "size": "medium", "price": 2.79 },
+                        { "size": "large", "price": 3.29 },
+                        { "size": "route 44", "price": 3.79 }
+                    ]
+                }
+            ]
+        },
+        {
+            "category": "Shakes",
+            "items": [
+                {
+                    "name": "Classic Vanilla Shake",
+                    "description": "Hand-mixed real ice cream vanilla shake",
+                    "longDescription": "Real vanilla ice cream hand-mixed to thick, creamy perfection and topped with whipped cream and a cherry. A timeless Sonic classic.",
+                    "origin": "Sonic Drive-In",
+                    "caffeineContent": "0 mg",
+                    "brewingMethod": "Hand-mixed",
+                    "popularity": "High",
                     "sizes": [
+                        { "size": "small", "price": 3.99 },
+                        { "size": "medium", "price": 4.49 },
+                        { "size": "large", "price": 4.99 }
+                    ]
+                },
+                {
+                    "name": "Oreo Peanut Butter Shake",
+                    "description": "Peanut butter shake blended with Oreo cookie pieces",
+                    "longDescription": "Creamy peanut butter ice cream shake blended with real Oreo cookie pieces for the ultimate indulgent treat.",
+                    "origin": "Sonic Drive-In",
+                    "caffeineContent": "0 mg",
+                    "brewingMethod": "Hand-mixed",
+                    "popularity": "Guest Favorite",
+                    "sizes": [
+                        { "size": "small", "price": 4.49 },
+                        { "size": "medium", "price": 4.99 },
+                        { "size": "large", "price": 5.49 }
+                    ]
+                },
+                {
+                    "name": "Chocolate Shake",
+                    "description": "Rich chocolate ice cream shake with whipped cream",
+                    "longDescription": "Thick, hand-mixed chocolate ice cream shake topped with whipped cream and a cherry. Pure chocolate bliss.",
+                    "origin": "Sonic Drive-In",
+                    "caffeineContent": "0 mg",
+                    "brewingMethod": "Hand-mixed",
+                    "popularity": "High",
+                    "sizes": [
+                        { "size": "small", "price": 3.99 },
+                        { "size": "medium", "price": 4.49 },
+                        { "size": "large", "price": 4.99 }
+                    ]
+                }
+            ]
+        },
+        {
+            "category": "Burgers",
+            "items": [
+                {
+                    "name": "Sonic Cheeseburger",
+                    "description": "Quarter-pound beef patty with American cheese, lettuce, tomato, and pickles",
+                    "longDescription": "A juicy quarter-pound 100% pure beef patty topped with melty American cheese, crisp lettuce, ripe tomato, crunchy pickles, onions, and mayo on a toasted brioche bun.",
+                    "origin": "Sonic Drive-In",
+                    "caffeineContent": "0 mg",
+                    "brewingMethod": "Grilled",
+                    "popularity": "Top Seller",
+                    "sizes": [
+                        { "size": "standard", "price": 5.99 }
+                    ]
+                },
+                {
+                    "name": "SuperSONIC Double Cheeseburger",
+                    "description": "Two quarter-pound patties with all the toppings",
+                    "longDescription": "Two juicy quarter-pound beef patties stacked with American cheese, mayo, lettuce, tomato, and pickles on a toasted bun. The ultimate Sonic burger experience.",
+                    "origin": "Sonic Drive-In",
+                    "caffeineContent": "0 mg",
+                    "brewingMethod": "Grilled",
+                    "popularity": "Iconic",
+                    "sizes": [
+                        { "size": "standard", "price": 7.99 }
+                    ]
+                },
+                {
+                    "name": "Sonic Bacon Cheeseburger",
+                    "description": "Cheeseburger topped with crispy bacon strips",
+                    "longDescription": "Quarter-pound beef patty with crispy bacon, American cheese, lettuce, tomato, pickles, and mayo on a toasted bun.",
+                    "origin": "Sonic Drive-In",
+                    "caffeineContent": "0 mg",
+                    "brewingMethod": "Grilled",
+                    "popularity": "High",
+                    "sizes": [
+                        { "size": "standard", "price": 6.99 }
+                    ]
+                }
+            ]
+        },
+        {
+            "category": "Hot Dogs",
+            "items": [
+                {
+                    "name": "All-American Dog",
+                    "description": "Beef hot dog with ketchup, mustard, and relish",
+                    "longDescription": "A premium beef hot dog served with classic ketchup, yellow mustard, and sweet relish on a soft bun. Simple, satisfying, and all-American.",
+                    "origin": "Sonic Drive-In",
+                    "caffeineContent": "0 mg",
+                    "brewingMethod": "Grilled",
+                    "popularity": "Classic",
+                    "sizes": [
+                        { "size": "standard", "price": 3.49 }
+                    ]
+                },
+                {
+                    "name": "Chili Cheese Coney",
+                    "description": "Beef hot dog topped with Sonic's chili and melted cheese",
+                    "longDescription": "A Sonic signature — premium beef hot dog smothered in warm chili and topped with shredded cheddar cheese. A drive-in icon.",
+                    "origin": "Sonic Drive-In",
+                    "caffeineContent": "0 mg",
+                    "brewingMethod": "Grilled",
+                    "popularity": "Iconic",
+                    "sizes": [
+                        { "size": "standard", "price": 3.99 }
+                    ]
+                }
+            ]
+        },
+        {
+            "category": "Sides",
+            "items": [
+                {
+                    "name": "Tots",
+                    "description": "Crispy golden tater tots",
+                    "longDescription": "Sonic's famous bite-sized tots, fried to crispy golden perfection. A drive-in essential and the perfect side for any meal.",
+                    "origin": "Sonic Drive-In",
+                    "caffeineContent": "0 mg",
+                    "brewingMethod": "Fried",
+                    "popularity": "Iconic",
+                    "sizes": [
+                        { "size": "small", "price": 2.29 },
+                        { "size": "medium", "price": 2.79 },
+                        { "size": "large", "price": 3.29 }
+                    ]
+                },
+                {
+                    "name": "Chili Cheese Tots",
+                    "description": "Tots topped with chili and melted cheese",
+                    "longDescription": "Crispy golden tots loaded with warm Sonic chili and melted cheddar cheese. Indulgent, shareable, and unforgettable.",
+                    "origin": "Sonic Drive-In",
+                    "caffeineContent": "0 mg",
+                    "brewingMethod": "Fried",
+                    "popularity": "Fan Favorite",
+                    "sizes": [
+                        { "size": "small", "price": 3.29 },
+                        { "size": "medium", "price": 3.79 },
+                        { "size": "large", "price": 4.29 }
+                    ]
+                },
+                {
+                    "name": "Onion Rings",
+                    "description": "Thick-cut, hand-battered onion rings",
+                    "longDescription": "Hand-battered, thick-cut onion rings fried to golden crispy perfection. A satisfying crunch in every bite.",
+                    "origin": "Sonic Drive-In",
+                    "caffeineContent": "0 mg",
+                    "brewingMethod": "Fried",
+                    "popularity": "High",
+                    "sizes": [
+                        { "size": "small", "price": 2.49 },
+                        { "size": "medium", "price": 2.99 },
+                        { "size": "large", "price": 3.49 }
+                    ]
+                },
+                {
+                    "name": "Mozzarella Sticks",
+                    "description": "Breaded mozzarella sticks with marinara sauce",
+                    "longDescription": "Golden-fried mozzarella sticks with stretchy, melty cheese inside, served with warm marinara dipping sauce.",
+                    "origin": "Sonic Drive-In",
+                    "caffeineContent": "0 mg",
+                    "brewingMethod": "Fried",
+                    "popularity": "High",
+                    "sizes": [
+                        { "size": "standard", "price": 3.99 }
+                    ]
+                }
+            ]
+        },
+        {
+            "category": "Breakfast",
+            "items": [
+                {
+                    "name": "SuperSONIC Breakfast Burrito",
+                    "description": "Flour tortilla stuffed with eggs, sausage, cheese, tomato, and jalapeños",
+                    "longDescription": "A hearty flour tortilla packed with scrambled eggs, seasoned sausage, melty cheddar cheese, diced tomatoes, and jalapeños for a spicy morning kick.",
+                    "origin": "Sonic Drive-In",
+                    "caffeineContent": "0 mg",
+                    "brewingMethod": "Griddled",
+                    "popularity": "Top Seller",
+                    "sizes": [
+                        { "size": "standard", "price": 4.49 }
+                    ]
+                },
+                {
+                    "name": "Bacon Breakfast Toaster",
+                    "description": "Thick-cut bacon, eggs, and cheese on Texas toast",
+                    "longDescription": "Thick-cut bacon, fluffy eggs, and melted American cheese sandwiched between two slices of golden Texas toast.",
+                    "origin": "Sonic Drive-In",
+                    "caffeineContent": "0 mg",
+                    "brewingMethod": "Griddled",
+                    "popularity": "Morning Favorite",
+                    "sizes": [
+                        { "size": "standard", "price": 4.99 }
+                    ]
+                },
+                {
+                    "name": "French Toast Sticks",
+                    "description": "Crispy French toast sticks served with syrup",
+                    "longDescription": "Golden, crispy French toast sticks dusted with cinnamon sugar and served with sweet syrup for dipping.",
+                    "origin": "Sonic Drive-In",
+                    "caffeineContent": "0 mg",
+                    "brewingMethod": "Fried",
+                    "popularity": "Kid Favorite",
+                    "sizes": [
+                        { "size": "standard", "price": 2.99 }
+                    ]
+                }
+            ]
+        },
+        {
+            "category": "Drinks",
+            "items": [
+                {
+                    "name": "Sonic Sweet Iced Tea",
+                    "description": "Fresh-brewed sweet iced tea",
+                    "longDescription": "Refreshing fresh-brewed iced tea sweetened just right. A perfect complement to any Sonic meal.",
+                    "origin": "Sonic Drive-In",
+                    "caffeineContent": "25 mg (medium)",
+                    "brewingMethod": "Brewed",
+                    "popularity": "Always On Menu",
+                    "sizes": [
+                        { "size": "small", "price": 1.69 },
+                        { "size": "medium", "price": 1.99 },
+                        { "size": "large", "price": 2.29 },
+                        { "size": "route 44", "price": 2.59 }
+                    ]
+                },
+                {
+                    "name": "Lemonade",
+                    "description": "Real lemonade made with pure cane sugar",
+                    "longDescription": "Cool, refreshing lemonade made with real lemons and pure cane sugar. Simple, classic, and perfectly tart.",
+                    "origin": "Sonic Drive-In",
+                    "caffeineContent": "0 mg",
+                    "brewingMethod": "Mixed",
+                    "popularity": "High",
+                    "sizes": [
+                        { "size": "small", "price": 1.99 },
+                        { "size": "medium", "price": 2.49 },
+                        { "size": "large", "price": 2.99 },
+                        { "size": "route 44", "price": 3.49 }
+                    ]
+                },
+                {
+                    "name": "Soft Drink",
+                    "description": "Coca-Cola, Diet Coke, Sprite, Dr Pepper, or other fountain drinks",
+                    "longDescription": "Choose from a wide selection of fountain drinks including Coca-Cola, Diet Coke, Sprite, Dr Pepper, and more — served ice-cold with Sonic's famous ice.",
+                    "origin": "Sonic Drive-In",
+                    "caffeineContent": "Varies",
+                    "brewingMethod": "Fountain",
+                    "popularity": "Always On Menu",
+                    "sizes": [
+                        { "size": "small", "price": 1.49 },
+                        { "size": "medium", "price": 1.79 },
+                        { "size": "large", "price": 2.09 },
+                        { "size": "route 44", "price": 2.49 }
+                    ]
+                }
+            ]
+        },
+        {
+            "category": "Extras",
+            "items": [
+                {
+                    "name": "Flavor Add-In",
+                    "description": "Cherry, vanilla, grape, strawberry, or other flavor add-in",
+                    "longDescription": "Customize any drink with a splash of flavor. Choose from cherry, vanilla, grape, strawberry, and more for a personalized twist.",
+                    "origin": "Sonic Drive-In",
+                    "caffeineContent": "0 mg",
+                    "availability": "Always",
+                    "sizes": [
+                        { "size": "standard", "price": 0.50 }
+                    ]
+                },
+                {
+                    "name": "Whipped Cream",
+                    "description": "Add whipped cream topping",
+                    "longDescription": "Top off any shake or drink with a generous swirl of whipped cream for extra indulgence.",
+                    "origin": "Sonic Drive-In",
+                    "caffeineContent": "0 mg",
+                    "availability": "Always",
+                    "sizes": [
+                        { "size": "standard", "price": 0.50 }
+                    ]
+                },
+                {
+                    "name": "Extra Patty",
+                    "description": "Add an extra quarter-pound beef patty to any burger",
+                    "longDescription": "Stack it up with an extra quarter-pound 100% beef patty on any burger for the ultimate drive-in feast.",
+                    "origin": "Sonic Drive-In",
+                    "caffeineContent": "0 mg",
+                    "availability": "Always",
+                    "sizes": [
+                        { "size": "standard", "price": 1.50 }
+                    ]
+                }
+            ]
+        }
+    ]
+}

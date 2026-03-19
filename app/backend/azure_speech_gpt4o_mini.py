@@ -96,7 +96,7 @@ def generate_text(prompt):
         response = aoai_client.chat.completions.create(
             model=aoai_gpt4o_mini_deployment,
             messages=[
-                {"role": "system", "content": "You are a friendly barista helping customers place coffee orders."},
+                {"role": "system", "content": "You are a friendly Sonic Drive-In carhop helping customers place their orders at America's Drive-In."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.6,

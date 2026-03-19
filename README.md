@@ -1,14 +1,14 @@
-# Dunkin Voice Chat Assistant
+# Sonic Voice Chat Assistant
 
-Dunkin Voice Chat Assistant is an Inspire Brands–themed, voice-driven ordering experience that showcases Microsoft best practices for Azure OpenAI GPT-4o Realtime, Azure AI Search, and Azure Container Apps. The experience emulates a Dunkin crew member who can search the official menu, hold multilingual conversations, and keep orders in sync across devices.
+Sonic Voice Chat Assistant is a Sonic Drive-In–themed, voice-driven ordering experience that showcases Microsoft best practices for Azure OpenAI GPT-4o Realtime, Azure AI Search, and Azure Container Apps. The experience emulates a Sonic carhop who can search the official menu, hold multilingual conversations, and keep orders in sync across devices.
 
-As guests speak, real-time transcription, translation, and order management provide a transparent view of every choice...from signature lattes to bakery classics. The UI applies Dunkin's vibrant design language so stakeholders can picture how voice AI augments drive-thru, curbside, and kiosk flows.
+As guests speak, real-time transcription, translation, and order management provide a transparent view of every choice...from slushes and shakes to burgers and tots. The UI applies Sonic's vibrant design language so stakeholders can picture how voice AI augments drive-in, carhop, and kiosk flows.
 
 Beyond coffee fans, this sample demonstrates how Microsoft’s Responsible AI guidance plus Azure-first tooling enable inclusive, hands-free interactions for franchise teams, accessibility scenarios, and mixed fleet deployments across the Inspire Brands portfolio.
 
 ## Table of Contents
 
-- [Dunkin Voice Chat Assistant](#dunkin-voice-chat-assistant)
+- [Sonic Voice Chat Assistant](#sonic-voice-chat-assistant)
   - [Table of Contents](#table-of-contents)
   - [Acknowledgment](#acknowledgment)
   - [Visual Demonstrations](#visual-demonstrations)
@@ -35,9 +35,9 @@ Beyond coffee fans, this sample demonstrates how Microsoft’s Responsible AI gu
 
 ## Acknowledgment
 
-This project extends the [VoiceRAG Repository](https://github.com/Azure-Samples/aisearch-openai-rag-audio), adapting its Microsoft-first architecture for a Dunkin scenario. Review the original pattern in this [blog post](https://aka.ms/voicerag). For the upstream README, see [voice_rag_README.md](voice_rag_README.md).
+This project extends the [VoiceRAG Repository](https://github.com/Azure-Samples/aisearch-openai-rag-audio), adapting its Microsoft-first architecture for a Sonic Drive-In scenario. Review the original pattern in this [blog post](https://aka.ms/voicerag). For the upstream README, see [voice_rag_README.md](voice_rag_README.md).
 
-Special thanks to [John Carroll](https://github.com/john-carroll-sw) for the original [coffee-chat-voice-assistant](https://github.com/john-carroll-sw/coffee-chat-voice-assistant) that inspired this sample. This fork updates to the latest OpenAI models and stirs in a few extra flavors—call it my own brew of the solution.
+Special thanks to [John Carroll](https://github.com/john-carroll-sw) for the original [coffee-chat-voice-assistant](https://github.com/john-carroll-sw/coffee-chat-voice-assistant) that inspired this sample. This fork updates to the latest OpenAI models and adds a Sonic Drive-In twist to the solution.
 
 ## Visual Demonstrations
 
@@ -45,11 +45,11 @@ Special thanks to [John Carroll](https://github.com/john-carroll-sw) for the ori
 
 ## Features
 
-- **Dunkin-specific conversational AI**: GPT-4o Realtime is constrained to verified menu data through Azure AI Search so it always sounds like a Dunkin crew member.
+- **Sonic-specific conversational AI**: GPT-4o Realtime is constrained to verified menu data through Azure AI Search so it always sounds like a Sonic carhop.
 - **Retrieval-Augmented Generation (RAG)**: Azure OpenAI tool-calling plus semantic hybrid search keep recommendations grounded with pricing, nutrition, and add-on guidance.
 - **Real-Time Transcription + Translation**: Multilingual guests receive accurate transcripts in their language of choice with instant pivots between English, Spanish, Mandarin, French, and more.
-- **Live Order Synchronization**: Function calls update the shared cart so kiosk screens, mobile devices, and drive-thru headsets stay aligned without race conditions.
-- **Audio Output + Accessibility**: Browser audio playback mirrors what a guest would hear over drive-thru speakers, supporting screenless or low-vision ordering.
+- **Live Order Synchronization**: Function calls update the shared cart so drive-in screens, mobile devices, and carhop tablets stay aligned without race conditions.
+- **Audio Output + Accessibility**: Browser audio playback mirrors what a guest would hear at a Sonic stall, supporting screenless or low-vision ordering.
 - **Durable Session Tokens**: Every realtime conversation emits a session token plus per-turn identifiers so transcripts can map back to telemetry, QA findings, or Azure logs.
 
 ### Architecture Diagram
@@ -96,7 +96,7 @@ You can run the project in your local VS Code Dev Container using the [Dev Conta
   The script installs the Azure CLI, signs you in, and verifies Docker availability for you.
 
   Alternatively, manually install [Azure Developer CLI](https://aka.ms/azure-dev/install), [Node.js](https://nodejs.org/), [Python >=3.11](https://www.python.org/downloads/), [Git](https://git-scm.com/downloads), and [Docker Desktop](https://www.docker.com/products/docker-desktop).
-  2. Clone your GitHub repository (`git clone https://github.com/swigerb/dunkin-chat-voice-assistant.git`)
+  2. Clone your GitHub repository (`git clone https://github.com/swigerb/sonic-ai-drive-thru.git`)
   3. Proceed to the next section to [deploy the app](#deploying-to-azure).
 
 ## Ingesting Menu Items into Azure AI Search
@@ -196,11 +196,11 @@ Alternatively, you can manually build and run the Docker container:
 # cp ./app/frontend/.env-sample ./app/frontend/.env
 
 # Build the Docker image
-docker build -t coffee-chat-app \
+docker build -t sonic-drive-in-app \
   -f ./app/Dockerfile ./app
 
 # Run the container with your environment variables
-docker run -p 8000:8000 --env-file ./app/backend/.env coffee-chat-app:latest
+docker run -p 8000:8000 --env-file ./app/backend/.env sonic-drive-in-app:latest
 ```
 
 ## Deploying to Azure
