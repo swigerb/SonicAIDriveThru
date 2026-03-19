@@ -6,7 +6,10 @@
                 {
                     "name": "SuperSONIC® Double Cheeseburger",
                     "sizes": [
-                        { "size": "standard", "price": 6.99 }
+                        {
+                            "size": "standard",
+                            "price": 6.99
+                        }
                     ],
                     "description": "Two 100% pure beef patties with melty American cheese",
                     "longDescription": "Two quarter-pound 100% pure beef patties topped with crinkle-cut pickles, diced onions, fresh shredded lettuce, tomatoes, and mayonnaise on a toasted brioche bun.",
@@ -18,7 +21,10 @@
                 {
                     "name": "Classic SONIC Cheeseburger",
                     "sizes": [
-                        { "size": "standard", "price": 5.49 }
+                        {
+                            "size": "standard",
+                            "price": 5.49
+                        }
                     ],
                     "description": "Quarter-pound beef patty with American cheese on a toasted bun",
                     "longDescription": "A quarter-pound, 100% pure beef patty topped with American cheese, crinkle-cut pickles, diced onions, ketchup, and mustard.",
@@ -30,7 +36,10 @@
                 {
                     "name": "Grilled Chicken Sandwich",
                     "sizes": [
-                        { "size": "standard", "price": 5.99 }
+                        {
+                            "size": "standard",
+                            "price": 5.99
+                        }
                     ],
                     "description": "Seasoned grilled chicken breast with lettuce, tomato, and mayo",
                     "longDescription": "Juicy seasoned grilled chicken breast served with fresh lettuce, ripe tomatoes, and creamy mayo on a toasted brioche bun.",
@@ -47,7 +56,10 @@
                 {
                     "name": "All-American Hot Dog",
                     "sizes": [
-                        { "size": "standard", "price": 3.49 }
+                        {
+                            "size": "standard",
+                            "price": 3.49
+                        }
                     ],
                     "description": "Classic beef hot dog with ketchup, mustard, and relish",
                     "longDescription": "A premium beef hot dog served in a soft, warm bakery bun with ketchup, yellow mustard, and sweet relish.",
@@ -59,7 +71,10 @@
                 {
                     "name": "Chili Cheese Coney",
                     "sizes": [
-                        { "size": "standard", "price": 3.99 }
+                        {
+                            "size": "standard",
+                            "price": 3.99
+                        }
                     ],
                     "description": "Beef hot dog smothered in chili and melty cheddar cheese",
                     "longDescription": "A premium beef hot dog topped with warm Sonic chili and melted shredded cheddar cheese, served in a soft bakery bun.",
@@ -71,7 +86,10 @@
                 {
                     "name": "Large Tots",
                     "sizes": [
-                        { "size": "standard", "price": 3.29 }
+                        {
+                            "size": "standard",
+                            "price": 3.29
+                        }
                     ],
                     "description": "Golden crispy tots seasoned to perfection",
                     "longDescription": "Crispy on the outside, fluffy on the inside. Sonic's signature tots are a drive-in essential, perfect as a side or snack.",
@@ -88,9 +106,26 @@
                 {
                     "name": "Cherry Limeade",
                     "sizes": [
-                        { "size": "small", "price": 2.49 },
-                        { "size": "medium", "price": 2.99 },
-                        { "size": "large", "price": 3.49 }
+                        {
+                            "size": "mini",
+                            "price": 1.59
+                        },
+                        {
+                            "size": "small",
+                            "price": 2.49
+                        },
+                        {
+                            "size": "medium",
+                            "price": 2.89
+                        },
+                        {
+                            "size": "large",
+                            "price": 3.39
+                        },
+                        {
+                            "size": "rt 44",
+                            "price": 3.79
+                        }
                     ],
                     "description": "Sonic's iconic cherry limeade with real cherry and lime",
                     "longDescription": "The original Sonic signature drink blending sweet cherry flavor with tangy limeade over Sonic's famous nugget ice.",
@@ -101,9 +136,26 @@
                 {
                     "name": "Blue Raspberry Slush",
                     "sizes": [
-                        { "size": "small", "price": 2.29 },
-                        { "size": "medium", "price": 2.79 },
-                        { "size": "large", "price": 3.29 }
+                        {
+                            "size": "mini",
+                            "price": 1.39
+                        },
+                        {
+                            "size": "small",
+                            "price": 2.19
+                        },
+                        {
+                            "size": "medium",
+                            "price": 2.79
+                        },
+                        {
+                            "size": "large",
+                            "price": 3.39
+                        },
+                        {
+                            "size": "rt 44",
+                            "price": 3.79
+                        }
                     ],
                     "description": "Sweet blue raspberry flavored frozen slush",
                     "longDescription": "A bold, sweet blue raspberry frozen slush made with Sonic's famous nugget ice for the perfect icy refreshment.",
@@ -114,9 +166,26 @@
                 {
                     "name": "Ocean Water®",
                     "sizes": [
-                        { "size": "small", "price": 2.49 },
-                        { "size": "medium", "price": 2.99 },
-                        { "size": "large", "price": 3.49 }
+                        {
+                            "size": "mini",
+                            "price": 1.59
+                        },
+                        {
+                            "size": "small",
+                            "price": 2.49
+                        },
+                        {
+                            "size": "medium",
+                            "price": 2.89
+                        },
+                        {
+                            "size": "large",
+                            "price": 3.39
+                        },
+                        {
+                            "size": "rt 44",
+                            "price": 3.79
+                        }
                     ],
                     "description": "Sprite with a splash of blue coconut flavor",
                     "longDescription": "A tropical twist on classic Sprite, blended with blue coconut flavor for an island-inspired refresher served over nugget ice.",
@@ -132,9 +201,22 @@
                 {
                     "name": "Oreo® Peanut Butter Shake",
                     "sizes": [
-                        { "size": "small", "price": 4.49 },
-                        { "size": "medium", "price": 4.99 },
-                        { "size": "large", "price": 5.49 }
+                        {
+                            "size": "mini",
+                            "price": 3.89
+                        },
+                        {
+                            "size": "small",
+                            "price": 4.59
+                        },
+                        {
+                            "size": "medium",
+                            "price": 5.39
+                        },
+                        {
+                            "size": "large",
+                            "price": 6.59
+                        }
                     ],
                     "description": "Real ice cream blended with Oreo cookies and peanut butter",
                     "longDescription": "Rich, creamy shake made with real ice cream, blended with Oreo cookie pieces and peanut butter, topped with whipped cream.",
@@ -145,9 +227,22 @@
                 {
                     "name": "Classic Vanilla Shake",
                     "sizes": [
-                        { "size": "small", "price": 3.99 },
-                        { "size": "medium", "price": 4.49 },
-                        { "size": "large", "price": 4.99 }
+                        {
+                            "size": "mini",
+                            "price": 3.39
+                        },
+                        {
+                            "size": "small",
+                            "price": 4.19
+                        },
+                        {
+                            "size": "medium",
+                            "price": 4.69
+                        },
+                        {
+                            "size": "large",
+                            "price": 5.69
+                        }
                     ],
                     "description": "Creamy hand-mixed vanilla shake with whipped topping",
                     "longDescription": "A timeless classic made with real ice cream, hand-mixed to thick, creamy perfection and finished with whipped topping and a cherry.",
@@ -158,9 +253,18 @@
                 {
                     "name": "SONIC Blast® with M&M'S®",
                     "sizes": [
-                        { "size": "small", "price": 4.29 },
-                        { "size": "medium", "price": 4.79 },
-                        { "size": "large", "price": 5.29 }
+                        {
+                            "size": "mini",
+                            "price": 3.99
+                        },
+                        {
+                            "size": "small",
+                            "price": 4.89
+                        },
+                        {
+                            "size": "medium",
+                            "price": 5.89
+                        }
                     ],
                     "description": "Real ice cream blended with M&M'S candy pieces",
                     "longDescription": "Sonic's signature frozen treat made with real ice cream hand-mixed with colorful M&M'S candy pieces for a crunchy, creamy combo.",
@@ -176,7 +280,10 @@
                 {
                     "name": "Mozzarella Sticks",
                     "sizes": [
-                        { "size": "standard", "price": 3.49 }
+                        {
+                            "size": "standard",
+                            "price": 3.49
+                        }
                     ],
                     "description": "Crispy breaded mozzarella with marinara sauce",
                     "longDescription": "Golden-fried mozzarella sticks with a crispy breading and gooey melted cheese inside, served with zesty marinara dipping sauce.",
@@ -186,7 +293,10 @@
                 {
                     "name": "Chili Cheese Tots",
                     "sizes": [
-                        { "size": "standard", "price": 3.99 }
+                        {
+                            "size": "standard",
+                            "price": 3.99
+                        }
                     ],
                     "description": "Crispy tots topped with warm chili and melted cheese",
                     "longDescription": "Sonic's signature tots loaded with warm chili and melted shredded cheddar for a hearty snack or side.",
@@ -196,7 +306,10 @@
                 {
                     "name": "Add-In Flavor",
                     "sizes": [
-                        { "size": "standard", "price": 0.50 }
+                        {
+                            "size": "standard",
+                            "price": 0.5
+                        }
                     ],
                     "description": "Add cherry, vanilla, or grape flavor to any drink",
                     "longDescription": "Customize any drink with a shot of cherry, vanilla, strawberry, grape, or other flavor add-ins.",
