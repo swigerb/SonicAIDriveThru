@@ -61,6 +61,7 @@ _MARKER_AUDIO_APPEND = '"input_audio_buffer.append"'
 _MARKER_AUDIO_DELTA = '"response.audio.delta"'
 _MARKER_AUDIO_DONE = '"response.audio.done"'
 _MARKER_SPEECH_STARTED = '"input_audio_buffer.speech_started"'
+_MARKER_SESSION_UPDATE = '"session.update"'
 _MARKER_SESSION_UPDATED = '"session.updated"'
 _MARKER_RESPONSE_CANCEL = '"response.cancel"'
 
@@ -390,6 +391,14 @@ class RTMiddleTier:
                             new_msg = await self._process_message_to_server(msg, ws)
                             if new_msg is not None:
                                 await target_ws.send_str(new_msg)
+                            # Fallback greeting trigger: fire after forwarding session.update
+                            # in case session.updated never arrives from the server.
+                            # The session.updated trigger in from_server_to_client is preferred
+                            # (confirms tools are configured), but this ensures the greeting
+                            # always fires even if the API doesn't send session.updated.
+                            if not greeting_sent and _MARKER_SESSION_UPDATE in msg.data and _MARKER_SESSION_UPDATED not in msg.data:
+                                logger.info("Fallback greeting: session.update forwarded — sending greeting without waiting for session.updated")
+                                await send_greeting_once()
                         elif msg.type == aiohttp.WSMsgType.ERROR:
                             logger.error("Client WebSocket error: %s", ws.exception())
                             break
