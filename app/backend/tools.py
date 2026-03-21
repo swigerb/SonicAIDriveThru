@@ -138,6 +138,24 @@ def _infer_category(item_name: str) -> str:
     return ""
 
 
+def _format_size_human_readable(size: str) -> str:
+    """Convert size codes to human-readable format."""
+    size_lower = size.lower().strip()
+    size_map = {
+        "mini": "Mini",
+        "small": "Small",
+        "s": "Small",
+        "medium": "Medium",
+        "m": "Medium",
+        "large": "Large",
+        "l": "Large",
+        "xl": "Extra Large",
+        "rt 44": "Route 44",
+        "standard": "Standard",
+    }
+    return size_map.get(size_lower, size.capitalize())
+
+
 
 search_tool_schema = {
     "type": "function",
@@ -221,10 +239,19 @@ async def search(
     results = []
     async for record in search_results:
         identifier = record.get(identifier_field) or record.get("id", "unknown")
+
+        # Format sizes into human-readable list so the Realtime API can speak them naturally
+        raw_sizes = record.get('sizes', 'N/A')
+        try:
+            sizes_json = json.loads(raw_sizes)
+            size_str = ", ".join([f"{_format_size_human_readable(s['size'])} (${s['price']})" for s in sizes_json])
+        except Exception:
+            size_str = raw_sizes
+
         summary = (
             f"[{identifier}]: "
-            f"Name: {record.get('name', 'N/A')}, Category: {record.get('category', 'N/A')}, "
-            f"Description: {record.get('description', 'N/A')}, Sizes: {record.get('sizes', 'N/A')}"
+            f"Item: {record.get('name', 'N/A')}, Category: {record.get('category', 'N/A')}, "
+            f"Available Sizes: {size_str}"
         )
         results.append(summary)
 
@@ -277,6 +304,16 @@ async def update_order(args, session_id: str) -> ToolResult:
     logger.info("Updating order for session %s with payload %s", session_id, args)
 
     item_name = args["item_name"]
+
+    # ── Hardened price validation (add only) ──
+    price = args.get("price", 0.0)
+    if args["action"] == "add" and price <= 0.0:
+        logger.warning("Model attempted to add item %s with invalid price $%.2f (rejecting $0 items)", item_name, price)
+        return ToolResult(
+            "I'm sorry, I had a glitch with the pricing for that. Could you say that again?",
+            ToolResultDirection.TO_SERVER,
+        )
+
     if args["action"] == "add" and _is_extra_item(item_name):
         current_items = order_state_singleton.get_order_items(session_id)
         has_allowed_base = False
@@ -364,7 +401,35 @@ async def update_order(args, session_id: str) -> ToolResult:
     json_order_summary = order_state_singleton.get_order_summary_json(session_id)
     logger.debug("Session %s order summary after update: %s", session_id, json_order_summary)
 
-    return ToolResult(json_order_summary, ToolResultDirection.TO_BOTH)
+    # ── Combo detection: flag pending side/drink slots ──
+    combo_hint = ""
+    if args["action"] == "add" and "combo" in item_name.lower():
+        combo_hint = (
+            " (COMBO DETECTED: This combo has PENDING SLOTS that must be filled. "
+            "You MUST ask the customer to choose: 1) A Side (Tots or Fries), and 2) A Drink. "
+            "Do not move on until both side and drink are selected.)"
+        )
+        logger.info("Combo detected for '%s' in session %s — pending side/drink slots must be filled", item_name, session_id)
+
+    # ── Category-aware upsell hints in tool results ──
+    upsell_hint = ""
+    if args["action"] == "add":
+        category = _infer_category(item_name)
+        if category == "combos":
+            upsell_hint = " (UPSELL HINT: Combos are a great base! Ask if they want to upgrade to a Large size, or add a delicious Shake or Dessert!)"
+        elif category in ("burgers", "burgers & sandwiches"):
+            upsell_hint = " (UPSELL HINT: Perfect choice! Ask if they want to make it a combo meal with Tots or Fries and a refreshing Drink!)"
+        elif category in ("drinks", "slushes"):
+            upsell_hint = " (UPSELL HINT: Great drink choice! Ask if they want to add a Flavor Add-In to customize it, or pair it with a tasty side!)"
+        elif category in ("shakes", "desserts", "shakes & ice cream"):
+            upsell_hint = " (UPSELL HINT: Yum! Shakes are perfect on their own, but ask if they'd like to add Whipped Cream or pair with a snack!)"
+        elif category in ("sides", "hot dogs", "hot dogs & tots"):
+            upsell_hint = " (UPSELL HINT: Tasty! Ask if they want to add a refreshing Drink or Slush to complete their meal!)"
+        else:
+            upsell_hint = " (UPSELL HINT: Ask if they'd like to add anything else — maybe a drink, side, or dessert!)"
+        logger.debug("Upsell hint for category '%s': %s", category, upsell_hint)
+
+    return ToolResult(json_order_summary + combo_hint + upsell_hint, ToolResultDirection.TO_BOTH)
 
 
 get_order_tool_schema = {

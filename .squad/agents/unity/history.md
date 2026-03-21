@@ -36,3 +36,8 @@
 - **Prompt stayed concise:** 4 new sections added without bloating — each section is 3-4 bullets max. Total prompt still fits comfortably within first-response latency budget.
 - **Coordinated with Summer:** TO_BOTH routing ensures conversation continues naturally through multi-item orders (no dead silence after order confirmation).
 - **Demo validation:** Tested with 3-4 complete orders covering all categories. Combo triggers work. Tots-first branding fires correctly. Currency spoken naturally. 5+ item orders group properly in closing recap.
+
+### TOOL HINTS Section (2026-03-21)
+- **[SYSTEM HINT] pattern:** Summer's backend embeds `[SYSTEM HINT: ...]` in tool results to guide the AI (e.g., prompting for missing combo sides/drinks, upsell opportunities). Added a 2-bullet TOOL HINTS section right after ORDERING so the AI knows to act on these hints immediately and conversationally — and NEVER read them aloud.
+- **Placement rationale:** After ORDERING, before SUGGESTIVE SELLING. Tool results come back during ordering flow, so the AI encounters hints in that context. Keeps the instruction close to where it's actionable.
+- **Coordination with Summer:** This is the AI-side complement to Summer's backend `[SYSTEM HINT]` injection in tool results. Defense-in-depth: backend decides *when* to hint, system prompt tells the AI *how* to act on it.

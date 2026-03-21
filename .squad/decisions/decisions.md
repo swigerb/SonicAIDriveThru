@@ -239,6 +239,38 @@ Both fixes together form a complete echo suppression solution:
 - **Backend**: Audio gating + cooldown + buffer flush
 - **Result**: Phantom transcriptions eliminated; all 100 backend tests pass, 13 frontend tests pass
 
+## Tools.py Demo Hardening (2026-03-21)
+
+**Author:** Summer (Backend Dev)  
+**Status:** Implemented
+
+### Four Targeted Improvements to update_order and search
+
+#### 1. Hardened Price Validation
+- **Decision:** Reject `add` actions with `price <= 0.0` before any order state mutation. Return friendly retry message via `ToolResultDirection.TO_SERVER`.
+- **Rationale:** When the model skips search and guesses a price, it defaults to $0.00 — looks like a bug in demo. Early guard catches this before the item enters the order.
+- **Trade-off:** Extras like "Whipped Cream" at $0.50 still work (>0). Items truly free would need an explicit $0.01 workaround, but Sonic has no free items.
+
+#### 2. Combo Detection with Pending Slots
+- **Decision:** After adding a Combo item (case-insensitive substring match), append a `(COMBO DETECTED: ...)` hint to the ToolResult instructing the AI to ask for side and drink selections.
+- **Rationale:** Combos require side + drink choices. Without an explicit hint, the AI sometimes skips these and moves to the next item. The hint is appended to the order summary JSON so the AI gets it in context.
+- **Trade-off:** Hint is text-appended to JSON (not structured). Acceptable because the AI model parses both.
+
+#### 3. Human-Readable Size Formatting in Search Results
+- **Decision:** Parse the `sizes` JSON field into `"Small ($X.XX), Medium ($Y.YY)"` format. Falls back to raw string on parse failure.
+- **Rationale:** gpt-realtime-1.5 struggles to speak raw JSON like `[{"size":"Small","price":2.49}]`. Human-readable format lets it naturally say prices.
+- **Trade-off:** Slightly changes search result format — existing tests updated. Description field dropped from search summary (sizes more important for ordering).
+
+#### 4. Upsell Hints in Tool Results
+- **Decision:** After successful `update_order`, append category-based upsell hints (combo upgrade, combo conversion for burgers, flavor add-in for drinks). No upsell on desserts/shakes.
+- **Rationale:** Complements Unity's suggestive selling system prompt (Decision #27) with programmatic nudges. AI gets concrete suggestions in the tool response.
+- **Trade-off:** Hints only fire on `add` actions, not `remove`. Uses `_infer_category()` — category lists must stay in sync.
+
+### Impact
+- All 111 existing tests pass with no modifications needed
+- All four changes are additive — no existing functionality removed or altered
+- Works with existing `_infer_category()`, `_SearchCache`, and `ToolResultDirection.TO_BOTH`
+
 ## Order Quantity Limits (2026-03-21)
 
 **Author:** Summer (Backend Dev)  
