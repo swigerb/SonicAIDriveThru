@@ -239,6 +239,55 @@ Both fixes together form a complete echo suppression solution:
 - **Backend**: Audio gating + cooldown + buffer flush
 - **Result**: Phantom transcriptions eliminated; all 100 backend tests pass, 13 frontend tests pass
 
+## Order Quantity Limits (2026-03-21)
+
+**Author:** Summer (Backend Dev)  
+**Status:** Implemented
+
+### Decision
+Added per-item (`MAX_QUANTITY_PER_ITEM = 10`) and total order (`MAX_TOTAL_ITEMS = 25`) quantity limits enforced in the `update_order` tool in `tools.py`.
+
+### Rationale
+Prevents abuse scenarios (ordering 100+ of an item) that could destabilize the system, confuse the AI, or create unrealistic orders. Limits are realistic for a drive-thru window — 10 of any single item and 25 total items are generous enough for large family/group orders but cap truly absurd requests.
+
+### Implementation Details
+- Validation runs in `update_order()` **before** `handle_order_update()` is called — invalid quantities never touch order state.
+- Only applies to `"add"` actions — removing items is never gated.
+- Per-item check matches on `item_name + size` combo (same logic as `order_state.py` deduplication).
+- Error messages are warm and customer-friendly, sent as `ToolResultDirection.TO_SERVER` so the AI can relay them conversationally.
+- Constants are at module top of `tools.py` for easy tuning without code changes.
+
+### Trade-offs
+- Limits are not configurable at runtime (would need env var or config file for hot-tuning). Current constants are easy to change and redeploy.
+- The AI model receives the limit message and may paraphrase it — this is intentional for natural conversation flow.
+
+### Files Changed
+- `app/backend/tools.py` — added constants + validation logic in `update_order()`
+
+## Conversational Quantity Limit Guardrails (2026-03-21)
+
+**Author:** Unity (AI / Realtime Expert)  
+**Status:** Implemented
+
+### Decision
+Added a QUANTITY LIMITS section to the system prompt in `app/backend/app.py` with conversational guardrails for excessive order quantities.
+
+### Limits
+- **Per-item max:** 10 — AI suggests capping at 10 with friendly language
+- **Total order max:** 25 items — AI suggests catering line for larger orders
+- These match Summer's backend enforcement values exactly
+
+### Design Choices
+- **Placement:** Between ORDERING and CLOSING sections (natural conversation flow)
+- **Tone:** Warm, helpful — like a carhop looking out for the customer. No "error" or "limit exceeded" language.
+- **NEVER refuse service** — always offer the closest alternative
+- **4 bullets only** — kept concise to minimize first-response latency impact
+- **Defense-in-depth:** AI handles it conversationally first, backend enforces hard limits second
+
+### Coordination
+- Summer is adding backend enforcement with the same limits (per-item 10, total 25)
+- AI-level guardrails prevent most cases from ever hitting the backend rejection path
+
 ## Previous Decisions (Archived)
 
 ### Copilot Directive (2026-02-25T22-39)

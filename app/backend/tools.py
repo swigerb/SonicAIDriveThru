@@ -56,6 +56,14 @@ class _SearchCache:
 _search_cache = _SearchCache()
 
 
+# ---------------------------------------------------------------------------
+# Order quantity limits — prevents abuse (e.g. ordering 100 burgers) while
+# staying realistic for a drive-thru window.
+# ---------------------------------------------------------------------------
+MAX_QUANTITY_PER_ITEM = 10   # max of any single item (name+size combo)
+MAX_TOTAL_ITEMS = 25         # max total items across the entire order
+
+
 # Extras may only be applied to specific beverage categories.
 EXTRAS_KEYWORDS = (
     "flavor add-in",
@@ -294,12 +302,62 @@ async def update_order(args, session_id: str) -> ToolResult:
             logger.info("Blocked extra '%s' for session %s", item_name, session_id)
             return ToolResult(apology, ToolResultDirection.TO_SERVER)
 
+    # ── Quantity limit validation (add only) ──
+    quantity = args.get("quantity", 0)
+    size = args["size"]
+    if args["action"] == "add":
+        current_items = order_state_singleton.get_order_items(session_id)
+
+        # Per-item limit: check resulting quantity for this item+size combo
+        existing_qty = 0
+        for order_item in current_items:
+            if order_item.item == item_name and order_item.size == size:
+                existing_qty = order_item.quantity
+                break
+        new_item_qty = existing_qty + quantity
+        if new_item_qty > MAX_QUANTITY_PER_ITEM:
+            allowed = MAX_QUANTITY_PER_ITEM - existing_qty
+            if allowed <= 0:
+                msg = (
+                    f"That's a lot of {item_name}! Our drive-thru can handle up to "
+                    f"{MAX_QUANTITY_PER_ITEM} of any item. You already have {existing_qty} — "
+                    f"would you like to keep it at {existing_qty}?"
+                )
+            else:
+                msg = (
+                    f"That's a lot of {item_name}! Our drive-thru can handle up to "
+                    f"{MAX_QUANTITY_PER_ITEM} of any item. I can add {allowed} more — "
+                    f"would you like me to do that?"
+                )
+            logger.info("Per-item limit hit for '%s' in session %s (requested %d, existing %d)",
+                        item_name, session_id, quantity, existing_qty)
+            return ToolResult(msg, ToolResultDirection.TO_SERVER)
+
+        # Total order limit: check total items across the whole order
+        total_qty = sum(oi.quantity for oi in current_items) + quantity
+        if total_qty > MAX_TOTAL_ITEMS:
+            remaining = MAX_TOTAL_ITEMS - sum(oi.quantity for oi in current_items)
+            if remaining <= 0:
+                msg = (
+                    f"Wow, that's a big order! Our drive-thru tops out at "
+                    f"{MAX_TOTAL_ITEMS} items total so we can keep things moving. "
+                    f"You're already at the max — would you like to swap anything out?"
+                )
+            else:
+                msg = (
+                    f"Wow, that's a big order! Our drive-thru tops out at "
+                    f"{MAX_TOTAL_ITEMS} items total so we can keep things moving. "
+                    f"I can add {remaining} more — would you like me to do that?"
+                )
+            logger.info("Total order limit hit in session %s (would be %d items)", session_id, total_qty)
+            return ToolResult(msg, ToolResultDirection.TO_SERVER)
+
     order_state_singleton.handle_order_update(
         session_id,
         args["action"],
         item_name,
-        args["size"],
-        args.get("quantity", 0),
+        size,
+        quantity,
         args.get("price", 0.0),
     )
 

@@ -33,4 +33,5 @@
 - **Python notebook programmatic editing**: `.ipynb` files have complex JSON escaping — use Python JSON manipulation instead of text-based edit tools.
 - **Search index correctness**: If `.env` points to wrong index, no search results. Always verify AZURE_SEARCH_INDEX env var matches expected index name.
 - **System prompt token accounting**: Closing phrases consume ~20 tokens (e.g., "Your carhop will have that right out to you!"). `max_tokens=150` too aggressive for order recap + closing. 250 is demo-safe.
+- **Order quantity limits**: Added `MAX_QUANTITY_PER_ITEM = 10` and `MAX_TOTAL_ITEMS = 25` in `tools.py` to prevent abuse. Validation runs in `update_order` before `handle_order_update`, only on "add" actions. Per-item check uses item+size combo match. Error messages are warm/drive-thru-friendly and sent `TO_SERVER` so the AI relays them naturally. Constants at module top for easy tuning. Defense-in-depth with Unity's conversational guardrails.
 
