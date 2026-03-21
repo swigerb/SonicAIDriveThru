@@ -53,7 +53,7 @@ _INPUT_AUDIO_CLEAR_MSG = json.dumps({"type": "input_audio_buffer.clear"})
 
 # Cooldown period (seconds) after AI audio ends before accepting user audio.
 # Covers timing gap between server sending last audio delta and speakers finishing.
-_ECHO_COOLDOWN_SEC = 0.5
+_ECHO_COOLDOWN_SEC = 1.5
 
 # Fast substring markers for echo suppression (avoids regex/JSON parse overhead)
 _MARKER_AUDIO_APPEND = '"input_audio_buffer.append"'
@@ -444,14 +444,22 @@ class RTMiddleTier:
                                 # Longer cooldown after greeting — speakers at full volume,
                                 # no prior calibration makes echo worst-case at startup.
                                 if greeting_in_progress:
-                                    cooldown_end = loop.time() + _ECHO_COOLDOWN_SEC * 2
+                                    actual_cooldown = _ECHO_COOLDOWN_SEC * 2
                                     greeting_in_progress = False
-                                    logger.debug("Echo suppression: greeting audio done — extended cooldown")
+                                    logger.debug("Echo suppression: greeting audio done — extended cooldown %.1fs", actual_cooldown)
                                 else:
-                                    cooldown_end = loop.time() + _ECHO_COOLDOWN_SEC
-                                logger.debug("Echo suppression: AI audio done — cooldown %.1fs", _ECHO_COOLDOWN_SEC)
+                                    actual_cooldown = _ECHO_COOLDOWN_SEC
+                                cooldown_end = loop.time() + actual_cooldown
+                                logger.debug("Echo suppression: AI audio done — cooldown %.1fs", actual_cooldown)
                                 # Flush any echoed audio that leaked into OpenAI's buffer
                                 await target_ws.send_str(_INPUT_AUDIO_CLEAR_MSG)
+                                # Schedule a SECOND flush after cooldown expires to catch
+                                # echo audio that accumulated during the cooldown window.
+                                # Without this, residual echo triggers VAD → self-talk loop.
+                                def _make_delayed_flush(tws=target_ws):
+                                    if not tws.closed:
+                                        asyncio.ensure_future(tws.send_str(_INPUT_AUDIO_CLEAR_MSG))
+                                loop.call_later(actual_cooldown, _make_delayed_flush)
                             elif _MARKER_SPEECH_STARTED in data:
                                 # Server VAD detected speech — but during the greeting
                                 # this is almost certainly echo, not a real barge-in.
