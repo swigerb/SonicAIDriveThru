@@ -402,6 +402,53 @@ Added TOOL HINTS section to system prompt in `app/backend/app.py` to guide AI co
   - `tools.py` — `get_order` changed to `TO_BOTH` with `client_text`. AI receives grouped text; frontend receives full JSON.
 - **Testing:** All 118 tests pass. Pure computation on existing data. `TO_BOTH` pattern already tested in `update_order`.
 
+## Fix Greeting-Before-Session.Update Tool Blindness (2026-03-22)
+
+**Author:** Summer (Backend Dev)  
+**Status:** Implemented
+
+### Problem
+The AI conversed perfectly (asking about combos, sizes, drinks) but NEVER called `update_order`, `search`, or `get_order`. The order panel stayed at $0.00.
+
+**Root cause:** `from_client_to_server()` in `rtmt.py` sent the greeting (`conversation.item.create` + `response.create`) to OpenAI BEFORE forwarding the client's `session.update` message — which carries tool definitions, system_message, and tool_choice. OpenAI received greeting before tools were configured.
+
+### Solution
+1. **Reordered greeting:** Client messages now forwarded FIRST (`_process_message_to_server` → `send_str`), then the greeting fires. OpenAI sees: `session.update` → greeting → `response.create`. Tools configured before first completion.
+
+2. **Fallback tools_pending registration:** `response.output_item.added` now pre-registers `call_id` in `tools_pending` as safety net. `conversation.item.created` always overwrites with correct `previous_item_id`. Prevents silent tool-call drops if API event ordering changes.
+
+3. **Diagnostic logging:** `session.update` now logs tool count and tool_choice. Tool execution logs tool name, args, and result direction.
+
+### Impact
+- Fixes demo blocker — orders now appear on carhop ticket
+- All 118 existing tests pass
+- No API or schema changes required
+
+---
+
+## System Prompt Tool-Calling Mandate (2026-03-21)
+
+**Author:** Unity (AI / Realtime Expert)  
+**Status:** Implemented
+
+### Problem
+The ORDERING section had only weak instruction — "Call update_order ONLY after guest confirms." The word "ONLY" reads as restriction, not mandate. Model treated ordering as role-play, never triggering tool calls.
+
+### Solution
+Added new "⚠️ TOOL-CALLING RULES — MANDATORY" section positioned early (section #3, after CONVERSATIONAL FLOW, before MENU & PRICING) with:
+- Explicit negative instructions: "NEVER say X WITHOUT calling Y FIRST"
+- Consequence statements: "the item WILL NOT appear"
+- Mandatory flow: search → confirm → update_order
+- Reinforced in ORDERING and MENU & PRICING sections
+
+### Rationale
+For gpt-realtime-1.5, tool-calling requires EXPLICIT negative instructions and consequence statements. Positive instructions alone ("call update_order after confirmation") deprioritized in favor of conversation. Position matters — tool-calling rules must appear near top, not buried in section #6.
+
+### Impact
+- Demo-tested with multi-item orders
+- Tool-calling now reliable
+- Order flow reaches completion
+
 ## Previous Decisions (Archived)
 
 ### Copilot Directive (2026-02-25T22-39)

@@ -46,3 +46,13 @@
 - **Suggestive Sell Follow-Through:** Added rule to TECHNICAL GUARDRAILS: "If the guest says 'Yes' or 'Sure' to a suggestive sell (like a combo), IMMEDIATELY ask for the missing details (e.g., 'Awesome, tots or fries with that?')."
 - **Why:** Ensures demo conversations flow naturally without pauses after customer agreement. Complements Summer's grouped readback (natural voice summaries) and backend combo hints.
 - **Coordination:** Part of 3-sprint demo polish (temperature, static files, grouped readback) coordinated by Brian for Inspire Brands executive presentation.
+
+### Tool-Calling Mandate Fix (2026-03-21)
+- **Root cause:** The ORDERING section had only one weak instruction — "Call update_order ONLY after the guest confirms an item." The word "ONLY" reads as a restriction ("only in this case"), not a mandate ("you must do this"). The AI treated ordering as conversational role-play, never triggering update_order.
+- **Fix:** Added a new "⚠️ TOOL-CALLING RULES — MANDATORY" section placed early in the prompt (right after CONVERSATIONAL FLOW, before MENU & PRICING) with ALL CAPS emphasis. Key rules: verbal acknowledgment does NOTHING, REQUIRED FLOW (search → confirm → update_order), skipping the call means the item won't appear. Also reinforced in the ORDERING section and MENU & PRICING section ("ALWAYS call search BEFORE adding any item").
+- **gpt-realtime-1.5 lesson:** For tool-calling, the model needs EXPLICIT negative instructions ("NEVER say X WITHOUT calling Y FIRST") and consequence statements ("the item WILL NOT appear"). Positive instructions alone ("call update_order after confirmation") are too easily deprioritized in favor of natural conversation. Position matters — tool-calling rules must be near the top, not buried in section #6.
+- **Prompt placement:** TOOL-CALLING RULES is now section #3 (after VOICE STYLE and CONVERSATIONAL FLOW), ensuring it's processed before any ordering-specific instructions. The ORDERING section repeats the mandate for reinforcement.
+
+### Backend Message Reordering Fix (2026-03-22)
+- **Coordinated with Summer:** Summer fixed the greeting-before-session.update bug in `rtmt.py` that caused tools to never register with OpenAI. While Unity's system prompt mandate fix ensures the AI WANTS to call tools (via explicit negative instructions), Summer's backend fix ensures the AI CAN call tools (by registering them before the first completion). Defense-in-depth approach: AI-side mandate + backend registration both required for reliable tool-calling.
+
