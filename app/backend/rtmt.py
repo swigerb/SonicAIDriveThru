@@ -200,13 +200,23 @@ class RTMiddleTier:
 
                 case "response.output_item.added":
                     if "item" in message and message["item"]["type"] == "function_call":
+                        # Fallback registration — ensures tools_pending is populated even
+                        # if conversation.item.created fires late or is skipped by newer
+                        # API versions.  conversation.item.created overwrites with the
+                        # correct previous_item_id when it arrives.
+                        item = message["item"]
+                        call_id = item.get("call_id")
+                        if call_id and call_id not in tools_pending:
+                            logger.debug("Tool call %s pre-registered via output_item.added", call_id)
+                            tools_pending[call_id] = RTToolCall(call_id, "")
                         updated_message = None
 
                 case "conversation.item.created":
                     if "item" in message and message["item"]["type"] == "function_call":
                         item = message["item"]
-                        if item["call_id"] not in tools_pending:
-                            tools_pending[item["call_id"]] = RTToolCall(item["call_id"], message["previous_item_id"])
+                        # Always overwrite — may upgrade fallback from output_item.added
+                        # with the correct previous_item_id
+                        tools_pending[item["call_id"]] = RTToolCall(item["call_id"], message["previous_item_id"])
                         updated_message = None
                     elif "item" in message and message["item"]["type"] == "function_call_output":
                         updated_message = None
@@ -231,10 +241,12 @@ class RTMiddleTier:
                                 updated_message = None
                             else:
                                 args = json.loads(item["arguments"])
+                                logger.info("Executing tool '%s' with args %s (session=%s)", item["name"], args, session_id)
                                 if item["name"] in ("update_order", "get_order"):
                                     result = await tool.target(args, session_id)
                                 else:
                                     result = await tool.target(args)
+                                logger.info("Tool '%s' result direction=%s", item["name"], result.destination)
                                 await server_ws.send_json({
                                     "type": "conversation.item.create",
                                     "item": {
@@ -295,6 +307,7 @@ class RTMiddleTier:
                         session["voice"] = self.voice_choice
                     session["tool_choice"] = "auto" if len(self.tools) > 0 else "none"
                     session["tools"] = [tool.schema for tool in self.tools.values()]
+                    logger.info("session.update: injected %d tools, tool_choice=%s", len(session["tools"]), session["tool_choice"])
                     updated_message = json.dumps(message)
 
         return updated_message
@@ -345,8 +358,6 @@ class RTMiddleTier:
                     nonlocal ai_speaking, cooldown_end
                     async for msg in ws:
                         if msg.type == aiohttp.WSMsgType.TEXT:
-                            if not greeting_sent:
-                                await send_greeting_once()
                             # Echo suppression: drop mic audio while AI is speaking or cooling down.
                             # The AI's speaker output leaks into the mic and gets transcribed as
                             # phantom user input ("Peace.", "Thank you so much."), creating a
@@ -354,9 +365,14 @@ class RTMiddleTier:
                             if _MARKER_AUDIO_APPEND in msg.data:
                                 if ai_speaking or loop.time() < cooldown_end:
                                     continue
+                            # Forward client message FIRST — the initial session.update carries
+                            # tools + system_message.  OpenAI must have them configured before
+                            # the greeting's response.create triggers the first completion.
                             new_msg = await self._process_message_to_server(msg, ws)
                             if new_msg is not None:
                                 await target_ws.send_str(new_msg)
+                            if not greeting_sent:
+                                await send_greeting_once()
                         elif msg.type == aiohttp.WSMsgType.ERROR:
                             logger.error("Client WebSocket error: %s", ws.exception())
                             break
