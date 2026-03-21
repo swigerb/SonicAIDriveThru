@@ -73,7 +73,7 @@ _GREETING_MSG = json.dumps({
         "type": "message",
         "role": "user",
         "content": [
-            {"type": "input_text", "text": "Greet the guest: 'Welcome to Sonic Drive-In! What can I get started for you today?'"}
+            {"type": "input_text", "text": "A guest just pulled up to the drive-thru speaker. Greet them NOW."}
         ]
     }
 })
