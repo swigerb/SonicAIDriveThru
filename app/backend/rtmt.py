@@ -49,6 +49,19 @@ _TYPE_RE = re.compile(r'"type"\s*:\s*"([^"]+)"')
 # Pre-serialized static payloads to avoid repeated json.dumps on every round-trip
 _RESPONSE_CREATE_MSG = json.dumps({"type": "response.create"})
 
+# Pre-serialized message to flush echoed audio from OpenAI's input buffer
+_INPUT_AUDIO_CLEAR_MSG = json.dumps({"type": "input_audio_buffer.clear"})
+
+# Cooldown period (seconds) after AI audio ends before accepting user audio.
+# Covers timing gap between server sending last audio delta and speakers finishing.
+_ECHO_COOLDOWN_SEC = 0.3
+
+# Fast substring markers for echo suppression (avoids regex/JSON parse overhead)
+_MARKER_AUDIO_APPEND = '"input_audio_buffer.append"'
+_MARKER_AUDIO_DELTA = '"response.audio.delta"'
+_MARKER_AUDIO_DONE = '"response.audio.done"'
+_MARKER_SPEECH_STARTED = '"input_audio_buffer.speech_started"'
+
 # Connection tuning constants
 _WS_HEARTBEAT_SEC = 15.0
 _WS_CONNECT_TIMEOUT = aiohttp.ClientTimeout(total=30, connect=10)
@@ -282,6 +295,11 @@ class RTMiddleTier:
         # Per-connection tool tracking — prevents cross-connection interference
         tools_pending: dict[str, RTToolCall] = {}
 
+        # Echo suppression state — shared between client→server and server→client tasks.
+        # Safe without locks: single-threaded asyncio event loop guarantees no concurrent mutation.
+        ai_speaking = False
+        cooldown_end = 0.0  # loop.time() value after which user audio is accepted again
+
         async with aiohttp.ClientSession(
             base_url=self.endpoint,
             timeout=_WS_CONNECT_TIMEOUT,
@@ -300,6 +318,7 @@ class RTMiddleTier:
                 params=params,
                 heartbeat=_WS_HEARTBEAT_SEC,
             ) as target_ws:
+                loop = asyncio.get_running_loop()
                 session_id = self._session_map.get(ws)
                 greeting_sent = session_id in self._sent_greeting
 
@@ -315,10 +334,18 @@ class RTMiddleTier:
                         self._sent_greeting.add(session_id)
 
                 async def from_client_to_server():
+                    nonlocal ai_speaking, cooldown_end
                     async for msg in ws:
                         if msg.type == aiohttp.WSMsgType.TEXT:
                             if not greeting_sent:
                                 await send_greeting_once()
+                            # Echo suppression: drop mic audio while AI is speaking or cooling down.
+                            # The AI's speaker output leaks into the mic and gets transcribed as
+                            # phantom user input ("Peace.", "Thank you so much."), creating a
+                            # self-conversation loop. Dropping audio here breaks that cycle.
+                            if _MARKER_AUDIO_APPEND in msg.data:
+                                if ai_speaking or loop.time() < cooldown_end:
+                                    continue
                             new_msg = await self._process_message_to_server(msg, ws)
                             if new_msg is not None:
                                 await target_ws.send_str(new_msg)
@@ -334,8 +361,30 @@ class RTMiddleTier:
                         await target_ws.close()
                         
                 async def from_server_to_client():
+                    nonlocal ai_speaking, cooldown_end
                     async for msg in target_ws:
                         if msg.type == aiohttp.WSMsgType.TEXT:
+                            # Track AI speaking state for echo suppression.
+                            # These substring checks are O(1)-fast (no JSON parse) and only
+                            # trigger state transitions, not per-frame work.
+                            data = msg.data
+                            if _MARKER_AUDIO_DELTA in data:
+                                if not ai_speaking:
+                                    logger.debug("Echo suppression: AI speaking — suppressing user audio")
+                                ai_speaking = True
+                            elif _MARKER_AUDIO_DONE in data:
+                                ai_speaking = False
+                                cooldown_end = loop.time() + _ECHO_COOLDOWN_SEC
+                                logger.debug("Echo suppression: AI audio done — cooldown %.1fs", _ECHO_COOLDOWN_SEC)
+                                # Flush any echoed audio that leaked into OpenAI's buffer
+                                await target_ws.send_str(_INPUT_AUDIO_CLEAR_MSG)
+                            elif _MARKER_SPEECH_STARTED in data:
+                                # Server VAD detected genuine barge-in — immediately accept audio
+                                if ai_speaking:
+                                    logger.debug("Echo suppression: barge-in detected — resuming user audio")
+                                ai_speaking = False
+                                cooldown_end = 0.0
+
                             new_msg = await self._process_message_to_client(msg, ws, target_ws, tools_pending)
                             if new_msg is not None:
                                 await ws.send_str(new_msg)
