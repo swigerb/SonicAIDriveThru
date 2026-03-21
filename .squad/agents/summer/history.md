@@ -18,6 +18,7 @@
 ## Recent Work
 
 <!-- Append new learnings below for current sprint work. -->
+- **OOS Machine Status in Search (2026-03-22)**: Added `MOCK_MACHINE_STATUS` dict and `_ICE_CREAM_MACHINE_KEYWORDS` tuple at module level. Search results for shake/blast/sundae/ice cream items get `[OOS: Ice cream machine is being cleaned]` appended when ice_cream_machine is "down". Non-blocking — items still returned, just flagged. Same `[SYSTEM HINT]` pattern. All 118 tests pass.
 - **Server-Side Echo Suppression (2026-03-20)**: Implemented rtmt.py audio gating (ai_speaking flag, 300ms cooldown, buffer clear) to block phantom transcriptions. Coordinated with Morty frontend muting. All 100 tests pass.
 - **Azure Speech Mode (2026-03-20)**: Rewrote azurespeech.py with full tool calling loop, session management, base64 audio handling. Reuses rtmt.system_message, conditional mount on env vars.
 - **Server-Side Echo Suppression Refined (2026-03-21)**: Used fast substring detection (no JSON parse) for ai_speaking tracking across concurrent connections. Defense-in-depth with frontend mic-muting. All 100 tests pass.

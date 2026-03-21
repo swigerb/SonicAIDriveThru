@@ -1,12 +1,19 @@
 import logging
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 
 from models import OrderItem, OrderSummary
 
-__all__ = ["OrderState", "SessionIdentifiers", "order_state_singleton"]
+__all__ = ["OrderState", "SessionIdentifiers", "order_state_singleton", "is_happy_hour"]
 
 logger = logging.getLogger("order_state")
+
+
+def is_happy_hour() -> bool:
+    """Check if the current time is between 2:00 PM and 4:00 PM local time."""
+    now = datetime.now()
+    return 14 <= now.hour < 16
 
 
 def _infer_combo_component(item_name: str) -> str:
@@ -38,7 +45,13 @@ class OrderState:
     def _update_summary(self, session_id: str):
         session = self.sessions[session_id]
         order_items = session["order_state"]
-        total = sum(item.price * item.quantity for item in order_items)
+        happy_hour = is_happy_hour()
+        total = 0.0
+        for item in order_items:
+            item_total = item.price * item.quantity
+            if happy_hour and _infer_combo_component(item.item) == "drinks":
+                item_total *= 0.5  # Happy Hour: 50% off drinks and slushes
+            total += item_total
         tax = total * 0.08  # 8% tax
         finalTotal = total + tax
         summary = OrderSummary(items=order_items, total=total, tax=tax, finalTotal=finalTotal)

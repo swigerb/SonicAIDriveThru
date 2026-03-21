@@ -11,7 +11,7 @@ from azure.identity import DefaultAzureCredential
 from azure.search.documents.aio import SearchClient
 from azure.search.documents.models import VectorizableTextQuery
 
-from order_state import order_state_singleton
+from order_state import order_state_singleton, is_happy_hour
 from rtmt import RTMiddleTier, Tool, ToolResult, ToolResultDirection
 
 logger = logging.getLogger(__name__)
@@ -62,6 +62,19 @@ _search_cache = _SearchCache()
 # ---------------------------------------------------------------------------
 MAX_QUANTITY_PER_ITEM = 10   # max of any single item (name+size combo)
 MAX_TOTAL_ITEMS = 25         # max total items across the entire order
+
+
+# ---------------------------------------------------------------------------
+# Mock "Store Telemetry" - In production, this would be an Azure Function / IoT Hub call
+# ---------------------------------------------------------------------------
+MOCK_MACHINE_STATUS = {
+    "ice_cream_machine": "down",  # Classic "shake machine is broken" scenario
+    "slush_machine": "operational",
+    "fryer": "operational",
+}
+
+# OOS keywords — items that depend on the ice cream machine
+_ICE_CREAM_MACHINE_KEYWORDS = ("shake", "blast", "sundae", "ice cream")
 
 
 # Extras may only be applied to specific beverage categories.
@@ -248,11 +261,18 @@ async def search(
         except Exception:
             size_str = raw_sizes
 
+        item_name = record.get('name', 'N/A')
         summary = (
             f"[{identifier}]: "
-            f"Item: {record.get('name', 'N/A')}, Category: {record.get('category', 'N/A')}, "
+            f"Item: {item_name}, Category: {record.get('category', 'N/A')}, "
             f"Available Sizes: {size_str}"
         )
+
+        # Flag items affected by machine outages so the AI knows not to recommend them
+        if MOCK_MACHINE_STATUS.get("ice_cream_machine") == "down":
+            if any(kw in item_name.lower() for kw in _ICE_CREAM_MACHINE_KEYWORDS):
+                summary += " [OOS: Ice cream machine is being cleaned]"
+
         results.append(summary)
 
     joined_results = "\n-----\n".join(results)
@@ -434,7 +454,8 @@ async def update_order(args, session_id: str) -> ToolResult:
             delta_text += " (UPSELL HINT: Ask if they'd like to add anything else — maybe a drink, side, or dessert!)"
         logger.debug("Upsell hint for category '%s'", category)
 
-    return ToolResult(delta_text, ToolResultDirection.TO_BOTH, client_text=json_order_summary)
+    happy_hour_note = " [HAPPY HOUR ACTIVE: drinks and slushes are half-price!]" if is_happy_hour() else ""
+    return ToolResult(delta_text + happy_hour_note, ToolResultDirection.TO_BOTH, client_text=json_order_summary)
 
 
 get_order_tool_schema = {
@@ -455,7 +476,8 @@ async def get_order(_args: Any, session_id: str) -> ToolResult:
     logger.info("Retrieving order summary for session %s", session_id)
     readback = order_state_singleton.get_grouped_order_for_readback(session_id)
     json_summary = order_state_singleton.get_order_summary_json(session_id)
-    return ToolResult(readback, ToolResultDirection.TO_BOTH, client_text=json_summary)
+    happy_hour_note = " [HAPPY HOUR ACTIVE: drinks and slushes are half-price!]" if is_happy_hour() else ""
+    return ToolResult(readback + happy_hour_note, ToolResultDirection.TO_BOTH, client_text=json_summary)
 
 
 reset_order_tool_schema = {
