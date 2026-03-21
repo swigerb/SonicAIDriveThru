@@ -190,6 +190,55 @@ Strengthened system prompt in `app.py`:
 - No mid-conversation reconfiguration → faster, smoother interactions
 - All 100 tests pass
 
+## Coordinated Echo Suppression Fix (2026-03-19/20)
+
+### Frontend: Early Mic Mute on response.created (Morty)
+**Date:** 2026-03-19  
+**Status:** Implemented
+
+The previous audio feedback loop fix muted the mic on `response.audio.delta`, but audio samples had already been sent to the server by then — causing phantom user inputs like "Peace." and "Thank you so much." from echoed AI speech.
+
+**Decisions:**
+1. **Mute on `response.created`** — the earliest event the OpenAI Realtime API sends when a response begins, arriving before any audio deltas.
+2. **Send `input_audio_buffer.clear`** on `response.created` — flushes any already-buffered echo from the server's audio pipeline.
+3. **Unmute on barge-in** — `input_audio_buffer.speech_started` now resets `isAiSpeakingRef` and unmutes the mic so the user can resume speaking after interrupting.
+
+**Trade-offs:**
+- With gain=0, barge-in relies on audio that was in-flight before the mute took effect. If the server detected real user speech from pre-mute audio, the barge-in handler correctly unmutes. Full barge-in during muted playback is not possible (acceptable — echo prevention is higher priority).
+- `sendJsonMessageRef` pattern adds a small layer of indirection in `useRealtime.tsx` but is necessary to break the circular dependency between `useCallback` and `useWebSocket`.
+
+**Files Changed:**
+- `app/frontend/src/hooks/useRealtime.tsx` — Added `response.created` handler, `sendJsonMessageRef`, `onReceivedResponseCreated` callback
+- `app/frontend/src/App.tsx` — Moved mute to `onReceivedResponseCreated`, updated barge-in handler, removed redundant transcript delta muting
+
+### Backend: Server-Side Echo Suppression in rtmt.py (Summer)
+**Date:** 2026-03-20  
+**Status:** Implemented
+
+Frontend mic-muting reduced but didn't eliminate the audio feedback loop. A timing gap exists between when AI audio arrives at the server and when the frontend gain-node mute activates — during this gap, echoed audio reaches the server, gets forwarded to OpenAI, and is transcribed as phantom user input.
+
+**Implementation:** Three coordinated mechanisms in `rtmt.py`:
+1. **Audio gating**: Track `ai_speaking` state per-connection. When `response.audio.delta` messages flow server→client, drop all `input_audio_buffer.append` messages from client→server.
+2. **Post-response cooldown**: After `response.audio.done`, suppress audio for an additional 300ms to cover speaker-to-mic latency.
+3. **Buffer flush**: Send `input_audio_buffer.clear` to OpenAI after each AI audio response completes to discard any leaked echo.
+
+Barge-in preserved: `input_audio_buffer.speech_started` from OpenAI's server VAD immediately clears suppression.
+
+**Trade-offs:**
+- **Pro**: Eliminates phantom transcriptions at the server layer, independent of frontend timing.
+- **Pro**: Zero JSON parse overhead — uses fast substring markers on the hot path.
+- **Con**: Barge-in has ~300ms latency after AI finishes speaking. Acceptable for drive-thru UX.
+- **Con**: During AI speech, user audio is fully dropped (not buffered). If cooldown is too aggressive, genuine speech immediately after AI could be clipped. Monitor and tune `_ECHO_COOLDOWN_SEC` if needed.
+
+**Files Changed:**
+- `app/backend/rtmt.py` — echo suppression state, audio gating, buffer flush, barge-in detection
+
+### Coordination
+Both fixes together form a complete echo suppression solution:
+- **Frontend**: Early mute at `response.created`, automatic `input_audio_buffer.clear`
+- **Backend**: Audio gating + cooldown + buffer flush
+- **Result**: Phantom transcriptions eliminated; all 100 backend tests pass, 13 frontend tests pass
+
 ## Previous Decisions (Archived)
 
 ### Copilot Directive (2026-02-25T22-39)
