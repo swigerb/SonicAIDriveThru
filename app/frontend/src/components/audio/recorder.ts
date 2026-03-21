@@ -4,7 +4,9 @@ export class Recorder {
     private mediaStream: MediaStream | null = null;
     private mediaStreamSource: MediaStreamAudioSourceNode | null = null;
     private workletNode: AudioWorkletNode | null = null;
+    private gainNode: GainNode | null = null;
     private workletReady = false;
+    private isMuted = false;
 
     public constructor(onDataAvailable: (buffer: Iterable<number>) => void) {
         this.onDataAvailable = onDataAvailable;
@@ -30,13 +32,18 @@ export class Recorder {
             this.mediaStream = stream;
             this.mediaStreamSource = this.audioContext.createMediaStreamSource(this.mediaStream);
 
+            // Create gain node for muting control
+            this.gainNode = this.audioContext.createGain();
+            this.gainNode.gain.value = this.isMuted ? 0 : 1;
+
             this.workletNode = new AudioWorkletNode(this.audioContext, "audio-processor-worklet");
             this.workletNode.port.onmessage = event => {
                 this.onDataAvailable(event.data.buffer);
             };
 
-            this.mediaStreamSource.connect(this.workletNode);
-            this.workletNode.connect(this.audioContext.destination);
+            // Audio flow: mediaStreamSource → gainNode → workletNode
+            this.mediaStreamSource.connect(this.gainNode);
+            this.gainNode.connect(this.workletNode);
         } catch (error) {
             this.stop();
         }
@@ -53,9 +60,27 @@ export class Recorder {
             this.workletNode.disconnect();
             this.workletNode = null;
         }
+        if (this.gainNode) {
+            this.gainNode.disconnect();
+            this.gainNode = null;
+        }
         if (this.mediaStreamSource) {
             this.mediaStreamSource.disconnect();
             this.mediaStreamSource = null;
+        }
+    }
+
+    mute() {
+        this.isMuted = true;
+        if (this.gainNode) {
+            this.gainNode.gain.value = 0;
+        }
+    }
+
+    unmute() {
+        this.isMuted = false;
+        if (this.gainNode) {
+            this.gainNode.gain.value = 1;
         }
     }
 }

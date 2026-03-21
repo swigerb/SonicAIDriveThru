@@ -68,7 +68,7 @@ export default function useAudioRecorder({ onAudioRecorded }: Parameters) {
                 channelCount: 1,
                 echoCancellation: true,
                 noiseSuppression: true,
-                autoGainControl: true
+                autoGainControl: false
             }
         });
         audioRecorder.current.start(stream);
@@ -79,5 +79,13 @@ export default function useAudioRecorder({ onAudioRecorded }: Parameters) {
         bufferLenRef.current = 0;
     };
 
-    return { start, stop };
+    const mute = () => {
+        audioRecorder.current?.mute();
+    };
+
+    const unmute = () => {
+        audioRecorder.current?.unmute();
+    };
+
+    return { start, stop, mute, unmute };
 }

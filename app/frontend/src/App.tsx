@@ -110,6 +110,7 @@ function SonicApp() {
     const awaitingGreetingDoneRef = useRef(false);
     const greetingAudioSeenRef = useRef(false);
     const startMicInFlightRef = useRef<Promise<void> | null>(null);
+    const isAiSpeakingRef = useRef(false);
 
     const realtime = useRealTime({
         enableInputAudioTranscription: true,
@@ -120,9 +121,24 @@ function SonicApp() {
         onReceivedResponseAudioDelta: message => {
             if (!isSessionActiveRef.current) return;
             greetingAudioSeenRef.current = true;
+            
+            // AI is speaking - mute the microphone to prevent feedback
+            if (!isAiSpeakingRef.current) {
+                isAiSpeakingRef.current = true;
+                muteAudioRecording();
+            }
+            
             playAudio(message.delta);
         },
+        onReceivedResponseAudioTranscriptDelta: () => {
+            // AI is speaking - ensure mic is muted
+            if (!isAiSpeakingRef.current) {
+                isAiSpeakingRef.current = true;
+                muteAudioRecording();
+            }
+        },
         onReceivedInputAudioBufferSpeechStarted: () => {
+            // User speech detected - stop AI playback (barge-in)
             stopAudioPlayer();
         },
         onReceivedExtensionMiddleTierToolResponse: ({ tool_name, tool_result }: ExtensionMiddleTierToolResponse) => {
@@ -155,6 +171,12 @@ function SonicApp() {
                 timestamp: new Date()
             };
             setTranscripts(prev => [...prev, newTranscriptItem]);
+
+            // AI finished speaking - unmute the microphone
+            if (isAiSpeakingRef.current) {
+                isAiSpeakingRef.current = false;
+                unmuteAudioRecording();
+            }
 
             if (awaitingGreetingDoneRef.current && isSessionActiveRef.current) {
                 awaitingGreetingDoneRef.current = false;
@@ -213,7 +235,7 @@ function SonicApp() {
 
     const { reset: resetAudioPlayer, play: playAudio, stop: stopAudioPlayer, waitForDrain: waitForAudioDrain } =
         useAudioPlayer();
-    const { start: startAudioRecording, stop: stopAudioRecording } = useAudioRecorder({
+    const { start: startAudioRecording, stop: stopAudioRecording, mute: muteAudioRecording, unmute: unmuteAudioRecording } = useAudioRecorder({
         onAudioRecorded: useAzureSpeechOn ? azureSpeech.addUserAudio : realtime.addUserAudio
     });
 
@@ -223,6 +245,7 @@ function SonicApp() {
 
             // Start session and playback immediately, but delay mic capture until the greeting finishes.
             isSessionActiveRef.current = true;
+            isAiSpeakingRef.current = false;
             awaitingGreetingDoneRef.current = !useAzureSpeechOn;
             greetingAudioSeenRef.current = false;
 
@@ -252,6 +275,7 @@ function SonicApp() {
             await stopAudioRecording();
             stopAudioPlayer();
             isSessionActiveRef.current = false;
+            isAiSpeakingRef.current = false;
             awaitingGreetingDoneRef.current = false;
             if (useAzureSpeechOn) {
                 azureSpeech.inputAudioBufferClear();
