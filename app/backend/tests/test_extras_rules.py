@@ -60,7 +60,7 @@ class ExtrasRuleTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(result.destination, ToolResultDirection.TO_CLIENT)
+        self.assertEqual(result.destination, ToolResultDirection.TO_BOTH)
 
         summary = order_state_singleton.get_order_summary(session_id)
         self.assertEqual(len(summary.items), 2)
@@ -114,7 +114,7 @@ class ExtrasRuleTests(unittest.TestCase):
                 session_id,
             )
         )
-        self.assertEqual(result.destination, ToolResultDirection.TO_CLIENT)
+        self.assertEqual(result.destination, ToolResultDirection.TO_BOTH)
         summary = order_state_singleton.get_order_summary(session_id)
         self.assertEqual(len(summary.items), 2)
 
@@ -136,7 +136,7 @@ class ExtrasRuleTests(unittest.TestCase):
                 session_id,
             )
         )
-        self.assertEqual(result.destination, ToolResultDirection.TO_CLIENT)
+        self.assertEqual(result.destination, ToolResultDirection.TO_BOTH)
         summary = order_state_singleton.get_order_summary(session_id)
         self.assertEqual(len(summary.items), 3)
 
@@ -179,7 +179,7 @@ class ExtrasRuleTests(unittest.TestCase):
                 session_id,
             )
         )
-        self.assertEqual(result.destination, ToolResultDirection.TO_CLIENT)
+        self.assertEqual(result.destination, ToolResultDirection.TO_BOTH)
         summary = order_state_singleton.get_order_summary(session_id)
         self.assertEqual(len(summary.items), 3)
 
@@ -220,7 +220,7 @@ class ExtrasRuleTests(unittest.TestCase):
                 session_id,
             )
         )
-        self.assertEqual(result.destination, ToolResultDirection.TO_CLIENT)
+        self.assertEqual(result.destination, ToolResultDirection.TO_BOTH)
         summary = order_state_singleton.get_order_summary(session_id)
         self.assertEqual(len(summary.items), 2)
 
@@ -246,7 +246,7 @@ class ExtrasRuleTests(unittest.TestCase):
                 session_id,
             )
         )
-        self.assertEqual(result.destination, ToolResultDirection.TO_CLIENT)
+        self.assertEqual(result.destination, ToolResultDirection.TO_BOTH)
         summary = order_state_singleton.get_order_summary(session_id)
         self.assertEqual(len(summary.items), 0)
 

@@ -364,7 +364,7 @@ async def update_order(args, session_id: str) -> ToolResult:
     json_order_summary = order_state_singleton.get_order_summary_json(session_id)
     logger.debug("Session %s order summary after update: %s", session_id, json_order_summary)
 
-    return ToolResult(json_order_summary, ToolResultDirection.TO_CLIENT)
+    return ToolResult(json_order_summary, ToolResultDirection.TO_BOTH)
 
 
 get_order_tool_schema = {

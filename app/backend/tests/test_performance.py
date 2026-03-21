@@ -169,7 +169,7 @@ class WebSocketSerializationLatencyTests(unittest.TestCase):
                         f"JSON deserialize took {elapsed:.2f} ms")
 
     def test_tool_result_to_text_speed(self):
-        tr = ToolResult(json.dumps(self._make_order_summary(10)), ToolResultDirection.TO_CLIENT)
+        tr = ToolResult(json.dumps(self._make_order_summary(10)), ToolResultDirection.TO_BOTH)
         _, elapsed = _timed(tr.to_text)
         self.assertLess(elapsed, self.THRESHOLD_MS,
                         f"ToolResult.to_text took {elapsed:.2f} ms")

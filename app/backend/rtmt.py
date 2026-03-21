@@ -81,6 +81,7 @@ _GREETING_MSG = json.dumps({
 class ToolResultDirection(Enum):
     TO_SERVER = 1
     TO_CLIENT = 2
+    TO_BOTH = 3
 
 class ToolResult:
     __slots__ = ("text", "destination")
@@ -232,10 +233,10 @@ class RTMiddleTier:
                                     "item": {
                                         "type": "function_call_output",
                                         "call_id": item["call_id"],
-                                        "output": result.to_text() if result.destination == ToolResultDirection.TO_SERVER else ""
+                                        "output": result.to_text() if result.destination in (ToolResultDirection.TO_SERVER, ToolResultDirection.TO_BOTH) else ""
                                     }
                                 })
-                                if result.destination == ToolResultDirection.TO_CLIENT:
+                                if result.destination in (ToolResultDirection.TO_CLIENT, ToolResultDirection.TO_BOTH):
                                     await client_ws.send_json({
                                         "type": "extension.middle_tier_tool_response",
                                         "previous_item_id": tool_call.previous_id,
