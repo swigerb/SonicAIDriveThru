@@ -54,7 +54,7 @@ _INPUT_AUDIO_CLEAR_MSG = json.dumps({"type": "input_audio_buffer.clear"})
 
 # Cooldown period (seconds) after AI audio ends before accepting user audio.
 # Covers timing gap between server sending last audio delta and speakers finishing.
-_ECHO_COOLDOWN_SEC = 0.3
+_ECHO_COOLDOWN_SEC = 0.5
 
 # Fast substring markers for echo suppression (avoids regex/JSON parse overhead)
 _MARKER_AUDIO_APPEND = '"input_audio_buffer.append"'
@@ -66,14 +66,16 @@ _MARKER_SPEECH_STARTED = '"input_audio_buffer.speech_started"'
 _WS_HEARTBEAT_SEC = 15.0
 _WS_CONNECT_TIMEOUT = aiohttp.ClientTimeout(total=30, connect=10)
 
-# Pre-serialized greeting to avoid json.dumps at connection time
+# Pre-serialized greeting to avoid json.dumps at connection time.
+# IMPORTANT: This must be a direct command — NOT "how would you greet" or the AI
+# will generate meta-commentary about greeting instead of actually greeting.
 _GREETING_MSG = json.dumps({
     "type": "conversation.item.create",
     "item": {
         "type": "message",
         "role": "user",
         "content": [
-            {"type": "input_text", "text": "A guest just pulled up to the drive-thru speaker. Greet them NOW."}
+            {"type": "input_text", "text": "A guest just pulled up to the drive-thru speaker. Greet them now — be brief and warm. Say ONLY the greeting itself. Do NOT explain how to greet or offer multiple options."}
         ]
     }
 })
@@ -344,10 +346,16 @@ class RTMiddleTier:
                 greeting_sent = session_id in self._sent_greeting
 
                 async def send_greeting_once():
-                    nonlocal greeting_sent
+                    nonlocal greeting_sent, ai_speaking
                     if greeting_sent:
                         return
-                    # Use pre-serialized greeting — avoids json.dumps at connection time
+                    # Pre-set echo suppression: the AI will start speaking as soon as
+                    # OpenAI processes response.create.  Without this, there's a gap
+                    # between response.create and the first response.audio.delta where
+                    # mic audio could leak through and cause an echo loop.
+                    ai_speaking = True
+                    # Flush any stale audio that arrived before session was configured
+                    await target_ws.send_str(_INPUT_AUDIO_CLEAR_MSG)
                     await target_ws.send_str(_GREETING_MSG)
                     await target_ws.send_str(_RESPONSE_CREATE_MSG)
                     greeting_sent = True
