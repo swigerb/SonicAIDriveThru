@@ -88,3 +88,11 @@
 - **Coordination:** Backend-only change. Summer handling order_state.py separately. No frontend rebuild needed.
 - **118 existing tests pass (1 pre-existing async test failure unrelated).**
 
+### Customizations & Mods System Prompt Section (2026-07-22)
+- **New section added:** CUSTOMIZATIONS & MODS — placed directly after ORDERING in the system prompt.
+- **Purpose:** Teaches the AI to append modifications (no lettuce, extra ketchup, plain) to item_name in parentheses when calling update_order. Format: `Sonic Cheeseburger (No Lettuce, Extra Ketchup)`. This ensures the kitchen sees the mod on the Carhop Ticket.
+- **Key rules:** "plain" = no toppings → `(Plain)`. Verbally acknowledge mods. Reject nonsensical mods (mustard on a shake) with a polite redirect.
+- **Placement rationale:** Right after ORDERING because mods happen during the ordering flow — the AI encounters customization requests immediately after adding an item.
+- **Coordination:** Summer handling order_state.py and tools.py separately. This is the AI-side directive only.
+- **Syntax validated, pre-existing test status unchanged.**
+

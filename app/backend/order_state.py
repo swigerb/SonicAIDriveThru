@@ -197,6 +197,10 @@ class OrderState:
         counts = {}
         for oi in items:
             clean_name = oi.display.replace("RT 44", "Route 44").replace("RT44", "Route 44")
+            # Convert parenthesized mods to speech-friendly format
+            # e.g. "Sonic Cheeseburger (No Lettuce)" -> "Sonic Cheeseburger with no lettuce"
+            if "(" in clean_name and ")" in clean_name:
+                clean_name = clean_name.replace("(", "with ").replace(")", "")
             counts[clean_name] = counts.get(clean_name, 0) + oi.quantity
 
         # Build the natural language string

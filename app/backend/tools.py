@@ -151,6 +151,29 @@ def _infer_category(item_name: str) -> str:
     return ""
 
 
+# ---------------------------------------------------------------------------
+# Customization validation — prevents nonsensical mods (mustard on a shake, etc.)
+# ---------------------------------------------------------------------------
+INVALID_MODS = {
+    "shakes": ["mustard", "ketchup", "mayo", "pickles", "onions", "lettuce"],
+    "slushes": ["cheese", "bacon", "patty"],
+    "burgers": ["whipped cream", "cherry", "strawberry fruit"],
+}
+
+
+def validate_customization(item_name: str, mods_string: str) -> str | None:
+    """Return an error message if the mods are nonsensical for the item category, else None."""
+    base_name = item_name.split("(")[0].strip()
+    category = _infer_category(base_name)
+    mods_lower = mods_string.lower()
+    for cat_key, forbidden_list in INVALID_MODS.items():
+        if cat_key in category.lower():
+            for forbidden in forbidden_list:
+                if forbidden in mods_lower:
+                    return f"I can't add {forbidden} to a {base_name} — that's a new one! Want to try a different topping?"
+    return None
+
+
 def _format_size_human_readable(size: str) -> str:
     """Convert size codes to human-readable format."""
     size_lower = size.lower().strip()
@@ -326,6 +349,13 @@ async def update_order(args, session_id: str) -> ToolResult:
     logger.info("Updating order for session %s with payload %s", session_id, args)
 
     item_name = args["item_name"]
+
+    # ── Customization validation (reject nonsensical mods) ──
+    if "(" in item_name:
+        mods_content = item_name[item_name.find("(")+1:item_name.find(")")]
+        error = validate_customization(item_name, mods_content)
+        if error:
+            return ToolResult(error, ToolResultDirection.TO_SERVER)
 
     # ── Hardened price validation (add only) ──
     price = args.get("price", 0.0)
