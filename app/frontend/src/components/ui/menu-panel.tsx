@@ -30,8 +30,8 @@ const categoryIcons: Record<string, string> = {
 
 const menuItems = menuItemsData.menuItems as MenuCategory[];
 
-// First category expanded by default
-const initialExpanded = new Set<string>(menuItems.length > 0 ? [menuItems[0].category] : []);
+// All categories expanded by default
+const initialExpanded = new Set<string>(menuItems.map(c => c.category));
 
 export default memo(function MenuPanel() {
     const [expanded, setExpanded] = useState<Set<string>>(() => new Set(initialExpanded));
