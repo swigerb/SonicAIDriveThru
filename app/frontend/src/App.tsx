@@ -96,6 +96,9 @@ function SonicApp() {
     const [verboseLogging, setVerboseLogging] = useState<boolean>(() => {
         return localStorage.getItem("verboseLogging") === "true";
     });
+    const [logToFile, setLogToFile] = useState<boolean>(() => {
+        return localStorage.getItem("verboseLogToFile") === "true";
+    });
 
     useEffect(() => {
         localStorage.setItem("showSessionTokens", showSessionTokens.toString());
@@ -104,6 +107,10 @@ function SonicApp() {
     useEffect(() => {
         localStorage.setItem("verboseLogging", verboseLogging.toString());
     }, [verboseLogging]);
+
+    useEffect(() => {
+        localStorage.setItem("verboseLogToFile", logToFile.toString());
+    }, [logToFile]);
 
     const handleSessionIdentifiers = useCallback((message: ExtensionSessionMetadata | ExtensionRoundTripToken) => {
         setSessionIdentifiers({
@@ -283,6 +290,9 @@ function SonicApp() {
                 realtime.startSession();
                 if (verboseLogging) {
                     realtime.sendVerboseLogging(true);
+                    if (logToFile) {
+                        realtime.sendLogToFile(true);
+                    }
                 }
 
                 // Safety: if we never receive the greeting completion, start the mic after a short timeout.
@@ -348,6 +358,15 @@ function SonicApp() {
                                 onVerboseLoggingChange={(checked: boolean) => {
                                     setVerboseLogging(checked);
                                     realtime.sendVerboseLogging(checked);
+                                    if (!checked && logToFile) {
+                                        setLogToFile(false);
+                                        realtime.sendLogToFile(false);
+                                    }
+                                }}
+                                logToFile={logToFile}
+                                onLogToFileChange={(checked: boolean) => {
+                                    setLogToFile(checked);
+                                    realtime.sendLogToFile(checked);
                                 }}
                             />
                         </Suspense>

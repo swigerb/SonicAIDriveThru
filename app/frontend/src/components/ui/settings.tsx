@@ -15,9 +15,11 @@ interface SettingsProps {
     onShowSessionTokensChange: (checked: boolean) => void;
     verboseLogging: boolean;
     onVerboseLoggingChange: (checked: boolean) => void;
+    logToFile: boolean;
+    onLogToFileChange: (checked: boolean) => void;
 }
 
-export default function Settings({ isMobile, showSessionTokens, onShowSessionTokensChange, verboseLogging, onVerboseLoggingChange }: SettingsProps) {
+export default function Settings({ isMobile, showSessionTokens, onShowSessionTokensChange, verboseLogging, onVerboseLoggingChange, logToFile, onLogToFileChange }: SettingsProps) {
     const [isDarkMode, setIsDarkMode] = useState(() => {
         return localStorage.getItem("isDarkMode") === "true";
     });
@@ -51,6 +53,10 @@ export default function Settings({ isMobile, showSessionTokens, onShowSessionTok
 
     const handleVerboseLoggingChange = (checked: boolean) => {
         onVerboseLoggingChange(checked);
+    };
+
+    const handleLogToFileChange = (checked: boolean) => {
+        onLogToFileChange(checked);
     };
 
     const SettingsContent = () => (
@@ -139,6 +145,27 @@ export default function Settings({ isMobile, showSessionTokens, onShowSessionTok
                     <span className="text-xs text-gray-500 dark:text-gray-400">{verboseLogging ? "Verbose" : "Normal"}</span>
                 </div>
             </div>
+            {verboseLogging && (
+                <div className="flex items-start justify-between pl-4 border-l-2 border-gray-200 dark:border-gray-700">
+                    <div className="flex-1 space-y-0.5">
+                        <Label htmlFor="log-to-file" className="text-gray-900 dark:text-gray-100">
+                            Log to File
+                        </Label>
+                        <p className="text-sm text-gray-600 dark:text-gray-400">
+                            Save verbose logs to a text file on the server for later review
+                        </p>
+                    </div>
+                    <div className="ml-4 flex flex-col items-end">
+                        <Switch
+                            id="log-to-file"
+                            checked={logToFile}
+                            onCheckedChange={handleLogToFileChange}
+                            aria-label="Toggle log to file"
+                        />
+                        <span className="text-xs text-gray-500 dark:text-gray-400">{logToFile ? "File logging" : "Off"}</span>
+                    </div>
+                </div>
+            )}
         </div>
     );
 
