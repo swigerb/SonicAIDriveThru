@@ -303,6 +303,13 @@ class RTMiddleTier:
                     if session_id is not None:
                         identifiers = order_state_singleton.get_session_identifiers(session_id)
                         await self._emit_session_identifiers(client_ws, "extension.session_metadata", identifiers)
+                        _vlog(verbose, "─── [SESSION TOKEN] ───\n"
+                                       "Token: %s\n"
+                                       "Round Trip: #%d (token: %s)\n"
+                                       "───────────────────────",
+                              identifiers.session_token[:12] + "..." if len(identifiers.session_token) > 12 else identifiers.session_token,
+                              identifiers.round_trip_index,
+                              identifiers.round_trip_token[:12] + "..." if len(identifiers.round_trip_token) > 12 else identifiers.round_trip_token)
 
                 case "response.output_item.added":
                     if "item" in message and message["item"]["type"] == "function_call":
@@ -416,6 +423,11 @@ class RTMiddleTier:
                     if session_id is not None:
                         identifiers = order_state_singleton.advance_round_trip(session_id)
                         await self._emit_session_identifiers(client_ws, "extension.round_trip_token", identifiers)
+                        _vlog(verbose, "─── [ROUND TRIP] #%d ───\n"
+                                       "Token: %s\n"
+                                       "────────────────────────",
+                              identifiers.round_trip_index,
+                              identifiers.round_trip_token[:12] + "..." if len(identifiers.round_trip_token) > 12 else identifiers.round_trip_token)
 
         return updated_message
 
@@ -501,9 +513,9 @@ class RTMiddleTier:
                 session_id = self._session_map.get(ws)
                 greeting_sent = session_id in self._sent_greeting
 
-                _vlog(verbose, "\n╔══════════════════════════════════════╗\n"
-                               "║  SESSION CONNECT — %s  ║\n"
-                               "╚══════════════════════════════════════╝", session_id or "?")
+                _vlog(verbose, "\n═══ [SESSION] Connected ═══\n"
+                               "Session ID: %s\n"
+                               "═══════════════════════════", session_id or "?")
 
                 async def send_greeting_once(trigger: str = "unknown"):
                     nonlocal greeting_sent, ai_speaking, greeting_in_progress
@@ -707,9 +719,9 @@ class RTMiddleTier:
                 except Exception:
                     logger.exception("Unexpected error in WebSocket forwarding")
                 finally:
-                    _vlog(verbose, "\n╔══════════════════════════════════════╗\n"
-                                   "║  SESSION DISCONNECT — %s  ║\n"
-                                   "╚══════════════════════════════════════╝", session_id or "?")
+                    _vlog(verbose, "\n═══ [SESSION] Disconnected ═══\n"
+                                   "Session ID: %s\n"
+                                   "══════════════════════════════", session_id or "?")
                     # Clean up per-connection file handler — don't leak file handles
                     if session_file_handler is not None:
                         _remove_verbose_file_handler(session_file_handler)
