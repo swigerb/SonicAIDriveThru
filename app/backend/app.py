@@ -203,10 +203,17 @@ async def create_app() -> web.Application:
         "- ONE suggestion at a time, NEVER pushy\n"
         "- Guest says 'Yes' to combo → IMMEDIATELY ask for missing details\n\n"
 
+        "ORDER CHANGE AFTER CLOSING:\n"
+        "- If a guest adds, removes, or modifies ANY item after you have already read back the total, you MUST call get_order and read back the FULL updated order with the NEW total\n"
+        "- NEVER say 'All set' or 'Your carhop will be right out' without first stating the current total\n"
+        "- Every closing statement MUST include the total: 'That brings your new total to [amount]. Thank you! Your carhop will have that right out!'\n"
+        "- If the guest says 'that's it' or 'I'm good' AFTER a change, STILL read the new total before closing\n\n"
+
         "CLOSING AN ORDER:\n"
         "- Call get_order and read back items with TOTAL only — no subtotal or tax\n"
+        "- ALWAYS state the total in the closing phrase — NEVER close without a total\n"
         "- Long orders → GROUP similar items: 'Three Cheeseburger combos'\n"
-        "- End with: 'Thank you! Your carhop will have that right out to you!'\n\n"
+        "- End with the total AND farewell: 'Your total is [amount]. Thank you! Your carhop will have that right out!'\n\n"
 
         "QUANTITY LIMITS:\n"
         "- MAX 10 of any single item, MAX 25 total items per order\n"

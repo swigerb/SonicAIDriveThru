@@ -96,3 +96,10 @@
 - **Coordination:** Summer handling order_state.py and tools.py separately. This is the AI-side directive only.
 - **Syntax validated, pre-existing test status unchanged.**
 
+### Mandatory Total Re-Read After Order Changes (2026-07-22)
+- **Problem:** After the AI read back the total and said "Your carhop will be right out," the guest added onion rings. The AI added them but closed with "All set, your carhop will be right out" WITHOUT re-reading the updated total. Unacceptable for a demo — the guest must hear the new total every time the order changes.
+- **Fix:** Two changes to the system prompt in `app/backend/app.py`:
+  1. **New section: ORDER CHANGE AFTER CLOSING** — placed directly before CLOSING AN ORDER. Four rules: MUST call get_order and read back full updated order with new total after any change; NEVER say "All set" or "carhop will be right out" without stating the total; every closing statement MUST include the total; even "that's it" after a change requires re-reading the total.
+  2. **Updated CLOSING AN ORDER** — added "ALWAYS state the total in the closing phrase — NEVER close without a total" and changed the example farewell to include the total: "Your total is [amount]. Thank you! Your carhop will have that right out!"
+- **Test update:** `test_system_prompt_contains_carhop_closing` assertion updated from "right out to you" to "right out" to match the new closing phrasing.
+- **All 125 tests pass.**

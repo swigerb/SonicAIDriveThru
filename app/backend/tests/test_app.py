@@ -65,7 +65,7 @@ class CreateAppConfigTests(unittest.IsolatedAsyncioTestCase):
     async def test_system_prompt_contains_carhop_closing(self):
         _, mock_instance = await self._run_create_app()
         self.assertIn(
-            "Your carhop will have that right out to you",
+            "Your carhop will have that right out",
             mock_instance.system_message,
         )
 
