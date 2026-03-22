@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useMemo, useCallback, lazy, Suspense, memo } from "react";
-import { Mic, MicOff, Menu, MessageSquare, LogOut, Github } from "lucide-react";
+import { Mic, MicOff, Menu, MessageSquare, LogOut, Github, ChevronDown, ChevronRight } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { Card } from "@/components/ui/card";
@@ -88,6 +88,7 @@ function SonicApp() {
 
     const [order, setOrder] = useState<OrderSummaryProps>(initialOrder);
     const [sessionIdentifiers, setSessionIdentifiers] = useState<SessionIdentifiersState | null>(null);
+    const [tokenHistory, setTokenHistory] = useState<SessionIdentifiersState[]>([]);
     const [showSessionTokens, setShowSessionTokens] = useState<boolean>(() => {
         if (typeof window === "undefined") return true;
         const stored = localStorage.getItem("showSessionTokens");
@@ -113,11 +114,13 @@ function SonicApp() {
     }, [logToFile]);
 
     const handleSessionIdentifiers = useCallback((message: ExtensionSessionMetadata | ExtensionRoundTripToken) => {
-        setSessionIdentifiers({
+        const snapshot: SessionIdentifiersState = {
             sessionToken: message.sessionToken,
             roundTripIndex: message.roundTripIndex,
             roundTripToken: message.roundTripToken
-        });
+        };
+        setSessionIdentifiers(snapshot);
+        setTokenHistory(prev => [snapshot, ...prev]);
     }, []);
 
     const isSessionActiveRef = useRef(false);
@@ -378,7 +381,7 @@ function SonicApp() {
                     </div>
                 </div>
 
-                {sessionIdentifiers && showSessionTokens && <SessionTokenBanner identifiers={sessionIdentifiers} />}
+                {sessionIdentifiers && showSessionTokens && <SessionTokenPanel identifiers={sessionIdentifiers} history={tokenHistory} />}
 
                 <BrandHero />
 
@@ -561,29 +564,63 @@ function HeroHighlightCard({ title, detail, tone }: { title: string; detail: str
     );
 }
 
-const SessionTokenBanner = memo(function SessionTokenBanner({ identifiers }: { identifiers: SessionIdentifiersState }) {
-    const truncatedSession = formatToken(identifiers.sessionToken);
-    const truncatedRoundTrip = formatToken(identifiers.roundTripToken);
+const SessionTokenPanel = memo(function SessionTokenPanel({
+    identifiers,
+    history
+}: {
+    identifiers: SessionIdentifiersState;
+    history: SessionIdentifiersState[];
+}) {
+    const [expanded, setExpanded] = useState(false);
+
+    const truncate = (token: string) => (token && token.length > 12 ? token.slice(0, 12) + "…" : token || "");
 
     return (
-        <div className="flex flex-wrap gap-2 rounded-3xl border border-white/40 bg-white/90 p-3 font-mono text-xs text-primary shadow-sm">
-            <div className="flex items-center gap-2" title={identifiers.sessionToken}>
-                <span className="rounded-full bg-[#E40046]/10 px-2 py-1 font-semibold uppercase tracking-widest text-[#E40046]">Session Token</span>
-                <span className="text-sm text-[#18344D]">{truncatedSession}</span>
-            </div>
-            <div className="flex items-center gap-2" title={identifiers.roundTripToken}>
-                <span className="rounded-full bg-[#285780]/10 px-2 py-1 font-semibold uppercase tracking-widest text-[#285780]">
-                    Round {identifiers.roundTripIndex}
+        <div className="rounded-xl border border-white/30 bg-white/90 font-mono text-xs shadow-sm dark:border-white/10 dark:bg-[#18344D]/90">
+            <button
+                type="button"
+                onClick={() => setExpanded(prev => !prev)}
+                className="flex w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-white/50 dark:hover:bg-white/5"
+                aria-expanded={expanded}
+                aria-label="Toggle session token history"
+            >
+                {expanded ? (
+                    <ChevronDown className="h-3.5 w-3.5 shrink-0 text-[#285780] dark:text-[#74D2E7]" />
+                ) : (
+                    <ChevronRight className="h-3.5 w-3.5 shrink-0 text-[#285780] dark:text-[#74D2E7]" />
+                )}
+                <span className="font-semibold text-[#285780] dark:text-[#74D2E7]">Session:</span>
+                <span className="text-[#18344D] dark:text-gray-200" title={identifiers.sessionToken}>
+                    {truncate(identifiers.sessionToken)}
                 </span>
-                <span className="text-sm text-[#18344D]">{truncatedRoundTrip}</span>
-            </div>
+                <span className="mx-1 text-[#18344D]/40 dark:text-gray-500">|</span>
+                <span className="rounded-full bg-[#285780]/10 px-1.5 py-0.5 font-semibold text-[#285780] dark:bg-[#74D2E7]/10 dark:text-[#74D2E7]">
+                    Round #{identifiers.roundTripIndex}
+                </span>
+            </button>
+
+            {expanded && history.length > 0 && (
+                <div className="max-h-40 overflow-y-auto border-t border-white/30 px-3 py-2 dark:border-white/10">
+                    <div className="space-y-1">
+                        {history.map((entry, i) => (
+                            <div
+                                key={`${entry.roundTripIndex}-${entry.roundTripToken}-${i}`}
+                                className={`flex items-center gap-2 rounded px-2 py-1 ${i === 0 ? "bg-[#E40046]/5 dark:bg-[#E40046]/10" : ""}`}
+                            >
+                                <span className="w-16 shrink-0 font-semibold text-[#285780] dark:text-[#74D2E7]">
+                                    Round #{entry.roundTripIndex}
+                                </span>
+                                <span className="text-[#18344D]/60 dark:text-gray-400" title={entry.roundTripToken}>
+                                    {truncate(entry.roundTripToken)}
+                                </span>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            )}
         </div>
     );
 });
-
-function formatToken(token: string): string {
-    return token || "";
-}
 
 function SlushArt() {
     return (
