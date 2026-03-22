@@ -89,7 +89,7 @@ class OrderState:
         normalized_size = (size or "").strip().lower()
         if normalized_size in {"", "standard", "n/a", "na", "none", "n.a."}:
             formatted_size = ""
-        elif normalized_size in {"rt44", "rt 44", "route 44"}:
+        elif normalized_size in {"rt44", "rt 44", "route 44", "44", "44oz"}:
             formatted_size = "Route 44 "
         elif normalized_size in {"mini", "small", "medium", "large"}:
             formatted_size = f"{normalized_size.capitalize()} "
@@ -160,7 +160,8 @@ class OrderState:
         # Aggregate quantities by display name
         counts = {}
         for oi in items:
-            counts[oi.display] = counts.get(oi.display, 0) + oi.quantity
+            clean_name = oi.display.replace("RT 44", "Route 44").replace("RT44", "Route 44")
+            counts[clean_name] = counts.get(clean_name, 0) + oi.quantity
 
         # Build the natural language string
         parts = []
