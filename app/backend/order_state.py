@@ -21,7 +21,7 @@ def _infer_combo_component(item_name: str) -> str:
     n = item_name.lower()
     if "tot" in n or "fries" in n or "onion rings" in n:
         return "sides"
-    if any(kw in n for kw in ("slush", "limeade", "ocean water", "drink", "tea", "lemonade", "shake", "blast", "malt")):
+    if any(kw in n for kw in ("slush", "limeade", "ocean water", "drink", "tea", "lemonade", "shake", "blast", "malt", "coke", "sprite", "pepper", "root beer")):
         return "drinks"
     return ""
 
@@ -70,7 +70,9 @@ class OrderState:
             "order_summary_json": empty_summary.model_dump_json(),
             "session_token": session_token,
             "round_trip_index": 0,
-            "round_trip_token": self._format_round_trip_token(session_token, 0)
+            "round_trip_token": self._format_round_trip_token(session_token, 0),
+            "absorbed_sides": 0,
+            "absorbed_drinks": 0,
         }
         logger.info("Session created: %s", session_id)
         return session_id
@@ -107,6 +109,36 @@ class OrderState:
             else:
                 order_state.append(OrderItem(item=item_name, size=size, quantity=quantity, price=price, display=display))
                 logger.debug("Added %s to session %s", display, session_id)
+
+            # Combo pivot: absorb standalone sides/drinks into a newly added combo
+            if "combo" in item_name.lower():
+                absorbed_side = False
+                absorbed_drink = False
+                items_to_remove = []
+                for i, existing in enumerate(order_state):
+                    if existing.item == item_name:
+                        continue  # skip the combo itself
+                    component = _infer_combo_component(existing.item)
+                    if component == "sides" and not absorbed_side:
+                        logger.info("Absorbing '%s' into new combo '%s'", existing.display, item_name)
+                        if existing.quantity > 1:
+                            existing.quantity -= 1
+                        else:
+                            items_to_remove.append(i)
+                        absorbed_side = True
+                    elif component == "drinks" and not absorbed_drink:
+                        logger.info("Absorbing '%s' into new combo '%s'", existing.display, item_name)
+                        if existing.quantity > 1:
+                            existing.quantity -= 1
+                        else:
+                            items_to_remove.append(i)
+                        absorbed_drink = True
+                for idx in reversed(items_to_remove):
+                    order_state.pop(idx)
+                if absorbed_side:
+                    session["absorbed_sides"] += 1
+                if absorbed_drink:
+                    session["absorbed_drinks"] += 1
         elif action == "remove":
             if existing_item_index != -1:
                 if order_state[existing_item_index].quantity > quantity:
@@ -134,6 +166,10 @@ class OrderState:
         combo_count = sum(item.quantity for item in order_items if "combo" in item.item.lower())
         side_count = sum(item.quantity for item in order_items if _infer_combo_component(item.item) == "sides")
         drink_count = sum(item.quantity for item in order_items if _infer_combo_component(item.item) in ("drinks",))
+
+        # Include sides/drinks absorbed into combos during combo pivot
+        side_count += session.get("absorbed_sides", 0)
+        drink_count += session.get("absorbed_drinks", 0)
 
         missing = []
         if side_count < combo_count:
@@ -181,6 +217,8 @@ class OrderState:
         """Clears all items from the current session's order."""
         session = self.sessions[session_id]
         session["order_state"] = []
+        session["absorbed_sides"] = 0
+        session["absorbed_drinks"] = 0
         self._update_summary(session_id)
         logger.info("Order fully reset for session %s", session_id)
 

@@ -247,6 +247,86 @@ class OrderStateTests(unittest.TestCase):
         result = order_state_singleton.get_combo_requirements(session_id)
         self.assertTrue(result["is_complete"])
 
+    # ── Combo pivot / absorption tests ──
+
+    def test_combo_absorbs_existing_side_and_drink(self):
+        """Fish Sandwich + Tots + Diet Coke → 'make it a combo' absorbs both."""
+        session_id = order_state_singleton.create_session()
+        order_state_singleton.handle_order_update(session_id, "add", "Fish Sandwich", "standard", 1, 5.49)
+        order_state_singleton.handle_order_update(session_id, "add", "Tots", "medium", 1, 2.79)
+        order_state_singleton.handle_order_update(session_id, "add", "Diet Coke", "medium", 1, 1.99)
+        # Guest says "make that a combo"
+        order_state_singleton.handle_order_update(session_id, "add", "Fish Sandwich Combo", "standard", 1, 8.49)
+        items = order_state_singleton.get_order_items(session_id)
+        item_names = [i.item for i in items]
+        self.assertIn("Fish Sandwich", item_names)
+        self.assertIn("Fish Sandwich Combo", item_names)
+        self.assertNotIn("Tots", item_names)
+        self.assertNotIn("Diet Coke", item_names)
+        result = order_state_singleton.get_combo_requirements(session_id)
+        self.assertTrue(result["is_complete"])
+
+    def test_combo_absorbs_only_one_side(self):
+        """Two standalone sides, combo absorbs only one."""
+        session_id = order_state_singleton.create_session()
+        order_state_singleton.handle_order_update(session_id, "add", "Tots", "medium", 1, 2.79)
+        order_state_singleton.handle_order_update(session_id, "add", "Onion Rings", "medium", 1, 3.29)
+        order_state_singleton.handle_order_update(session_id, "add", "SuperSONIC Cheeseburger Combo", "standard", 1, 8.49)
+        items = order_state_singleton.get_order_items(session_id)
+        side_items = [i for i in items if i.item in ("Tots", "Onion Rings")]
+        self.assertEqual(len(side_items), 1, "Only one side should remain after absorption")
+
+    def test_combo_absorbs_only_one_drink(self):
+        """Two standalone drinks, combo absorbs only one."""
+        session_id = order_state_singleton.create_session()
+        order_state_singleton.handle_order_update(session_id, "add", "Cherry Limeade", "medium", 1, 2.99)
+        order_state_singleton.handle_order_update(session_id, "add", "Ocean Water", "medium", 1, 2.99)
+        order_state_singleton.handle_order_update(session_id, "add", "SuperSONIC Cheeseburger Combo", "standard", 1, 8.49)
+        items = order_state_singleton.get_order_items(session_id)
+        drink_items = [i for i in items if i.item in ("Cherry Limeade", "Ocean Water")]
+        self.assertEqual(len(drink_items), 1, "Only one drink should remain after absorption")
+
+    def test_combo_absorbs_decrements_quantity_when_multiple(self):
+        """Standalone side qty=2, combo absorbs one unit leaving qty=1."""
+        session_id = order_state_singleton.create_session()
+        order_state_singleton.handle_order_update(session_id, "add", "Tots", "medium", 2, 2.79)
+        order_state_singleton.handle_order_update(session_id, "add", "SuperSONIC Cheeseburger Combo", "standard", 1, 8.49)
+        items = order_state_singleton.get_order_items(session_id)
+        tots = next(i for i in items if i.item == "Tots")
+        self.assertEqual(tots.quantity, 1, "Should decrement qty rather than remove")
+
+    def test_combo_no_absorption_when_no_sides_or_drinks(self):
+        """Adding a combo with no standalone sides/drinks absorbs nothing."""
+        session_id = order_state_singleton.create_session()
+        order_state_singleton.handle_order_update(session_id, "add", "Fish Sandwich", "standard", 1, 5.49)
+        order_state_singleton.handle_order_update(session_id, "add", "SuperSONIC Cheeseburger Combo", "standard", 1, 8.49)
+        items = order_state_singleton.get_order_items(session_id)
+        self.assertEqual(len(items), 2)
+        result = order_state_singleton.get_combo_requirements(session_id)
+        self.assertFalse(result["is_complete"])
+
+    def test_non_combo_add_does_not_absorb(self):
+        """Adding a regular item doesn't trigger absorption."""
+        session_id = order_state_singleton.create_session()
+        order_state_singleton.handle_order_update(session_id, "add", "Tots", "medium", 1, 2.79)
+        order_state_singleton.handle_order_update(session_id, "add", "Fish Sandwich", "standard", 1, 5.49)
+        items = order_state_singleton.get_order_items(session_id)
+        self.assertEqual(len(items), 2)
+        self.assertEqual(items[0].item, "Tots")
+
+    def test_combo_absorbs_side_only_when_no_drink_present(self):
+        """Side exists but no drink — absorb side, combo still needs drink."""
+        session_id = order_state_singleton.create_session()
+        order_state_singleton.handle_order_update(session_id, "add", "Tots", "medium", 1, 2.79)
+        order_state_singleton.handle_order_update(session_id, "add", "Fish Sandwich Combo", "standard", 1, 8.49)
+        items = order_state_singleton.get_order_items(session_id)
+        item_names = [i.item for i in items]
+        self.assertNotIn("Tots", item_names)
+        result = order_state_singleton.get_combo_requirements(session_id)
+        self.assertFalse(result["is_complete"])
+        self.assertEqual(len(result["missing_items"]), 1)
+        self.assertIn("drink", result["missing_items"][0])
+
 
 if __name__ == "__main__":
     unittest.main()
