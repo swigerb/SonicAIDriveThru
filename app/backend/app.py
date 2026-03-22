@@ -122,7 +122,7 @@ async def create_app() -> web.Application:
     )
     if api_version := os.environ.get("AZURE_OPENAI_REALTIME_API_VERSION"):
         rtmt.api_version = api_version
-    rtmt.temperature = 0.5
+    rtmt.temperature = 0.6  # Azure OpenAI Realtime API minimum is 0.6
     rtmt.max_tokens = 4096  # Must be generous — tool call arguments share this budget with audio
     rtmt.system_message = (
         "You are a Sonic Drive-In carhop — upbeat, friendly, and FAST.\n\n"
