@@ -2,8 +2,10 @@ import asyncio
 import json
 import logging
 import os
+import pathlib
 import re
 import time
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
@@ -29,6 +31,50 @@ if _VERBOSE_GLOBAL:
         vlogger.addHandler(_handler)
 else:
     vlogger.setLevel(logging.WARNING)  # silent until per-session toggle
+
+# ── Verbose file logging ──
+# Always-on file logging via VERBOSE_LOG_FILE=true env var (parallel to VERBOSE_LOGGING).
+_VERBOSE_LOG_FILE_GLOBAL = os.environ.get("VERBOSE_LOG_FILE", "").lower() in ("true", "1", "yes")
+_LOGS_DIR = pathlib.Path(__file__).parent / "logs"
+
+
+def _create_verbose_file_handler() -> logging.FileHandler:
+    """Create a FileHandler that writes verbose logs to a timestamped file in app/backend/logs/."""
+    _LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M")
+    log_path = _LOGS_DIR / f"verbose-{ts}.log"
+    fh = logging.FileHandler(log_path, encoding="utf-8")
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(logging.Formatter("%(message)s"))
+    # Flush after every write so the file is always up to date
+    fh.stream.reconfigure(line_buffering=True)  # type: ignore[union-attr]
+    # Write header line
+    header = f"═══ Verbose Log Started: {datetime.now(timezone.utc).isoformat()} ═══"
+    fh.stream.write(header + "\n")
+    fh.stream.flush()
+    logger.info("Verbose log file opened: %s", log_path)
+    return fh
+
+
+def _remove_verbose_file_handler(fh: logging.FileHandler) -> None:
+    """Remove a file handler from the verbose logger and close it cleanly."""
+    vlogger.removeHandler(fh)
+    try:
+        fh.close()
+    except Exception:
+        pass
+
+
+# If VERBOSE_LOG_FILE env var is set, attach a global file handler at module load.
+_global_file_handler: logging.FileHandler | None = None
+if _VERBOSE_LOG_FILE_GLOBAL:
+    vlogger.setLevel(logging.DEBUG)
+    if not any(isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler) for h in vlogger.handlers):
+        _sh = logging.StreamHandler()
+        _sh.setFormatter(logging.Formatter("%(message)s"))
+        vlogger.addHandler(_sh)
+    _global_file_handler = _create_verbose_file_handler()
+    vlogger.addHandler(_global_file_handler)
 
 # Max characters of tool result text to log (prevents terminal flooding)
 _VERBOSE_RESULT_TRUNCATE = 500
@@ -83,6 +129,7 @@ _MARKER_SESSION_UPDATE = '"session.update"'
 _MARKER_SESSION_UPDATED = '"session.updated"'
 _MARKER_RESPONSE_CANCEL = '"response.cancel"'
 _MARKER_VERBOSE_LOGGING = '"extension.set_verbose_logging"'
+_MARKER_LOG_TO_FILE = '"extension.set_log_to_file"'
 
 # Connection tuning constants
 _WS_HEARTBEAT_SEC = 15.0
@@ -420,6 +467,8 @@ class RTMiddleTier:
         # Per-connection verbose logging toggle (set by frontend extension message)
         verbose = _VERBOSE_GLOBAL
         audio_frame_count = 0  # Counter for verbose audio frame logging
+        # Per-connection file handler for verbose log-to-file (set by frontend or env var)
+        session_file_handler: logging.FileHandler | None = None
 
         # Echo suppression state — shared between client→server and server→client tasks.
         # Safe without locks: single-threaded asyncio event loop guarantees no concurrent mutation.
@@ -478,7 +527,7 @@ class RTMiddleTier:
                         self._sent_greeting.add(session_id)
 
                 async def from_client_to_server():
-                    nonlocal ai_speaking, cooldown_end, verbose, audio_frame_count
+                    nonlocal ai_speaking, cooldown_end, verbose, audio_frame_count, session_file_handler
                     async for msg in ws:
                         if msg.type == aiohttp.WSMsgType.TEXT:
                             # Intercept extension messages — don't forward to OpenAI
@@ -501,6 +550,34 @@ class RTMiddleTier:
                                               "║  VERBOSE LOGGING: %-8s           ║\n"
                                               "╚══════════════════════════════════════╝",
                                               "ENABLED" if verbose else "DISABLED")
+                                        continue  # Don't forward to OpenAI
+                                except (json.JSONDecodeError, KeyError):
+                                    pass
+
+                            if _MARKER_LOG_TO_FILE in msg.data:
+                                try:
+                                    ext_msg = json.loads(msg.data)
+                                    if ext_msg.get("type") == "extension.set_log_to_file":
+                                        enabled = bool(ext_msg.get("enabled", False))
+                                        if enabled and session_file_handler is None:
+                                            # Ensure verbose logger is active
+                                            vlogger.setLevel(logging.DEBUG)
+                                            if not any(isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler) for h in vlogger.handlers):
+                                                _h = logging.StreamHandler()
+                                                _h.setFormatter(logging.Formatter("%(message)s"))
+                                                vlogger.addHandler(_h)
+                                            session_file_handler = _create_verbose_file_handler()
+                                            vlogger.addHandler(session_file_handler)
+                                        elif not enabled and session_file_handler is not None:
+                                            _remove_verbose_file_handler(session_file_handler)
+                                            session_file_handler = None
+                                        logger.info("Verbose log-to-file %s for session %s",
+                                                    "ENABLED" if enabled else "DISABLED", session_id)
+                                        _vlog(verbose or enabled,
+                                              "\n╔══════════════════════════════════════╗\n"
+                                              "║  LOG TO FILE: %-8s              ║\n"
+                                              "╚══════════════════════════════════════╝",
+                                              "ENABLED" if enabled else "DISABLED")
                                         continue  # Don't forward to OpenAI
                                 except (json.JSONDecodeError, KeyError):
                                     pass
@@ -633,6 +710,10 @@ class RTMiddleTier:
                     _vlog(verbose, "\n╔══════════════════════════════════════╗\n"
                                    "║  SESSION DISCONNECT — %s  ║\n"
                                    "╚══════════════════════════════════════╝", session_id or "?")
+                    # Clean up per-connection file handler — don't leak file handles
+                    if session_file_handler is not None:
+                        _remove_verbose_file_handler(session_file_handler)
+                        session_file_handler = None
                     if session_id is not None:
                         order_state_singleton.delete_session(session_id)
                     # Clean up the session map when the connection is closed

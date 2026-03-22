@@ -156,6 +156,9 @@ data/**/*.md5
 .DS_Store
 data/transformed_menu_items/
 
+# Verbose log output
+app/backend/logs/
+
 # Squad: ignore runtime state (logs, inbox, sessions)
 # Squad: ignore runtime state (logs, inbox, sessions)
 .squad/orchestration-log/
