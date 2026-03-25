@@ -355,10 +355,12 @@ class RTMiddleTier:
                     if tools_pending:
                         tools_pending.clear()
                         await server_ws.send_str(_RESPONSE_CREATE_MSG)
+                    is_tool_call_response = False
                     if "response" in message:
                         output = message["response"]["output"]
                         fn_calls = [o for o in output if o.get("type") == "function_call"]
                         if fn_calls:
+                            is_tool_call_response = True
                             logger.info("Response contained %d tool call(s): %s",
                                         len(fn_calls), [o.get("name", "?") for o in fn_calls])
                         else:
@@ -370,7 +372,7 @@ class RTMiddleTier:
                         if len(filtered) != len(output):
                             message["response"]["output"] = filtered
                             updated_message = json.dumps(message)
-                    if session_id is not None:
+                    if session_id is not None and not is_tool_call_response:
                         identifiers = order_state_singleton.advance_round_trip(session_id)
                         await self._sessions.emit_session_identifiers(client_ws, "extension.round_trip_token", identifiers)
                         _vlog(verbose, "─── [ROUND TRIP] #%d ───\n"
