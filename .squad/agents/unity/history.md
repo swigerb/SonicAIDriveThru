@@ -50,6 +50,19 @@
 - Error messages use Jinja2 StrictUndefined for early validation
 
 **Coordination:** Summer's `prompt_loader.py` reads manifest-driven YAML at startup. All 125 tests pass.
+
+### 2026-03-26: Same-Utterance Combo Fix (Critical Demo Bug)
+
+**Problem:** When a customer specified a combo entree, side, AND drink in one sentence (e.g., "bacon double cheeseburger combo with medium tots and a large diet Coke"), the AI ignored the side and drink, then re-asked for them — causing multiple wasted turns.
+
+**Root Cause:** `update_order` is single-item. After the first call (combo entree), the backend's `get_combo_requirements()` returns a `[SYSTEM HINT]` saying "ask for side and drink." The AI blindly followed the hint instead of processing the remaining items the customer already specified.
+
+**Fix (prompt-only, 3 sections):**
+1. **COMBO_LOGIC** — Added "SAME-UTTERANCE COMBO RULE" block: parse ALL components from the sentence first, call update_order back-to-back for each, ignore [SYSTEM HINT] if items already mentioned, only ask about truly missing components.
+2. **COMBO_PIVOT_RULES** — Added: hints reflect state after each individual call; if unprocessed items remain from utterance, add them before responding to the hint.
+3. **TOOL_CALLING_RULES** — Added "MULTI-ITEM UTTERANCES" rule: process all mentioned items before responding verbally.
+
+**Validation:** YAML valid, 337 tests pass, no code changes.
 
 <!-- Older detailed sections archived above for space. Current learnings focused on Phase 3 integration. -->
 
