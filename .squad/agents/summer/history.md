@@ -40,6 +40,8 @@
 
 ## Learnings
 
+- **Prompt Externalization Inventory (2026-03-25)**: Completed exhaustive audit of all hardcoded prompts, configs, tool definitions, and architectural gaps across the backend. Key findings: 12 distinct prompt strings (~6,500 chars), 25+ config constants scattered across 5 files, 4 tool schemas, 10+ error/hint templates. The system prompt in app.py (lines 127–250, ~4,200 chars) is the highest-value externalization target. Proposed `app/backend/prompts/` directory structure with markdown for prompts, JSON for tool schemas, YAML for config. Identified critical issues: blocking calls in azurespeech.py, `_sent_greeting` memory leak, duplicated size maps between tools.py and order_state.py, duplicated category inference logic, and happy hour timezone bug (uses UTC in Azure Container Apps). Full report in `.squad/decisions/inbox/summer-prompt-inventory.md`.
+
 <!-- Append new learnings below. Each entry is something lasting about the project. -->
 - **Asyncio shared state safety**: mutable state shared between coroutines (like `ai_speaking` and `cooldown_end`) is safe in asyncio without locks — event loop is single-threaded, all state checks atomic within tick.
 - **gpt-realtime-1.5 prompt best practices**: Bulleted format with ALL CAPS emphasis beats prose paragraphs for instruction following. Explicit phrase variety rules prevent bot-like repetition. Reduce prompt token count through conciseness.

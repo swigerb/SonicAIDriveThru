@@ -103,3 +103,13 @@
   2. **Updated CLOSING AN ORDER** — added "ALWAYS state the total in the closing phrase — NEVER close without a total" and changed the example farewell to include the total: "Your total is [amount]. Thank you! Your carhop will have that right out!"
 - **Test update:** `test_system_prompt_contains_carhop_closing` assertion updated from "right out to you" to "right out" to match the new closing phrasing.
 - **All 125 tests pass.**
+
+### Prompt Externalization & AI Pipeline Audit (2026-07-22)
+- **Complete prompt inventory:** System prompt (~2,000 tokens, 18 sections, 122 lines) in `app.py:127-250`. Greeting in `rtmt.py:141-150`. 4 tool schemas + descriptions in `tools.py:198-525`. 8 AI-directed error messages in `tools.py`. 6 UPSELL HINT templates in `tools.py:474-486`. SYSTEM HINT templates in `tools.py:470` + `order_state.py:183`. OOS and HAPPY HOUR flags in `tools.py:299,489,511`.
+- **System prompt quality:** Already follows gpt-realtime-1.5 best practices (bullets, ALL CAPS, variety rules, named sections). No dense paragraphs. Well-structured and would survive externalization to YAML intact. No dynamic template variables — all runtime context flows via tool results (correct pattern).
+- **Recommended format:** YAML with Jinja2 for templated error messages. One file per brand with named sections. Manifest file for model config + section ordering. Prompt loader validates at startup.
+- **Key architectural insight:** Do NOT template the system prompt with runtime data. The current tool-result-based dynamic content pattern ([SYSTEM HINT], [HAPPY HOUR ACTIVE], [OOS]) is the correct architecture for gpt-realtime-1.5. System prompt is a static behavioral contract; tool results carry live state.
+- **AI pipeline improvements identified:** (1) Tool schema descriptions too generic — `search` should describe Sonic menu specifically; (2) Upsell hints duplicate system prompt logic — single source of truth needed; (3) No prompt validation at startup — malformed prompts fail silently; (4) Error messages don't match carhop voice; (5) No context window monitoring.
+- **File structure proposed:** `app/backend/prompts/sonic/` with `manifest.yaml`, `system_prompt.yaml`, `greeting.yaml`, `tool_schemas.yaml`, `error_messages.yaml`, `hints.yaml`.
+- **Decision written:** `.squad/decisions/inbox/unity-prompt-strategy.md` — full strategy with 6 implementation phases.
+- **Tests affected:** 5 existing tests regex-parse `app.py` for prompt content — will need updating to read YAML after externalization.

@@ -581,6 +581,207 @@ If AI needs explicit post-reset confirmation, routing should change to `TO_BOTH`
 
 ---
 
+## Architectural Review & Prompt Externalization (2026-03-25)
+
+Three-agent parallel analysis completed. Consensus: **Prompt externalization is the critical architectural debt.**
+
+### Key Findings
+
+**1. Architecture Assessment (Rick)**
+
+Rated 10 areas. Priorities:
+
+**🔴 CRITICAL:**
+- Prompts buried in code (12+ hardcoded strings, ~6,500 chars) — no versioning, no A/B testing
+- System prompt alone is 122 lines of string concatenation in `app.py:127-250`
+
+**🟡 NEEDS WORK:**
+- Config scattered (25+ magic numbers in 5 files) — should centralize to `config.py`
+- Error handling gaps (no WebSocket retry, token provider refresh issue at 60 min, no session limits)
+- Code organization debt (`rtmt.py` is 751-line god file, dead code present)
+- Testing incomplete (~127 backend tests solid, but `rtmt.py` has zero coverage, no integration tests)
+- Security gaps (API key in WebSocket URL for dev mode, no CORS, no rate limiting, no WebSocket auth)
+- Documentation mixed (code comments good, `.squad/decisions.md` excellent, but README freshness unknown, no architecture diagram)
+
+**🟢 GOOD:**
+- Performance solid (28 perf tests, caching working)
+- Frontend architecture clean (TypeScript, memo/lazy loading)
+- Infrastructure well-structured (Bicep AVM modules, RBAC, health probes)
+
+### Prioritized Roadmap (Rick)
+
+**P0 (Before next demo)** — 2 days total:
+1. Externalize system prompt + greeting to YAML (1 day)
+2. Move tool schemas to YAML (0.5 day)
+3. Create `config.py` for all tunable values (0.5 day)
+4. Remove/archive dead code (1 hour)
+
+**P1 (Before production)** — ~6 days:
+- Add WebSocket authentication (1 day)
+- Implement OpenAI connection retry logic (0.5 day)
+- Fix token provider async refresh (0.5 day)
+- Add session limits (0.5 day)
+- Add `rtmt.py` unit tests (2 days)
+- Split `rtmt.py` into 3 modules (1 day)
+
+**P2 (Nice to have):**
+- Architecture diagram (0.5 day)
+- Application Insights (0.5 day)
+- Frontend component tests (2 days)
+
+---
+
+**2. Backend Prompt & Config Inventory (Summer)**
+
+Exhaustive catalog with loading strategy:
+
+**12 Hardcoded Prompt Strings (~9,100 chars total externalize-able content):**
+- System message (`app.py:127-250`) — ~4,200 chars, ~1,100 tokens (CRITICAL)
+- Greeting (`rtmt.py:141-150`) — pre-serialized JSON
+- Tool schemas (`tools.py:198-525`) — 4 tools (search, update_order, get_order, reset_order)
+- Error messages (`tools.py`) — 8 variants (~1,000 chars)
+- Upsell hints (`tools.py:474-486`) — 6 category templates
+- Combo hints, readback text (order_state.py)
+
+**25+ Config Constants Scattered:**
+- Model: temperature, max_tokens, voice_choice, api_version
+- Search: cache TTL (60s), cache max (128), KNN (15), top (3)
+- Order: max qty/item (10), max total (25), tax (8%)
+- Echo: cooldown (1.5s)
+- WebSocket: heartbeat (15s), timeouts
+- Happy hour: window (14-16), discount (50%)
+- Other: speech voice, compression threshold
+
+**Architectural Issues Found:**
+- Blocking calls in async context (`azurespeech.py` legacy, `rtmt.py:505` token provider)
+- Error handling gaps (no try/except on `json.loads` in tool args, unhandled auth failure)
+- Resource leaks (`_sent_greeting` unbounded, temp file orphans)
+- Code duplication (size normalization, category inference, voice names across 2 files)
+
+**Proposed Externalization Structure:**
+```
+app/backend/prompts/
+├── system_message.md
+├── greeting.md
+├── tool_schemas/ (search.json, update_order.json, get_order.json, reset_order.json)
+├── hints/ (6 upsell templates)
+├── errors/ (invalid_price.txt, per_item_limit.txt, etc.)
+└── config.yaml (all tunable values)
+```
+
+**Priority 1 Quick Wins:**
+- Extract system_message.md (1 day)
+- Extract config.yaml (0.5 day)
+- Fix `_sent_greeting` memory leak (1 line)
+- Unify size maps → constants.py (1 hour)
+
+---
+
+**3. AI Prompt Structure & Pipeline Strategy (Unity)**
+
+YAML + Jinja2 externalization proposal with versioning, validation, and A/B testing support.
+
+**Why YAML (not JSON/Markdown):**
+- Multi-line strings native (`|` block scalar)
+- Comments allowed (JSON doesn't support)
+- Human-readable (non-engineers can review)
+- Jinja2 templating ready (e.g., `{{ item_name }}` in error messages)
+- Ubiquitous in Python ecosystem (`pyyaml`)
+
+**Proposed File Structure:**
+```
+app/backend/prompts/
+├── sonic/
+│   ├── manifest.yaml (brand metadata + model config)
+│   ├── system_prompt.yaml (18 sections, persona, rules)
+│   ├── greeting.yaml
+│   ├── tool_schemas.yaml
+│   ├── error_messages.yaml
+│   └── hints.yaml (SYSTEM HINT, UPSELL HINT, OOS, HAPPY HOUR)
+├── _base/ (shared across brands)
+│   ├── tool_calling_rules.yaml
+│   └── technical_guardrails.yaml
+└── prompt_loader.py (load + compose + cache at startup)
+```
+
+**Versioning Strategy (Semantic):**
+- **MAJOR:** Brand change, persona overhaul, section restructure
+- **MINOR:** New section, behavioral rule change
+- **PATCH:** Wording tweak, typo fix
+- Git tags: `prompt/sonic/v2.4.0`
+- A/B testing via env var: `PROMPT_VERSION=sonic/v2.4.0`
+- Session logging: Log which prompt version produced conversation
+
+**Critical: DO NOT Template System Prompt**
+Dynamic content (menu prices, order state, combo hints) flows via **tool results**, not prompt injection. This is correct for gpt-realtime-1.5:
+- System prompt sent once at session start (can't update mid-conversation)
+- `[SYSTEM HINT]` pattern handles dynamic steering elegantly
+- **Only template error messages** (Jinja2 for `{{ item_name }}`, `{{ max_qty }}`)
+
+**Pipeline Improvements (5 findings):**
+1. Tool schemas too generic — enrich descriptions for gpt-realtime-1.5
+2. Upsell hints duplicate system prompt — move to hints.yaml (single source)
+3. Greeting pre-serialized JSON — load from greeting.yaml, serialize at startup
+4. Error messages lose brand voice — tune tone to match upbeat Sonic carhop
+5. No prompt validation at startup — validate sections, token count, brand refs (CRITICAL)
+
+**Validation at Startup:**
+- All sections in `prompt_order` exist
+- Total token count within budget (~2,500 tokens max for TTFT)
+- Required sections present (VOICE STYLE, TOOL-CALLING RULES, BOUNDARIES)
+- No stale brand references (regex check for competitor names)
+
+**Implementation Phases (6 phases, Phase 1 critical path):**
+
+| Phase | Scope | Risk | Effort | Benefit |
+|-------|-------|------|--------|---------|
+| 1 | Extract system prompt → YAML, load at startup | Low | 2-3h | Versionable, reviewable prompts |
+| 2 | Extract greeting, errors, tool schemas | Low | 2-3h | Centralized AI config |
+| 3 | Extract hint templates | Low | 1-2h | Single source of truth |
+| 4 | Add prompt validation at startup | Medium | 2-3h | Catch errors before prod |
+| 5 | A/B testing support (env var version selector) | Medium | 3-4h | Data-driven optimization |
+| 6 | Context window monitoring | Low | 1-2h | Observability |
+
+**Tests Affected:**
+5 tests currently regex-parse `app.py` — after externalization, load YAML directly (simpler, more reliable):
+- `test_backend_system_prompt_mentions_sonic`
+- `test_backend_system_prompt_no_dunkin`
+- `test_backend_system_prompt_uses_carhop_not_crew_member`
+- `test_system_prompt_contains_carhop_closing`
+- `test_system_prompt_contains_get_order_tool_instruction`
+
+---
+
+### Consensus & Next Steps
+
+All three agents recommend:
+1. ✅ YAML format (Rick, Summer, Unity agree)
+2. ✅ Semantic versioning for prompts
+3. ✅ System prompt externalization as P0 (foundational)
+4. ✅ Config centralization alongside prompts
+5. ❓ Additional detail: Which agent implements Phase 1? Assign to Summer (backend focus) or create cross-functional pair?
+
+**Brian's decision needed:**
+- Approve YAML + Jinja2 approach?
+- Execute P0 sprint (prompts + config) before other P1 items?
+- Team assignment for Phase 1 implementation?
+
+Full analysis available in:
+- `.squad/decisions/inbox/rick-arch-review.md` (10-area assessment, P0/P1/P2 roadmap)
+- `.squad/decisions/inbox/summer-prompt-inventory.md` (exhaustive inventory + duplication findings)
+- `.squad/decisions/inbox/unity-prompt-strategy.md` (YAML strategy, versioning, validation)
+
+---
+
+### Copilot Directive — Model & SDK Standardization (2026-03-25T12:23)
+
+**Author:** Scribe (per squad manifest)  
+**Status:** Recorded
+
+All code-writing agents (Rick, Summer, Unity, Morty, Birdperson, Squanchy) use **Claude Opus 4.6** for code generation tasks. Recorded in `copilot-directive-2026-03-25T12-23.md`.
+
+---
+
 ## Previous Decisions (Archived)
 
 ### Copilot Directive (2026-02-25T22-39)
