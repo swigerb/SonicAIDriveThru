@@ -53,6 +53,23 @@
 - **Why:** Ensures demo conversations flow naturally without pauses after customer agreement. Complements Summer's grouped readback (natural voice summaries) and backend combo hints.
 - **Coordination:** Part of 3-sprint demo polish (temperature, static files, grouped readback) coordinated by Brian for Inspire Brands executive presentation.
 
+### Prompt YAML Content Extraction (2026-03-25)
+- **Architecture Decision:** Extracted all hardcoded prompts from Python into YAML files under `app/backend/prompts/sonic/` for brand portability and runtime editability.
+- **Key Files Created:**
+  - `system_prompt.yaml` — 22 named sections with priority ordering, exact fidelity to original ~8.9 KB
+  - `greeting.yaml` — greeting message, ~280 B
+  - `tool_schemas.yaml` — 4 tools with brand-specific descriptions (Sonic menu, Carhop Ticket), ~2.4 KB
+  - `error_messages.yaml` — 12 errors with Jinja2 templates (runtime variables: `{{item_name}}`, `{{max_quantity}}`, etc.), ~1.8 KB
+  - `hints.yaml` — 6 category-specific upsells + 3 system hints + 2 delta templates, ~1.5 KB
+  - `manifest.yaml` — brand config (voice: `coral`, model: `gpt-4o-realtime-preview-2024-12-17`), file list, ~350 B
+- **Key Decisions:**
+  - TOOL-CALLING RULES moved to section #2 for gpt-realtime-1.5 top-of-prompt attention
+  - System prompt trimmed ~33% (~1500 → ~1008 tokens) via section merging and example trimming
+  - max_response_output_tokens increased to 1024 for tool call budget headroom (coordinated with Summer)
+  - Tool descriptions branded (not generic) for future brand portability
+  - Error messages use Jinja2 StrictUndefined so missing runtime variables raise immediately
+- **Coordination:** Summer's `prompt_loader.py` reads these files at startup via manifest-driven discovery. All 125 tests pass after loader integration.
+
 ### Tool-Calling Mandate Fix (2026-03-21)
 - **Root cause:** The ORDERING section had only one weak instruction — "Call update_order ONLY after the guest confirms an item." The word "ONLY" reads as a restriction ("only in this case"), not a mandate ("you must do this"). The AI treated ordering as conversational role-play, never triggering update_order.
 - **Fix:** Added a new "⚠️ TOOL-CALLING RULES — MANDATORY" section placed early in the prompt (right after CONVERSATIONAL FLOW, before MENU & PRICING) with ALL CAPS emphasis. Key rules: verbal acknowledgment does NOTHING, REQUIRED FLOW (search → confirm → update_order), skipping the call means the item won't appear. Also reinforced in the ORDERING section and MENU & PRICING section ("ALWAYS call search BEFORE adding any item").

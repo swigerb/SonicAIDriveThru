@@ -30,3 +30,12 @@
 - **`_sent_greeting` Memory Leak (rtmt.py):** Session IDs were added to `self._sent_greeting` set on WebSocket connect but never removed on disconnect. Added `self._sent_greeting.discard(session_id)` in the `finally` cleanup block alongside existing `_session_map` and `order_state` cleanup.
 - **Dead Code Removal:** Deleted `azurespeech.py` and `azure_speech_gpt4o_mini.py` — legacy Speech SDK integration superseded by Realtime API. Removed `azure-cognitiveservices-speech==1.38.0` from requirements.txt. No external imports found.
 - **Deduplication (menu_utils.py):** Created `app/backend/menu_utils.py` as single source of truth for `SIZE_MAP`, `SIZE_ALIASES`, `normalize_size()`, `infer_category()`, and `MENU_CATEGORY_MAP`. Updated `tools.py` and `order_state.py` to import from it. Removed ~70 lines of duplicated code. All 125 tests pass.
+
+### 2026-03-25: Parallel Three-Agent Sprint — Prompt Externalization & Bug Fixes
+- **Coordination:** Summer (prompt_loader.py infrastructure), Unity (prompt YAML content extraction), Squanchy (4 bugfixes) executed in parallel without conflicts. All 125 tests passing throughout.
+- **Outcome:** Complete YAML-driven prompt and config externalization infrastructure with backward-compatible fallbacks. 4 architectural bugs fixed. 9 decision inbox items merged into decisions.md. Orchestration logs written (3 per-agent, 1 session log). Ready for git commit of .squad/ changes.
+- **Key Coordination Notes:**
+  - Summer's `prompt_loader.py` manifest-driven discovery coordinates seamlessly with Unity's YAML structure
+  - Squanchy's 4 bugfixes (timezone, memory leak, dead code, deduplication) identified during architecture review, executed without touching loader code
+  - All 125 tests pass after integration of Summer's loader + Squanchy's bugfixes; no test changes needed (backward compatibility preserved)
+  - Decision inbox merge: 9 items covering echo fix, tool-calling fix, verbose logging, bugfixes, YAML extraction, token limits
