@@ -49,3 +49,8 @@ compression:
 
 logging:
   verbose_result_truncate: 500
+
+context:
+  max_tokens: 128000
+  warning_threshold_pct: 80
+  critical_threshold_pct: 95

@@ -1,11 +1,8 @@
 import asyncio
 import json
 import logging
-import os
-import pathlib
 import re
 import time
-from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
@@ -15,126 +12,39 @@ from azure.core.credentials import AzureKeyCredential
 from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 
 from config_loader import get_config
-from order_state import SessionIdentifiers, order_state_singleton
+from order_state import order_state_singleton
+from session_manager import SessionManager
+from audio_pipeline import (
+    EchoSuppressor,
+    vlog as _vlog, vlogger,
+    create_verbose_file_handler as _create_verbose_file_handler,
+    remove_verbose_file_handler as _remove_verbose_file_handler,
+    TYPE_RE as _TYPE_RE,
+    RESPONSE_CREATE_MSG as _RESPONSE_CREATE_MSG,
+    INPUT_AUDIO_CLEAR_MSG as _INPUT_AUDIO_CLEAR_MSG,
+    ECHO_COOLDOWN_SEC as _ECHO_COOLDOWN_SEC,
+    MARKER_AUDIO_APPEND as _MARKER_AUDIO_APPEND,
+    MARKER_AUDIO_DELTA as _MARKER_AUDIO_DELTA,
+    MARKER_AUDIO_DONE as _MARKER_AUDIO_DONE,
+    MARKER_SPEECH_STARTED as _MARKER_SPEECH_STARTED,
+    MARKER_SESSION_UPDATE as _MARKER_SESSION_UPDATE,
+    MARKER_SESSION_UPDATED as _MARKER_SESSION_UPDATED,
+    MARKER_RESPONSE_CANCEL as _MARKER_RESPONSE_CANCEL,
+    MARKER_VERBOSE_LOGGING as _MARKER_VERBOSE_LOGGING,
+    MARKER_LOG_TO_FILE as _MARKER_LOG_TO_FILE,
+    _PASSTHROUGH_SERVER_TYPES,
+    _PASSTHROUGH_CLIENT_TYPES,
+    _VERBOSE_GLOBAL,
+    _VERBOSE_RESULT_TRUNCATE,
+)
 
 logger = logging.getLogger("sonic-drive-in")
 
 # Load centralized config
 _config = get_config()
-_audio_cfg = _config.get("audio", {})
 _conn_cfg = _config.get("connection", {})
 
-# ── Verbose diagnostic logger ──
-# Separate logger so verbose output can be toggled without affecting production logs.
-# Enabled globally via VERBOSE_LOGGING=true env var, or per-session via WebSocket message.
-vlogger = logging.getLogger("sonic-verbose")
-_VERBOSE_GLOBAL = os.environ.get("VERBOSE_LOGGING", "").lower() in ("true", "1", "yes")
-if _VERBOSE_GLOBAL:
-    vlogger.setLevel(logging.DEBUG)
-    if not vlogger.handlers:
-        _handler = logging.StreamHandler()
-        _handler.setFormatter(logging.Formatter("%(message)s"))
-        vlogger.addHandler(_handler)
-else:
-    vlogger.setLevel(logging.WARNING)  # silent until per-session toggle
-
-# ── Verbose file logging ──
-# Always-on file logging via VERBOSE_LOG_FILE=true env var (parallel to VERBOSE_LOGGING).
-_VERBOSE_LOG_FILE_GLOBAL = os.environ.get("VERBOSE_LOG_FILE", "").lower() in ("true", "1", "yes")
-_LOGS_DIR = pathlib.Path(__file__).parent / "logs"
-
-
-def _create_verbose_file_handler() -> logging.FileHandler:
-    """Create a FileHandler that writes verbose logs to a timestamped file in app/backend/logs/."""
-    _LOGS_DIR.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M")
-    log_path = _LOGS_DIR / f"verbose-{ts}.log"
-    fh = logging.FileHandler(log_path, encoding="utf-8")
-    fh.setLevel(logging.DEBUG)
-    fh.setFormatter(logging.Formatter("%(message)s"))
-    # Flush after every write so the file is always up to date
-    fh.stream.reconfigure(line_buffering=True)  # type: ignore[union-attr]
-    # Write header line
-    header = f"═══ Verbose Log Started: {datetime.now(timezone.utc).isoformat()} ═══"
-    fh.stream.write(header + "\n")
-    fh.stream.flush()
-    logger.info("Verbose log file opened: %s", log_path)
-    return fh
-
-
-def _remove_verbose_file_handler(fh: logging.FileHandler) -> None:
-    """Remove a file handler from the verbose logger and close it cleanly."""
-    vlogger.removeHandler(fh)
-    try:
-        fh.close()
-    except Exception:
-        pass
-
-
-# If VERBOSE_LOG_FILE env var is set, attach a global file handler at module load.
-_global_file_handler: logging.FileHandler | None = None
-if _VERBOSE_LOG_FILE_GLOBAL:
-    vlogger.setLevel(logging.DEBUG)
-    if not any(isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler) for h in vlogger.handlers):
-        _sh = logging.StreamHandler()
-        _sh.setFormatter(logging.Formatter("%(message)s"))
-        vlogger.addHandler(_sh)
-    _global_file_handler = _create_verbose_file_handler()
-    vlogger.addHandler(_global_file_handler)
-
-# Max characters of tool result text to log (prevents terminal flooding)
-_VERBOSE_RESULT_TRUNCATE = _config.get("logging", {}).get("verbose_result_truncate", 500)
-
 __all__ = ["RTMiddleTier", "RTToolCall", "Tool", "ToolResult", "ToolResultDirection"]
-
-# High-frequency message types that are never modified by the middleware.
-# Returning early for these avoids match/case overhead on the audio hot-path.
-_PASSTHROUGH_SERVER_TYPES = frozenset({
-    "response.audio.delta",
-    "response.audio.done",
-    "response.audio_transcript.delta",
-    "response.audio_transcript.done",
-    "response.text.delta",
-    "response.text.done",
-    "response.content_part.added",
-    "response.content_part.done",
-    "input_audio_buffer.speech_started",
-    "input_audio_buffer.speech_stopped",
-    "input_audio_buffer.committed",
-    "rate_limits.updated",
-})
-
-# Client messages that never need middleware modification — pass straight through.
-# input_audio_buffer.append is BY FAR the most frequent client message (every ~100ms).
-_PASSTHROUGH_CLIENT_TYPES = frozenset({
-    "input_audio_buffer.append",
-    "input_audio_buffer.clear",
-    "input_audio_buffer.commit",
-})
-
-# Regex to extract "type":"..." from raw JSON without full parse.
-# This lets us skip json.loads entirely for passthrough messages on the hot path.
-_TYPE_RE = re.compile(r'"type"\s*:\s*"([^"]+)"')
-
-# Pre-serialized static payloads to avoid repeated json.dumps on every round-trip
-_RESPONSE_CREATE_MSG = json.dumps({"type": "response.create"})
-
-# Pre-serialized message to flush echoed audio from OpenAI's input buffer
-_INPUT_AUDIO_CLEAR_MSG = json.dumps({"type": "input_audio_buffer.clear"})
-
-# Cooldown period (seconds) after AI audio ends before accepting user audio.
-_ECHO_COOLDOWN_SEC = _audio_cfg.get("echo_cooldown_seconds", 1.5)
-
-# Fast substring markers for echo suppression (avoids regex/JSON parse overhead)
-_MARKER_AUDIO_APPEND = '"input_audio_buffer.append"'
-_MARKER_AUDIO_DELTA = '"response.audio.delta"'
-_MARKER_AUDIO_DONE = '"response.audio.done"'
-_MARKER_SPEECH_STARTED = '"input_audio_buffer.speech_started"'
-_MARKER_SESSION_UPDATE = '"session.update"'
-_MARKER_SESSION_UPDATED = '"session.updated"'
-_MARKER_RESPONSE_CANCEL = '"response.cancel"'
-_MARKER_VERBOSE_LOGGING = '"extension.set_verbose_logging"'
-_MARKER_LOG_TO_FILE = '"extension.set_log_to_file"'
 
 # Connection tuning constants
 _WS_HEARTBEAT_SEC = _conn_cfg.get("ws_heartbeat_seconds", 15.0)
@@ -142,25 +52,6 @@ _WS_CONNECT_TIMEOUT = aiohttp.ClientTimeout(
     total=_conn_cfg.get("ws_connect_timeout_total", 30),
     connect=_conn_cfg.get("ws_connect_timeout_connect", 10),
 )
-
-# Default greeting — overridden by PromptLoader at runtime.
-# Kept as fallback for tests and backwards compatibility.
-_DEFAULT_GREETING_MSG = json.dumps({
-    "type": "conversation.item.create",
-    "item": {
-        "type": "message",
-        "role": "user",
-        "content": [
-            {"type": "input_text", "text": "Say EXACTLY this greeting and NOTHING else: Welcome to Sonic Drive-In! What can I get started for you today?"}
-        ]
-    }
-})
-
-
-def _vlog(verbose: bool, msg: str, *args: Any) -> None:
-    """Log to sonic-verbose at DEBUG level if this session has verbose enabled."""
-    if verbose or _VERBOSE_GLOBAL:
-        vlogger.debug(msg, *args)
 
 
 class ToolResultDirection(Enum):
@@ -226,14 +117,8 @@ class RTMiddleTier:
         self.voice_choice = voice_choice
         self.tools = {}
         self._token_provider = None
-        self._session_map: dict[web.WebSocketResponse, str] = {}
-        self._sent_greeting: set[str] = set()
         self._prompt_loader = prompt_loader
-        # Use prompt loader greeting if available, else fallback
-        if prompt_loader is not None:
-            self._greeting_msg = prompt_loader.get_greeting_json_str()
-        else:
-            self._greeting_msg = _DEFAULT_GREETING_MSG
+        self._sessions = SessionManager(prompt_loader=prompt_loader)
         if voice_choice is not None:
             logger.info("Realtime voice choice set to %s", voice_choice)
         if isinstance(credentials, AzureKeyCredential):
@@ -241,23 +126,6 @@ class RTMiddleTier:
         else:
             self._token_provider = get_bearer_token_provider(credentials, "https://cognitiveservices.azure.com/.default")
             self._token_provider() # Warm up during startup so we have a token cached when the first request arrives
-
-    async def _emit_session_identifiers(
-        self,
-        client_ws: web.WebSocketResponse,
-        event_type: str,
-        identifiers: SessionIdentifiers | None,
-    ) -> None:
-        if identifiers is None:
-            return
-        await client_ws.send_json(
-            {
-                "type": event_type,
-                "sessionToken": identifiers.session_token,
-                "roundTripIndex": identifiers.round_trip_index,
-                "roundTripToken": identifiers.round_trip_token,
-            }
-        )
 
     async def _process_message_to_client(self, msg: str, client_ws: web.WebSocketResponse, server_ws: web.WebSocketResponse, tools_pending: dict[str, RTToolCall], verbose: bool = False) -> str | None:
         data = msg.data
@@ -292,7 +160,7 @@ class RTMiddleTier:
         msg_type = message.get("type", "")
 
         updated_message = data
-        session_id = self._session_map.get(client_ws)
+        session_id = self._sessions.get_session_id(client_ws)
         if message is not None:
             _vlog(verbose, "─── [Server → Client] %s ───", msg_type)
             match msg_type:
@@ -315,7 +183,7 @@ class RTMiddleTier:
                     updated_message = json.dumps(message)
                     if session_id is not None:
                         identifiers = order_state_singleton.get_session_identifiers(session_id)
-                        await self._emit_session_identifiers(client_ws, "extension.session_metadata", identifiers)
+                        await self._sessions.emit_session_identifiers(client_ws, "extension.session_metadata", identifiers)
                         _vlog(verbose, "─── [SESSION TOKEN] ───\n"
                                        "Token: %s\n"
                                        "Round Trip: #%d (token: %s)\n"
@@ -397,6 +265,12 @@ class RTMiddleTier:
                                       result.destination.name,
                                       elapsed_ms)
 
+                                # Track tool call args + result in context window
+                                ctx_monitor = self._sessions.get_context_monitor(session_id)
+                                if ctx_monitor:
+                                    ctx_monitor.add_content(item.get("arguments", ""))
+                                    ctx_monitor.add_content(result.to_text())
+
                                 await server_ws.send_json({
                                     "type": "conversation.item.create",
                                     "item": {
@@ -435,12 +309,19 @@ class RTMiddleTier:
                             updated_message = json.dumps(message)
                     if session_id is not None:
                         identifiers = order_state_singleton.advance_round_trip(session_id)
-                        await self._emit_session_identifiers(client_ws, "extension.round_trip_token", identifiers)
+                        await self._sessions.emit_session_identifiers(client_ws, "extension.round_trip_token", identifiers)
                         _vlog(verbose, "─── [ROUND TRIP] #%d ───\n"
                                        "Token: %s\n"
                                        "────────────────────────",
                               identifiers.round_trip_index,
                               identifiers.round_trip_token)
+                    # Track context usage from response output
+                    ctx_monitor = self._sessions.get_context_monitor(session_id)
+                    if ctx_monitor and "response" in message:
+                        for out_item in message["response"].get("output", []):
+                            for content in out_item.get("content", []):
+                                ctx_monitor.add_content(content.get("text", ""))
+                                ctx_monitor.add_content(content.get("transcript", ""))
 
         return updated_message
 
@@ -482,6 +363,13 @@ class RTMiddleTier:
                     _vlog(verbose, "  Injected %d tools: %s, tool_choice=%s",
                           len(session["tools"]), tool_names, session["tool_choice"])
                     updated_message = json.dumps(message)
+                    # Track system message + tool schemas in context window
+                    session_id = self._sessions.get_session_id(ws)
+                    ctx_monitor = self._sessions.get_context_monitor(session_id)
+                    if ctx_monitor:
+                        ctx_monitor.add_content(session.get("instructions", ""))
+                        for tool_schema in session.get("tools", []):
+                            ctx_monitor.add_content(json.dumps(tool_schema))
 
         return updated_message
 
@@ -495,14 +383,8 @@ class RTMiddleTier:
         # Per-connection file handler for verbose log-to-file (set by frontend or env var)
         session_file_handler: logging.FileHandler | None = None
 
-        # Echo suppression state — shared between client→server and server→client tasks.
-        # Safe without locks: single-threaded asyncio event loop guarantees no concurrent mutation.
-        ai_speaking = False
-        cooldown_end = 0.0  # loop.time() value after which user audio is accepted again
-        # Blocks barge-in (speech_started) during the greeting response.
-        # Without this, the greeting audio echoing into the mic triggers VAD,
-        # which resets ai_speaking and allows the echo through — causing a second greeting.
-        greeting_in_progress = False
+        # Echo suppression — delegates to EchoSuppressor
+        echo = EchoSuppressor()
 
         async with aiohttp.ClientSession(
             base_url=self.endpoint,
@@ -523,36 +405,34 @@ class RTMiddleTier:
                 heartbeat=_WS_HEARTBEAT_SEC,
             ) as target_ws:
                 loop = asyncio.get_running_loop()
-                session_id = self._session_map.get(ws)
-                greeting_sent = session_id in self._sent_greeting
+                session_id = self._sessions.get_session_id(ws)
+                greeting_sent = self._sessions.has_sent_greeting(session_id) if session_id else False
 
                 _vlog(verbose, "\n═══ [SESSION] Connected ═══\n"
                                "Session ID: %s\n"
                                "═══════════════════════════", session_id or "?")
 
                 async def send_greeting_once(trigger: str = "unknown"):
-                    nonlocal greeting_sent, ai_speaking, greeting_in_progress
+                    nonlocal greeting_sent
                     if greeting_sent:
                         return
                     logger.info("Greeting firing via trigger=%s (session=%s)", trigger, session_id)
                     _vlog(verbose, "─── [Lifecycle] Greeting trigger=%s ───", trigger)
-                    # Pre-set echo suppression: the AI will start speaking as soon as
-                    # OpenAI processes response.create.  Without this, there's a gap
-                    # between response.create and the first response.audio.delta where
-                    # mic audio could leak through and cause an echo loop.
-                    ai_speaking = True
-                    greeting_in_progress = True
-                    _vlog(verbose, "  Echo suppression: ai_speaking=True (pre-set for greeting)")
+                    echo.start_greeting_suppression(verbose)
                     # Flush any stale audio that arrived before session was configured
                     await target_ws.send_str(_INPUT_AUDIO_CLEAR_MSG)
-                    await target_ws.send_str(self._greeting_msg)
+                    await target_ws.send_str(self._sessions.greeting_msg)
                     await target_ws.send_str(_RESPONSE_CREATE_MSG)
                     greeting_sent = True
                     if session_id is not None:
-                        self._sent_greeting.add(session_id)
+                        self._sessions.mark_greeting_sent(session_id)
+                    # Track greeting in context window
+                    ctx_monitor = self._sessions.get_context_monitor(session_id)
+                    if ctx_monitor:
+                        ctx_monitor.add_content(self._sessions.greeting_msg)
 
                 async def from_client_to_server():
-                    nonlocal ai_speaking, cooldown_end, verbose, audio_frame_count, session_file_handler
+                    nonlocal verbose, audio_frame_count, session_file_handler
                     async for msg in ws:
                         if msg.type == aiohttp.WSMsgType.TEXT:
                             # Intercept extension messages — don't forward to OpenAI
@@ -562,7 +442,6 @@ class RTMiddleTier:
                                     if ext_msg.get("type") == "extension.set_verbose_logging":
                                         verbose = bool(ext_msg.get("enabled", False))
                                         if verbose and not _VERBOSE_GLOBAL:
-                                            # Enable the verbose logger for this session
                                             vlogger.setLevel(logging.DEBUG)
                                             if not vlogger.handlers:
                                                 _h = logging.StreamHandler()
@@ -575,7 +454,7 @@ class RTMiddleTier:
                                               "║  VERBOSE LOGGING: %-8s           ║\n"
                                               "╚══════════════════════════════════════╝",
                                               "ENABLED" if verbose else "DISABLED")
-                                        continue  # Don't forward to OpenAI
+                                        continue
                                 except (json.JSONDecodeError, KeyError):
                                     pass
 
@@ -585,7 +464,6 @@ class RTMiddleTier:
                                     if ext_msg.get("type") == "extension.set_log_to_file":
                                         enabled = bool(ext_msg.get("enabled", False))
                                         if enabled and session_file_handler is None:
-                                            # Ensure verbose logger is active
                                             vlogger.setLevel(logging.DEBUG)
                                             if not any(isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler) for h in vlogger.handlers):
                                                 _h = logging.StreamHandler()
@@ -603,36 +481,25 @@ class RTMiddleTier:
                                               "║  LOG TO FILE: %-8s              ║\n"
                                               "╚══════════════════════════════════════╝",
                                               "ENABLED" if enabled else "DISABLED")
-                                        continue  # Don't forward to OpenAI
+                                        continue
                                 except (json.JSONDecodeError, KeyError):
                                     pass
 
                             # Echo suppression: drop mic audio while AI is speaking or cooling down.
-                            # The AI's speaker output leaks into the mic and gets transcribed as
-                            # phantom user input ("Peace.", "Thank you so much."), creating a
-                            # self-conversation loop. Dropping audio here breaks that cycle.
                             if _MARKER_AUDIO_APPEND in msg.data:
-                                if ai_speaking or loop.time() < cooldown_end:
+                                if echo.should_suppress_audio(loop.time()):
                                     continue
                                 audio_frame_count += 1
                                 if (verbose or _VERBOSE_GLOBAL) and audio_frame_count % 50 == 0:
                                     _vlog(verbose, "─── [Client → Server] Audio frame #%d ───", audio_frame_count)
                             # Barge-in: client sent response.cancel — user wants to speak.
-                            # Disable echo suppression so their audio can flow through.
                             if _MARKER_RESPONSE_CANCEL in msg.data:
-                                logger.info("Client sent response.cancel — disabling echo suppression for barge-in")
-                                _vlog(verbose, "─── [Client] response.cancel — barge-in, echo suppression OFF ───")
-                                ai_speaking = False
-                                cooldown_end = 0.0
+                                echo.on_barge_in(verbose)
                             # Forward client message to OpenAI.
                             new_msg = await self._process_message_to_server(msg, ws, verbose)
                             if new_msg is not None:
                                 await target_ws.send_str(new_msg)
-                            # Fallback greeting trigger: fire after forwarding session.update
-                            # in case session.updated never arrives from the server.
-                            # The session.updated trigger in from_server_to_client is preferred
-                            # (confirms tools are configured), but this ensures the greeting
-                            # always fires even if the API doesn't send session.updated.
+                            # Fallback greeting trigger
                             if not greeting_sent and _MARKER_SESSION_UPDATE in msg.data and _MARKER_SESSION_UPDATED not in msg.data:
                                 logger.info("Fallback greeting: session.update forwarded — sending greeting without waiting for session.updated")
                                 await send_greeting_once(trigger="fallback-after-session.update")
@@ -642,64 +509,23 @@ class RTMiddleTier:
                         elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSING, aiohttp.WSMsgType.CLOSED):
                             break
                     
-                    # Means it is gracefully closed by the client then time to close the target_ws
                     if target_ws and not target_ws.closed:
                         logger.info("Closing OpenAI's realtime socket connection.")
                         _vlog(verbose, "─── [Lifecycle] Disconnect — closing OpenAI socket ───")
                         await target_ws.close()
                         
                 async def from_server_to_client():
-                    nonlocal ai_speaking, cooldown_end, greeting_in_progress
                     async for msg in target_ws:
                         if msg.type == aiohttp.WSMsgType.TEXT:
-                            # Track AI speaking state for echo suppression.
-                            # These substring checks are O(1)-fast (no JSON parse) and only
-                            # trigger state transitions, not per-frame work.
                             data = msg.data
                             if _MARKER_AUDIO_DELTA in data:
-                                if not ai_speaking:
-                                    logger.debug("Echo suppression: AI speaking — suppressing user audio")
-                                    _vlog(verbose, "─── [Echo] ai_speaking=True — suppressing user audio ───")
-                                ai_speaking = True
+                                echo.on_audio_delta(verbose)
                             elif _MARKER_AUDIO_DONE in data:
-                                ai_speaking = False
-                                # Longer cooldown after greeting — speakers at full volume,
-                                # no prior calibration makes echo worst-case at startup.
-                                if greeting_in_progress:
-                                    actual_cooldown = _ECHO_COOLDOWN_SEC * 2
-                                    greeting_in_progress = False
-                                    logger.debug("Echo suppression: greeting audio done — extended cooldown %.1fs", actual_cooldown)
-                                else:
-                                    actual_cooldown = _ECHO_COOLDOWN_SEC
-                                cooldown_end = loop.time() + actual_cooldown
-                                logger.debug("Echo suppression: AI audio done — cooldown %.1fs", actual_cooldown)
-                                _vlog(verbose, "─── [Echo] ai_speaking=False — cooldown %.1fs ───", actual_cooldown)
-                                # Flush any echoed audio that leaked into OpenAI's buffer
-                                await target_ws.send_str(_INPUT_AUDIO_CLEAR_MSG)
-                                # Schedule a SECOND flush after cooldown expires to catch
-                                # echo audio that accumulated during the cooldown window.
-                                # Without this, residual echo triggers VAD → self-talk loop.
-                                def _make_delayed_flush(tws=target_ws):
-                                    if not tws.closed:
-                                        asyncio.ensure_future(tws.send_str(_INPUT_AUDIO_CLEAR_MSG))
-                                loop.call_later(actual_cooldown, _make_delayed_flush)
+                                echo.on_audio_done(loop, target_ws, verbose)
                             elif _MARKER_SPEECH_STARTED in data:
-                                # Server VAD detected speech — but during the greeting
-                                # this is almost certainly echo, not a real barge-in.
-                                if greeting_in_progress:
-                                    logger.debug("Echo suppression: ignoring speech_started during greeting")
-                                    _vlog(verbose, "─── [Echo] speech_started IGNORED (greeting in progress) ───")
-                                else:
-                                    if ai_speaking:
-                                        logger.debug("Echo suppression: barge-in detected — resuming user audio")
-                                        _vlog(verbose, "─── [Echo] Barge-in — ai_speaking=False, cooldown reset ───")
-                                    ai_speaking = False
-                                    cooldown_end = 0.0
+                                echo.on_speech_started(verbose)
 
                             # Greeting trigger: wait for session.updated confirmation
-                            # from OpenAI before sending the greeting.  This guarantees
-                            # tools + system_message are fully configured before the first
-                            # model completion (response.create).
                             if _MARKER_SESSION_UPDATED in data and not greeting_sent:
                                 logger.info("session.updated received — tools are configured, sending greeting")
                                 _vlog(verbose, "─── [Lifecycle] session.updated — sending greeting ───")
@@ -712,6 +538,10 @@ class RTMiddleTier:
                                         _tr_msg = json.loads(data)
                                         _tr_text = _tr_msg.get("transcript", "")[:200]
                                         _vlog(verbose, '\n─── [User] transcription.completed ───\n"%s"', _tr_text)
+                                        # Track user input in context window
+                                        ctx_monitor = self._sessions.get_context_monitor(session_id)
+                                        if ctx_monitor:
+                                            ctx_monitor.add_content(_tr_text)
                                     except (json.JSONDecodeError, KeyError):
                                         pass
 
@@ -727,7 +557,6 @@ class RTMiddleTier:
                 try:
                     await asyncio.gather(from_client_to_server(), from_server_to_client())
                 except ConnectionResetError:
-                    # Ignore the errors resulting from the client disconnecting the socket
                     pass
                 except Exception:
                     logger.exception("Unexpected error in WebSocket forwarding")
@@ -735,16 +564,10 @@ class RTMiddleTier:
                     _vlog(verbose, "\n═══ [SESSION] Disconnected ═══\n"
                                    "Session ID: %s\n"
                                    "══════════════════════════════", session_id or "?")
-                    # Clean up per-connection file handler — don't leak file handles
                     if session_file_handler is not None:
                         _remove_verbose_file_handler(session_file_handler)
                         session_file_handler = None
-                    if session_id is not None:
-                        order_state_singleton.delete_session(session_id)
-                    # Clean up the session map and greeting tracker when the connection is closed
-                    self._session_map.pop(ws, None)
-                    if session_id is not None:
-                        self._sent_greeting.discard(session_id)
+                    self._sessions.cleanup_session(ws, session_id)
 
     async def _websocket_handler(self, request: web.Request):
         ws = web.WebSocketResponse(
@@ -754,9 +577,7 @@ class RTMiddleTier:
         )
         await ws.prepare(request)
         
-        # Create a new session for each WebSocket connection
-        session_id = order_state_singleton.create_session()
-        self._session_map[ws] = session_id
+        self._sessions.create_session(ws)
 
         await self._forward_messages(ws)
         return ws
