@@ -106,18 +106,77 @@ class OrderState:
     def _format_round_trip_token(self, session_token: str, round_trip_index: int) -> str:
         return f"{session_token}-{round_trip_index:04d}"
 
-    def handle_order_update(self, session_id: str, action: str, item_name: str, size: str, quantity: int, price: float):
+    def handle_order_update(self, session_id: str, action: str, item_name: str, size: str, quantity: int, price: float) -> dict:
         session = self.sessions[session_id]
         order_state = session["order_state"]
+        result_info = {}
 
         resolved = normalize_size(size)
         formatted_size = f"{resolved} " if resolved else ""
 
         display = f"{formatted_size}{item_name}".strip()
 
-        existing_item_index = next((index for index, order_item in enumerate(order_state) if order_item.item == item_name and order_item.size == size), -1)
-
         if action == "add":
+            is_combo = "combo" in item_name.lower()
+
+            # ── Combo conversion: auto-remove matching standalone entree ──
+            if is_combo:
+                combo_base = item_name.lower().replace(" combo", "").replace("®", "").strip()
+                for i, existing in enumerate(order_state):
+                    if "combo" in existing.item.lower():
+                        continue  # skip other combos
+                    existing_base = existing.item.split("(")[0].strip().lower().replace("®", "")
+                    if existing_base == combo_base:
+                        # Carry customization mods (e.g., "Pickles Only") to the combo
+                        if "(" in existing.item:
+                            mods = existing.item[existing.item.find("("):]
+                            item_name = f"{item_name} {mods}"
+                            display = f"{formatted_size}{item_name}".strip()
+                            result_info["mods_carried"] = mods
+                        result_info["combo_converted_from"] = existing.item
+                        if existing.quantity > 1:
+                            existing.quantity -= 1
+                        else:
+                            order_state.pop(i)
+                        logger.info("Combo conversion: removed standalone '%s' for combo '%s'", existing.item, item_name)
+                        break
+
+            # ── Post-combo absorption: side/drink fills an incomplete combo slot ──
+            if not is_combo:
+                component = _infer_combo_component(item_name)
+                if component in ("sides", "drinks"):
+                    combo_count = sum(it.quantity for it in order_state if "combo" in it.item.lower())
+                    if combo_count > 0:
+                        if component == "sides":
+                            filled = sum(it.quantity for it in order_state if _infer_combo_component(it.item) == "sides")
+                            filled += session.get("absorbed_sides", 0)
+                        else:
+                            filled = sum(it.quantity for it in order_state if _infer_combo_component(it.item) == "drinks")
+                            filled += session.get("absorbed_drinks", 0)
+
+                        slots_available = combo_count - filled
+                        if slots_available > 0:
+                            to_absorb = min(quantity, slots_available)
+                            if component == "sides":
+                                session["absorbed_sides"] += to_absorb
+                            else:
+                                session["absorbed_drinks"] += to_absorb
+                            remaining = quantity - to_absorb
+                            result_info["absorbed_into_combo"] = True
+                            result_info["absorbed_component"] = component
+                            result_info["absorbed_display"] = display
+                            logger.info("Post-combo absorption: '%s' absorbed as combo %s", display, component)
+                            if remaining <= 0:
+                                self._update_summary(session_id)
+                                return result_info
+                            else:
+                                quantity = remaining
+
+            # ── Regular add ──
+            existing_item_index = next(
+                (index for index, order_item in enumerate(order_state) if order_item.item == item_name and order_item.size == size),
+                -1
+            )
             if existing_item_index != -1:
                 order_state[existing_item_index].quantity += quantity
                 logger.debug("Updated quantity for %s in session %s", display, session_id)
@@ -125,8 +184,8 @@ class OrderState:
                 order_state.append(OrderItem(item=item_name, size=size, quantity=quantity, price=price, display=display))
                 logger.debug("Added %s to session %s", display, session_id)
 
-            # Combo pivot: absorb standalone sides/drinks into a newly added combo
-            if "combo" in item_name.lower():
+            # ── Combo pivot: absorb standalone sides/drinks into a newly added combo ──
+            if is_combo:
                 absorbed_side = False
                 absorbed_drink = False
                 items_to_remove = []
@@ -154,7 +213,9 @@ class OrderState:
                     session["absorbed_sides"] += 1
                 if absorbed_drink:
                     session["absorbed_drinks"] += 1
+
         elif action == "remove":
+            existing_item_index = next((index for index, order_item in enumerate(order_state) if order_item.item == item_name and order_item.size == size), -1)
             if existing_item_index != -1:
                 if order_state[existing_item_index].quantity > quantity:
                     order_state[existing_item_index].quantity -= quantity
@@ -164,6 +225,7 @@ class OrderState:
                     logger.debug("Removed %s from session %s", display, session_id)
 
         self._update_summary(session_id)
+        return result_info
 
     def get_order_summary(self, session_id: str) -> OrderSummary:
         return self.sessions[session_id]["order_summary"]

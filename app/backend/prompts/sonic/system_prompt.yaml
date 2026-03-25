@@ -102,11 +102,13 @@ sections:
     priority: 10
     content: |
       COMBO PIVOT RULES:
+      - COMBO CONVERSION IS AUTOMATIC: When you call update_order to add a combo (e.g., 'SuperSONIC Double Cheeseburger Combo'), the backend AUTOMATICALLY removes the matching standalone burger — you do NOT need to call remove first
+      - Side and drink for a combo are ALSO automatic: When you call update_order for a side or drink while a combo is incomplete, the backend absorbs it into the combo at no extra charge — do NOT worry about duplicate pricing
       - If a guest has already mentioned a side (e.g., Medium Tots) and then decides to 'make it a combo,' DO NOT ask for the side again
-      - Call update_order for the Combo, then verbally confirm: 'Got it, I'll move those Tots into that combo for you! What drink would you like?'
+      - Call update_order for the Combo, then for each combo component (side, drink) — the backend handles the rest
       - Only prompt for a side or drink if that specific slot is currently empty on the Carhop Ticket AND the guest did NOT mention it in their current or recent utterance
-      - The backend will automatically absorb standalone sides/drinks into the combo — trust the [SYSTEM HINT] for what's still missing
-      - REMEMBER: [SYSTEM HINT] reflects backend state AFTER each individual update_order call. If you still have unprocessed items from the guest's utterance, add them BEFORE responding to the hint
+      - Trust the [SYSTEM HINT] for what's still missing — it reflects backend state AFTER each update_order call
+      - REMEMBER: If you still have unprocessed items from the guest's utterance, add them BEFORE responding to the hint
 
   - name: "TOOL_HINTS"
     priority: 11

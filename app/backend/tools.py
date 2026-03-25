@@ -396,7 +396,7 @@ async def update_order(args, session_id: str) -> ToolResult:
             logger.info("Total order limit hit in session %s (would be %d items)", session_id, total_qty)
             return ToolResult(msg, ToolResultDirection.TO_SERVER)
 
-    order_state_singleton.handle_order_update(
+    result_info = order_state_singleton.handle_order_update(
         session_id,
         args["action"],
         item_name,
@@ -413,7 +413,19 @@ async def update_order(args, session_id: str) -> ToolResult:
     action = args["action"]
     display_size = size if size and size.lower() not in {"", "standard", "n/a", "na", "none", "n.a."} else ""
     display_name = f"{display_size.capitalize() + ' ' if display_size else ''}{item_name}"
-    if _prompt_loader:
+
+    absorbed = result_info.get("absorbed_into_combo", False) if result_info else False
+    converted_from = result_info.get("combo_converted_from") if result_info else None
+
+    if absorbed:
+        delta_text = f"{display_name} included with your combo — your total is ${summary.finalTotal:.2f}"
+    elif converted_from and action == "add":
+        combo_display = display_name
+        mods = result_info.get("mods_carried", "")
+        if mods:
+            combo_display = f"{display_name} {mods}"
+        delta_text = f"Upgraded to {combo_display} — your total is now ${summary.finalTotal:.2f}"
+    elif _prompt_loader:
         tpl = _prompt_loader.get_delta_template(action)
         delta_text = _prompt_loader.render_template(tpl, quantity=quantity, display_name=display_name, total=f"{summary.finalTotal:.2f}")
     elif action == "add":
@@ -427,7 +439,7 @@ async def update_order(args, session_id: str) -> ToolResult:
     if not validation["is_complete"]:
         delta_text += f"\n\n[SYSTEM HINT: {validation['prompt_hint']}]"
         logger.info("Combo incomplete for session %s — missing: %s", session_id, validation["missing_items"])
-    elif action == "add":
+    elif action == "add" and not absorbed:
         # ── Category-aware upsell hints (only when combo requirements are met) ──
         category = _infer_category(item_name)
         if _prompt_loader:

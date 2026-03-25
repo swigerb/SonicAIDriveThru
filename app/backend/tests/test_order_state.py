@@ -250,7 +250,7 @@ class OrderStateTests(unittest.TestCase):
     # ── Combo pivot / absorption tests ──
 
     def test_combo_absorbs_existing_side_and_drink(self):
-        """Fish Sandwich + Tots + Diet Coke → 'make it a combo' absorbs both."""
+        """Fish Sandwich + Tots + Diet Coke → 'make it a combo' absorbs both + removes standalone."""
         session_id = order_state_singleton.create_session()
         order_state_singleton.handle_order_update(session_id, "add", "Fish Sandwich", "standard", 1, 5.49)
         order_state_singleton.handle_order_update(session_id, "add", "Tots", "medium", 1, 2.79)
@@ -259,10 +259,15 @@ class OrderStateTests(unittest.TestCase):
         order_state_singleton.handle_order_update(session_id, "add", "Fish Sandwich Combo", "standard", 1, 8.49)
         items = order_state_singleton.get_order_items(session_id)
         item_names = [i.item for i in items]
-        self.assertIn("Fish Sandwich", item_names)
+        # Standalone entree should be REMOVED (combo replaces it)
+        self.assertNotIn("Fish Sandwich", item_names)
         self.assertIn("Fish Sandwich Combo", item_names)
         self.assertNotIn("Tots", item_names)
         self.assertNotIn("Diet Coke", item_names)
+        self.assertEqual(len(items), 1, "Only the combo should remain")
+        # Combo price only — no standalone entree or side/drink prices
+        summary = order_state_singleton.get_order_summary(session_id)
+        self.assertAlmostEqual(summary.total, 8.49, places=2)
         result = order_state_singleton.get_combo_requirements(session_id)
         self.assertTrue(result["is_complete"])
 
@@ -326,6 +331,139 @@ class OrderStateTests(unittest.TestCase):
         self.assertFalse(result["is_complete"])
         self.assertEqual(len(result["missing_items"]), 1)
         self.assertIn("drink", result["missing_items"][0])
+
+    # ── Combo conversion tests (standalone entree → combo) ──
+
+    def test_combo_conversion_removes_standalone_burger(self):
+        """Adding a combo auto-removes the matching standalone burger."""
+        session_id = order_state_singleton.create_session()
+        order_state_singleton.handle_order_update(session_id, "add", "SuperSONIC Double Cheeseburger", "standard", 1, 6.59)
+        result_info = order_state_singleton.handle_order_update(session_id, "add", "SuperSONIC Double Cheeseburger Combo", "standard", 1, 10.19)
+        items = order_state_singleton.get_order_items(session_id)
+        item_names = [i.item for i in items]
+        self.assertNotIn("SuperSONIC Double Cheeseburger", item_names)
+        self.assertIn("SuperSONIC Double Cheeseburger Combo", item_names)
+        self.assertEqual(len(items), 1)
+        summary = order_state_singleton.get_order_summary(session_id)
+        self.assertAlmostEqual(summary.total, 10.19, places=2)
+        self.assertIn("combo_converted_from", result_info)
+
+    def test_combo_conversion_carries_mods(self):
+        """Mods like '(Pickles Only)' carry from standalone to combo."""
+        session_id = order_state_singleton.create_session()
+        order_state_singleton.handle_order_update(session_id, "add", "SuperSONIC Double Cheeseburger (Pickles Only)", "standard", 1, 6.59)
+        result_info = order_state_singleton.handle_order_update(session_id, "add", "SuperSONIC Double Cheeseburger Combo", "standard", 1, 10.19)
+        items = order_state_singleton.get_order_items(session_id)
+        self.assertEqual(len(items), 1)
+        combo_item = items[0]
+        self.assertIn("Combo", combo_item.item)
+        self.assertIn("(Pickles Only)", combo_item.item)
+        self.assertAlmostEqual(combo_item.price, 10.19, places=2)
+        self.assertIn("mods_carried", result_info)
+
+    def test_combo_conversion_no_match_leaves_standalone(self):
+        """Non-matching standalone is NOT removed (different entree name)."""
+        session_id = order_state_singleton.create_session()
+        order_state_singleton.handle_order_update(session_id, "add", "Fish Sandwich", "standard", 1, 5.49)
+        order_state_singleton.handle_order_update(session_id, "add", "SuperSONIC Cheeseburger Combo", "standard", 1, 8.49)
+        items = order_state_singleton.get_order_items(session_id)
+        self.assertEqual(len(items), 2)
+        item_names = [i.item for i in items]
+        self.assertIn("Fish Sandwich", item_names)
+        self.assertIn("SuperSONIC Cheeseburger Combo", item_names)
+
+    # ── Post-combo side/drink absorption tests ──
+
+    def test_post_combo_side_absorbed(self):
+        """Side added AFTER combo is absorbed into combo slot."""
+        session_id = order_state_singleton.create_session()
+        order_state_singleton.handle_order_update(session_id, "add", "SuperSONIC Cheeseburger Combo", "standard", 1, 8.49)
+        result_info = order_state_singleton.handle_order_update(session_id, "add", "Tots", "medium", 1, 2.79)
+        items = order_state_singleton.get_order_items(session_id)
+        # Tots should NOT appear as a standalone item
+        item_names = [i.item for i in items]
+        self.assertNotIn("Tots", item_names)
+        self.assertTrue(result_info.get("absorbed_into_combo"))
+        # Total should be combo price only
+        summary = order_state_singleton.get_order_summary(session_id)
+        self.assertAlmostEqual(summary.total, 8.49, places=2)
+        # Combo should report side filled, drink still missing
+        req = order_state_singleton.get_combo_requirements(session_id)
+        self.assertFalse(req["is_complete"])
+        self.assertEqual(len(req["missing_items"]), 1)
+        self.assertIn("drink", req["missing_items"][0])
+
+    def test_post_combo_drink_absorbed(self):
+        """Drink added AFTER combo is absorbed into combo slot."""
+        session_id = order_state_singleton.create_session()
+        order_state_singleton.handle_order_update(session_id, "add", "SuperSONIC Cheeseburger Combo", "standard", 1, 8.49)
+        result_info = order_state_singleton.handle_order_update(session_id, "add", "Cherry Limeade", "medium", 1, 2.99)
+        items = order_state_singleton.get_order_items(session_id)
+        item_names = [i.item for i in items]
+        self.assertNotIn("Cherry Limeade", item_names)
+        self.assertTrue(result_info.get("absorbed_into_combo"))
+        summary = order_state_singleton.get_order_summary(session_id)
+        self.assertAlmostEqual(summary.total, 8.49, places=2)
+
+    def test_post_combo_both_side_and_drink_absorbed(self):
+        """Both side and drink added after combo → both absorbed, correct total."""
+        session_id = order_state_singleton.create_session()
+        order_state_singleton.handle_order_update(session_id, "add", "SuperSONIC Cheeseburger Combo", "standard", 1, 8.49)
+        order_state_singleton.handle_order_update(session_id, "add", "Tots", "medium", 1, 2.79)
+        order_state_singleton.handle_order_update(session_id, "add", "Diet Coke", "medium", 1, 2.49)
+        items = order_state_singleton.get_order_items(session_id)
+        self.assertEqual(len(items), 1, "Only the combo should be in order")
+        summary = order_state_singleton.get_order_summary(session_id)
+        self.assertAlmostEqual(summary.total, 8.49, places=2)
+        req = order_state_singleton.get_combo_requirements(session_id)
+        self.assertTrue(req["is_complete"])
+
+    def test_exact_bug_scenario_burger_then_combo_then_side_drink(self):
+        """Reproduce the exact demo bug: standalone burger → combo → tots → diet coke."""
+        session_id = order_state_singleton.create_session()
+        # Step 1: Customer orders a standalone burger
+        order_state_singleton.handle_order_update(session_id, "add", "SuperSONIC Double Cheeseburger (Pickles Only)", "standard", 1, 6.59)
+        # Step 2: Customer says "make it a combo with tots and a Diet Coke"
+        order_state_singleton.handle_order_update(session_id, "add", "SuperSONIC Double Cheeseburger Combo", "standard", 1, 10.19)
+        order_state_singleton.handle_order_update(session_id, "add", "Tots", "medium", 1, 2.79)
+        order_state_singleton.handle_order_update(session_id, "add", "Diet Coke", "medium", 1, 2.49)
+        items = order_state_singleton.get_order_items(session_id)
+        # Only the combo should remain — standalone burger removed, side/drink absorbed
+        self.assertEqual(len(items), 1)
+        combo = items[0]
+        self.assertIn("Combo", combo.item)
+        self.assertIn("(Pickles Only)", combo.item)
+        self.assertAlmostEqual(combo.price, 10.19, places=2)
+        # Total: $10.19 + 8% tax = $11.01
+        summary = order_state_singleton.get_order_summary(session_id)
+        self.assertAlmostEqual(summary.total, 10.19, places=2)
+        expected_final = 10.19 * 1.08
+        self.assertAlmostEqual(summary.finalTotal, expected_final, places=2)
+        req = order_state_singleton.get_combo_requirements(session_id)
+        self.assertTrue(req["is_complete"])
+
+    def test_side_not_absorbed_when_no_combo(self):
+        """Side added without any combo stays as standalone at full price."""
+        session_id = order_state_singleton.create_session()
+        order_state_singleton.handle_order_update(session_id, "add", "Tots", "medium", 1, 2.79)
+        items = order_state_singleton.get_order_items(session_id)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].item, "Tots")
+        self.assertAlmostEqual(items[0].price, 2.79, places=2)
+
+    def test_extra_side_not_absorbed_when_combo_full(self):
+        """Second side added after combo slot filled stays as standalone."""
+        session_id = order_state_singleton.create_session()
+        order_state_singleton.handle_order_update(session_id, "add", "SuperSONIC Cheeseburger Combo", "standard", 1, 8.49)
+        order_state_singleton.handle_order_update(session_id, "add", "Tots", "medium", 1, 2.79)  # absorbed
+        result_info = order_state_singleton.handle_order_update(session_id, "add", "Onion Rings", "medium", 1, 3.29)  # standalone
+        items = order_state_singleton.get_order_items(session_id)
+        item_names = [i.item for i in items]
+        self.assertNotIn("Tots", item_names)
+        self.assertIn("Onion Rings", item_names)
+        self.assertFalse(result_info.get("absorbed_into_combo", False))
+        summary = order_state_singleton.get_order_summary(session_id)
+        self.assertAlmostEqual(summary.total, 8.49 + 3.29, places=2)
 
 
 if __name__ == "__main__":

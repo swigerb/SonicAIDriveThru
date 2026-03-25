@@ -39,6 +39,12 @@ Series of debugging and feature work across demo readiness, debugging sprint, an
 
 <!-- Append new learnings below. Each entry is something lasting about the project. -->
 
+## Learnings — Current (Phase 6)
+
+### 2026-03-25: Phase 6 — Critical Combo Conversion Bug Fix
+- **Combo Conversion Bug (Demo Blocker):** Fixed double-charging bug where converting a standalone burger to a combo resulted in BOTH the standalone ($6.59) AND the combo ($10.19) in the order, plus separate side ($2.79) and drink ($2.49). Root cause was two missing behaviors in `handle_order_update()`: (1) No auto-removal of the standalone entree when the combo version was added. (2) No post-combo absorption — sides/drinks added AFTER a combo were not recognized as combo components. Fix: `order_state.py` now auto-removes matching standalone entrees on combo add (with mod carry-over, e.g., "(Pickles Only)" transfers to combo), and absorbs post-combo sides/drinks into unfilled combo slots. `tools.py` updated to use return value from `handle_order_update()` for accurate delta text ("included with your combo" / "Upgraded to combo"). System prompt COMBO_PIVOT_RULES updated to reflect automatic backend handling. 9 new tests added, 1 existing test updated. All 346 tests pass.
+- **Key Insight:** The combo absorption code only ran when a combo was added (absorbing pre-existing sides/drinks). The common real-world flow is: burger first → combo conversion → side → drink. This requires BOTH entree replacement AND reverse absorption (sides/drinks added after the combo). The code approach is more reliable than prompt instructions — the AI might forget to call remove, but the backend always catches it.
+
 ## Learnings — Current (Phase 5)
 
 ### 2026-03-25: Phase 5 — RTMT + Tool Calling Test Coverage
