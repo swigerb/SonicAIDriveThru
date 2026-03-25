@@ -7,45 +7,35 @@
 
 ## Core Context
 
-**Rebrand & Setup (2026-03-19)**: Completed Sonic rebrand from Dunkin across all backend systems. Key learning: `_infer_category()` in tools.py couples frontend menuItems.json to backend category inference — both ALLOWED/BLOCKED lists must include canonical names + inferred variants. Replaced malformed structured_menu_items with Sonic menu data. Team coordinated: Rick scope, Morty frontend rebrand, Summer backend rebrand (69 tests), Birdperson verification (12 tests).
+**Rebrand & Setup (2026-03-19)**: Completed Sonic rebrand from Dunkin across all backend systems. Key learning: `_infer_category()` in tools.py couples frontend menuItems.json to backend category inference. Team coordinated: Rick scope, Morty frontend, Summer backend (69 tests), Birdperson verification (12 tests).
 
-**Performance Hardening (2026-03-19)**: Major backend perf pass. Critical fixes: (1) `_tools_pending` moved from shared to per-connection (race condition bug). (2) `_PASSTHROUGH_TYPES` frozenset for O(1) hot-path audio delta bypass. (3) `__slots__` on data classes, module-level search cache with TTL, compression middleware, gzip on HTTP. Shared asyncio single-threaded principle: concurrent WebSocket state safe without locks. All 100 tests pass.
+**Performance Hardening (2026-03-19)**: Major backend perf pass: (1) `_tools_pending` moved from shared to per-connection (race condition). (2) `_PASSTHROUGH_TYPES` frozenset for O(1) hot-path bypass. (3) `__slots__` on classes, module-level search cache, compression middleware, gzip on HTTP. All 100 tests pass.
 
-**Menu Integration (2026-03-19)**: Created production menu ingestion notebook for nested Sonic data (menus/products/categories/productGroups). Key patterns: recursive category traversal, size variant resolution via relatedProducts, 172 of 1334 products referenced. Lesson: `.ipynb` files require programmatic Python JSON editing (text-based edit tools fail on escaping).
+**Menu Integration (2026-03-19)**: Created Sonic menu ingestion notebook (recursive category traversal, size variant resolution, 172 of 1334 products). Key lesson: `.ipynb` files require programmatic Python JSON editing.
 
-**Critical Ordering Bugs (2026-03-19)**: Fixed three issues blocking voice orders: (1) `.env` pointed to wrong search index → no menu results. (2) System prompt didn't explain price extraction from `sizes` JSON field → $0.00 prices. (3) `max_tokens=150` too aggressive → truncated closing phrases. Raised to 250, added explicit PRICING and CLOSING rules. All 100 tests pass.
+**Critical Ordering Bugs (2026-03-19)**: Fixed three issues: (1) `.env` pointed to wrong search index. (2) System prompt didn't extract prices from `sizes` JSON. (3) `max_tokens=150` truncated closing phrases → raised to 250. All 100 tests pass.
 
-## Recent Work
+## Archive (2026-03-20 through 2026-03-22)
 
-<!-- Append new learnings below for current sprint work. -->
+Series of debugging and feature work across demo readiness, debugging sprint, and architecture review:
+- **Echo Suppression (2026-03-20):** rtmt.py audio gating with ai_speaking flag, 300ms→500ms cooldown, buffer clear. Refined 2026-03-21 with fast substring detection.
+- **System Prompt (2026-03-21):** Converted to bulleted format with ALL CAPS emphasis. Explicit anti-hallucination grounding.
+- **Order Routing (2026-03-21):** Changed `update_order` from TO_CLIENT to TO_BOTH, fixing dead silence on valid orders.
+- **Tools Hardening (2026-03-21):** Price validation ($0 rejection), combo detection, human-readable size formatting, upsell hints.
+- **Demo Polish (2026-03-21):** Temperature 0.6→0.5, added `get_grouped_order_for_readback()`. All 118 tests passing.
+- **Menu Data (2026-03-22):** Audited menuItems.json, synced 50 Sonic items, dynamic MENU_CATEGORY_MAP inference.
+- **Tool-Call Fix (2026-03-22):** Reordered WebSocket messages so session.update (with tools) arrives before greeting.
+- **Greeting Fix (2026-03-22):** Rewritten imperative greeting prompt. Pre-set ai_speaking before response.create. Increased cooldown 500ms→1.5s.
+- **Happy Hour (2026-03-22):** Drinks/slushes half-price 2:00–4:00 PM via STORE_TIMEZONE (fixed UTC bug).
+- **OOS Machine (2026-03-22):** Ice cream [OOS] tag in search results. Non-blocking steering.
+- **reset_order Tool (2026-03-22):** Big Red Button with TO_CLIENT routing.
+- **Verbose Logging (2026-03-22):** Dedicated `sonic-verbose` logger, per-session toggles, message lifecycle logging.
+- **Combo Pivot (2026-03-22):** Fixed state overwriting on combo + sides/drinks combo absorption with session counters.
+- **Item Customization (2026-03-22):** End-to-end mods ("no lettuce", "extra ketchup") with natural voice readback.
+- **Prompt Externalization (2026-03-25):** Full YAML-driven infrastructure (prompt_loader.py, config_loader.py, config.yaml). Wired into app.py, rtmt.py, tools.py with backward-compatible fallbacks. All 125 tests pass.
+- **Architecture Review (2026-03-25):** Fixed 4 bugs: happy hour timezone, `_sent_greeting` memory leak, dead code, size/category deduplication in menu_utils.py.
 
-### 2026-03-20 through 2026-03-21: Demo Readiness Sprint (Consolidated)
-Series of focused improvements for Inspire Brands executive demo:
-- **Echo Suppression (2026-03-20):** rtmt.py audio gating with ai_speaking flag, 300ms cooldown, buffer clear. Refined 2026-03-21 with fast substring detection.
-- **System Prompt Refactor (2026-03-21):** Converted dense paragraphs to bulleted format with ALL CAPS emphasis, explicit anti-hallucination grounding. Optimal for gpt-realtime-1.5 instruction-following.
-- **Order Routing Fix (2026-03-21):** Changed successful `update_order` from TO_CLIENT to TO_BOTH, fixing dead silence after valid orders. Added 14 new quantity-limit tests (111→125 total).
-- **Tools Hardening (2026-03-21):** 4 improvements — price validation rejecting $0, combo detection surfacing sides/drinks, human-readable size formatting, category-aware upsell hints.
-- **Demo Polish (2026-03-21T20-23):** Lowered temperature 0.6→0.5 for faster TTFT, verified static file serving, added `get_grouped_order_for_readback()` for natural voice summaries (e.g., "Two Medium Cherry Limeades"). All 118 tests passing.
 
-### 2026-03-22: Debugging Sprint (Consolidated)
-Critical debugging and feature work addressing demo blockers:
-- **Menu Data Audit:** Audited `menuItems.json` against real Sonic menu. Synced `structured_menu_items` with all 50 items. `_infer_category()` maps dynamically via MENU_CATEGORY_MAP.
-- **Tool-Call Fix (Greeting-Before-Session.Update):** Fixed $0.00 ticket bug — reordered WebSocket message handling so session.update (with tools) arrives before greeting. Added fallback tools_pending registration, diagnostic logging.
-- **AI Self-Talk Fix:** Ambiguous greeting prompt ("explain how to greet" vs "greet now") rewritten. Echo loop fixed by pre-setting ai_speaking flag before response.create. Increased cooldown 0.3→0.5s.
-- **Happy Hour Dynamic Pricing:** Drinks/slushes half-price 2:00–4:00 PM. Original item.price preserved; discount applied at summary level.
-- **OOS Machine Status:** Ice cream machine down-time flagged in search results with [OOS] tag. Non-blocking, AI steers customers away conversationally.
-- **reset_order Tool:** Implemented as Big Red Button with TO_CLIENT routing. Frontend needs empty JSON for ticket.
-- **Verbose Logging (Terminal & File):** Dedicated `sonic-verbose` logger controllable via env var or WebSocket message. Logs message lifecycle, tool calls, echo state, session events. Per-session file logging with auto-cleanup on disconnect.
-- **Combo Pivot Absorption:** Fixed state overwriting bug where adding combo re-asked for sides/drinks. Standalone sides/drinks absorbed into combo with session counters. 7 new tests (118→125 total).
-- **Item Customization:** End-to-end support for mods like "no lettuce", "extra ketchup". AI passes mods in item_name as parenthesized text. Natural voice readback conversion. Validation blocks nonsensical mods (mustard on shakes, etc.).
-
-- **Prompt & Config Externalization (2026-03-25)**: Built full YAML-driven prompt/config infrastructure. Created `prompt_loader.py` (loads YAML from `app/backend/prompts/{brand}/`, validates sections, caches in memory, Jinja2 templates, DEV_MODE hot-reload), `config_loader.py` (loads `config.yaml`), and `config.yaml` (all magic numbers from 5 files centralized). Wired into `app.py` (system prompt from YAML, startup fail-fast), `rtmt.py` (greeting from YAML, echo/connection config), `tools.py` (tool schemas from YAML, error messages via Jinja2 render, upsell hints from YAML, search/cache/quantity configs). Unity created YAML content files in parallel; loader adapts to their manifest-driven structure (system_prompt.yaml sections sorted by priority). All hardcoded fallbacks preserved for backwards compatibility when prompt_loader is None. Updated 3 rebrand verification tests to read from YAML instead of parsing app.py. Added pyyaml/jinja2 to requirements.txt. All 125 tests pass.
-
-## Learnings
-
-- **Prompt Externalization Inventory (2026-03-25)**: Completed exhaustive audit of all hardcoded prompts, configs, tool definitions, and architectural gaps across the backend. Key findings: 12 distinct prompt strings (~6,500 chars), 25+ config constants scattered across 5 files, 4 tool schemas, 10+ error/hint templates. The system prompt in app.py (lines 127–250, ~4,200 chars) is the highest-value externalization target. Proposed `app/backend/prompts/` directory structure with markdown for prompts, JSON for tool schemas, YAML for config. Identified critical issues: blocking calls in azurespeech.py, `_sent_greeting` memory leak, duplicated size maps between tools.py and order_state.py, duplicated category inference logic, and happy hour timezone bug (uses UTC in Azure Container Apps). Full report in `.squad/decisions/inbox/summer-prompt-inventory.md`.
-
-- **Prompt Externalization Implementation (2026-03-25)**: Built complete YAML-driven prompt and config loader infrastructure in parallel with Unity (content extraction) and Squanchy (bugfixes). Created `prompt_loader.py` (manifest-driven, Jinja2 templates, DEV_MODE hot-reload), `config_loader.py`, and centralized `config.yaml` with all 25+ magic numbers. Integrated into 5 backend modules (app.py, rtmt.py, tools.py, order_state.py) with backward-compatible fallbacks. Wired Unity's 6 YAML content files (system_prompt, greeting, tool_schemas, error_messages, hints, manifest) into loader at startup. All 125 tests pass — behavior identical to pre-refactor. Coordination notes: Squanchy fixed 4 concurrent bugs (timezone, memory leak, dead code, deduplication) without conflicts. Decision inbox merged (9 items). Orchestration logs written.
 
 <!-- Append new learnings below. Each entry is something lasting about the project. -->
 

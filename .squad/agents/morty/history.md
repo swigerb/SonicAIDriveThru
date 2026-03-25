@@ -7,34 +7,83 @@
 
 ## Learnings
 
-<!-- Append new learnings below. Each entry is something lasting about the project. -->
-- The frontend uses CSS custom properties (HSL values) in index.css for theming, consumed via Tailwind's `hsl(var(...))` pattern in tailwind.config.js. To rebrand, update the CSS variables — Tailwind config stays the same.
-- Sonic brand colors map: Primary action → Cherry Red #E40046, Header/nav → Dark Blue #285780, Accent → Yellow #FEDD00, Secondary → Light Blue #74D2E7, Success → Green #328500.
-- Brand voice changed from "crew member" to "carhop" (Sonic's term). Menu shifted from coffee/donuts to slushes/burgers/shakes/tots.
-- The old dunkin-logo.svg is still in src/assets/ (unused, no longer imported). Safe to delete if desired.
-- Font changed from Fredoka to Nunito Sans for a cleaner, more energetic Sonic-aligned feel.
-- Test data (dummyOrder.json, dummyTranscripts.json) and test assertions must be kept in sync with branding — they reference specific menu items and branding text.
-- **Team Orchestration (2026-03-19T04-06)**: Rick provided scope analysis, Morty completed frontend rebrand (13 tests pass), Summer completed backend rebrand (69 tests pass), Birdperson created verification tests (12 tests pass).
-- **Performance Pass (2026-03-19)**: Major frontend perf overhaul. Key findings and fixes:
-  - AudioContext is expensive to create (~50-100ms). Recorder and Player now reuse contexts across sessions instead of recreating per start/reset.
-  - Audio recorder had O(n²) buffer copying — new Uint8Array created on every append. Replaced with pre-allocated ring buffer using copyWithin() for zero-alloc shifting.
-  - Audio player base64 decode used `Uint8Array.from(binary, c => c.charCodeAt(0))` which is slow due to per-char callback. Replaced with direct charCodeAt loop.
-  - TranscriptPanel had a `setInterval` running every 1s to update `currentTime`, causing full component re-renders constantly. Removed — timestamp comparison now uses adjacent transcript timestamps only.
-  - Key components memoized with React.memo: OrderSummary, OrderItemRow, TranscriptPanel, TranscriptItem, MenuPanel, StatusMessage, BrandHero, SessionTokenBanner.
-  - Settings component lazy-loaded (7.4 kB saved from critical path).
-  - Vite config: replaced per-package manualChunks (created hundreds of tiny files) with strategic vendor groups (react-vendor, ui-vendor, i18n, motion). Disabled sourcemaps in prod. Added cache-busting hash filenames.
-  - WebSocket reconnection now uses exponential backoff with jitter (1s→30s cap) instead of instant retry.
-  - getUserMedia now requests specific audio constraints (sampleRate: 24000, mono, echoCancellation, noiseSuppression, autoGainControl) for lower latency capture.
-  - Tailwind CSS purge was already correctly configured via `content` array in tailwind.config.js. PostCSS handles minification via autoprefixer.
-- **Performance Audit Orchestration (2026-03-19T13-21)**: Team completed full-stack performance sprint with 5 agents. Rick lead: 8 fixes across JSON parsing, token cap, search params, system prompt, JSON caching, VAD timing, and response filtering. Summer: 10 fixes for race conditions, hot-path fast-returns, search caching, compression, gzip, logging, memory. Morty: 9 fixes for AudioContext reuse, zero-alloc buffers, memoization, lazy loading, vendor chunking. Squanchy: 6 infrastructure fixes for Gunicorn async, health probes, auto-scaling, Docker caching. Birdperson: 28 performance tests validating latency, memory, thread safety, production readiness. All decisions documented in decisions.md. Orchestration logs written per-agent.
-- **Menu Size Sync (2026-03-19)**: Updated `menuItems.json` to include all size variants from production data (`sonic-menu-items.json`). Drinks (Cherry Limeade, Blue Raspberry Slush, Ocean Water) now have 5 sizes: mini, small, medium, large, rt 44. Shakes get mini added (4 sizes). SONIC Blast corrected to mini/small/medium (production only has 3). Prices updated to match production data. Script at `scripts/update_menu_sizes.py` can be re-run if production data changes. Production data uses size prefixes like "Mini ", "Sm ", "Med ", "Lg ", "RT 44® " before product names. Shakes and Blasts don't have RT 44 sizes in production data — only drinks do.
-- **Azure Speech Hook Fix (2026-03-19)**: Fixed two bugs in `useAzureSpeech.tsx`: (1) `onReceivedToolResponse` was defined in the Parameters interface but never destructured — order updates were silently dropped. (2) Added `tool_results` processing from the `/azurespeech/speech-to-text` response, constructing `ExtensionMiddleTierToolResponse` objects to match the real-time WebSocket pattern App.tsx expects. Also added `session_id` flow using `useRef<string>(crypto.randomUUID())` — regenerated on each `startSession()` call, sent in every request body so the backend can track order state per session. Backward compatible: missing `tool_results` in response is handled gracefully.
-- **Verbose Logging Toggle (2026-03-22)**: Added "Verbose Logging" toggle to Settings panel. Pattern: localStorage-persisted boolean (`verboseLogging` key), default OFF. Sends `{"type": "extension.set_verbose_logging", "enabled": true/false}` via WebSocket when toggled. Also re-sends on session start if already enabled (survives page refresh). Added `sendVerboseLogging()` to `useRealtime` hook's return. Settings component follows existing toggle pattern (Label + description + Switch + status text). Build passes (1.95s), all 13 tests pass.
-- **Audio Feedback Loop Fix (2026-03-19)**: Resolved the feedback loop where AI speech output was being picked up by the microphone and fed back as input. Fixed 5 issues: (1) Increased VAD threshold from 0.6 to 0.8 to reject weak/echoed speech. (2) Increased silence duration from 400ms to 500ms for better turn detection buffer. (3) Disabled autoGainControl (was amplifying echoed speaker output). (4) Removed unnecessary `workletNode.connect(audioContext.destination)` in recorder.ts that was routing mic capture to speakers. (5) Added mic muting during AI playback — new `mute()`/`unmute()` methods in Recorder class use a gain node (set to 0/1) to silence mic output while keeping hardware echo cancellation active. In App.tsx, `isAiSpeakingRef` tracks AI output state and calls mute/unmute on response.audio_delta start and response.done. Barge-in (user interrupt) preserved — server VAD still detects real user speech and triggers `onReceivedInputAudioBufferSpeechStarted` which stops playback.
-- **Early Mute Timing Fix (2026-03-19)**: Previous audio feedback fix muted mic on `response.audio.delta`, but by then echoed audio had already been sent to the server. Fix: (1) Added `response.created` handler in `useRealtime.tsx` — the earliest event the server sends before any audio deltas. (2) Moved mic muting from `onReceivedResponseAudioDelta` to `onReceivedResponseCreated` in App.tsx. (3) `useRealtime.tsx` now automatically sends `input_audio_buffer.clear` on `response.created` to flush any already-buffered echo from the server pipeline. Used a `sendJsonMessageRef` pattern to break the circular dependency between `useCallback` (needs `sendJsonMessage`) and `useWebSocket` (takes the callback). (4) Barge-in handler now also unmutes mic and resets `isAiSpeakingRef` so user can resume speaking after interrupting. (5) Removed now-redundant `onReceivedResponseAudioTranscriptDelta` mute-only callback from App.tsx. Key insight: the backend middle tier forwards `response.created` to clients (it's not in `_PASSTHROUGH_SERVER_TYPES` but falls through the match/case with the original message).
-- **Coordinated Echo Suppression (2026-03-21)**: Coordinated with Summer (Backend Dev) to eliminate phantom transcriptions. Summer implemented server-side audio gating in `rtmt.py` (drops `input_audio_buffer.append` while `ai_speaking`, 300ms cooldown post-response, buffer flush). Morty (that's me) implemented early frontend muting at `response.created` and automatic `input_audio_buffer.clear` send. Together: zero phantom user inputs, barge-in ~300ms latency (acceptable), all 100 backend tests pass, 13 frontend tests pass. Key learnings: (1) `response.created` is the earliest hook in the Realtime API lifecycle. (2) Frontend buffer clearing must coordinate with backend suppression for complete echo elimination. (3) Barge-in via server VAD still works because real user speech from pre-mute audio triggers `speech_started` which unmutes immediately.
-- **Demo Readiness: VAD & Prefix Padding Tuning (2026-03-21)**: Fine-tuned Realtime audio config in `useRealtime.tsx` (lines 165-166) ahead of Inspire Brands executive demo. Key changes: (1) **VAD threshold: 0.8 → 0.7** — The 0.8 threshold was a band-aid for the echo feedback loop (Decision #23). With multi-layered server-side echo suppression now fully implemented and validated, the aggressive threshold is no longer needed and risks missing softer-spoken executives in a demo room. 0.7 is more forgiving for natural speech while still rejecting ambient noise. Fallback: if demo is in a noisy environment, bump back to 0.75. (2) **Prefix padding: 200ms → 300ms** — 200ms risks clipping the start of words, especially plosive consonants ("burger", "please", "tots"). In a demo context, clipped words cause the AI to misunderstand and ask "could you repeat that?" — brand-damaging. 300ms provides safe headroom for word-start capture. Rationale: The echo suppression (server-side in rtmt.py + client-side mic muting) now handles echo properly, freeing up VAD threshold for natural speech detection rather than echo rejection. Max tokens already at 250 (tested for full order recap + closing phrase), temperature 0.6 optimal, voice "coral" perfect for Sonic carhop persona. These config changes are part of Unity's broader demo readiness audit covering system prompt, session settings, and end-to-end voice path validation.
-- **Log to File Toggle (2026-03-22)**: Added "Log to File" sub-toggle under Verbose Logging in Settings. Pattern: conditionally rendered when verbose logging is ON, localStorage-persisted (`verboseLogToFile` key), default OFF. Sends `{"type": "extension.set_log_to_file", "enabled": true/false}` via WebSocket. Added `sendLogToFile()` to `useRealtime` hook's return. On session start, if both verbose AND logToFile are enabled, both messages are sent. Turning verbose OFF automatically turns off log-to-file. Sub-toggle styled with left border indent for visual hierarchy. Build passes (1.9s), all 13 tests pass.
-- **Collapsible Menu Categories (2026-03-22)**: Made menu panel categories collapsible/expandable. Each category header is now a `<button>` with `aria-expanded` for accessibility. Click toggles expand/collapse. ChevronDown icon from lucide-react rotates 180° when open (framer-motion `animate`). Category items animate in/out with `AnimatePresence` + `motion.div` (height auto, opacity, 0.25s easeInOut). First category expanded by default, rest collapsed. State managed via `useState<Set<string>>` with `useCallback` toggle. Spacing tightened from `space-y-8` to `space-y-4` to accommodate more visible categories. Padding moved from outer card to inner content area so header stays clickable edge-to-edge. Same card styling, Sonic color scheme, emoji icons, and item count badges preserved. Build passes (2.04s), all 13 tests pass.
-- **Collapsible Session Token Panel (2026-03-22)**: Replaced flat `SessionTokenBanner` with collapsible `SessionTokenPanel`. Defaults collapsed, showing single-line header: chevron + session token (truncated to 12 chars) + round number. Expand reveals scrollable history list (max-height 10rem) with all round-trip snapshots newest-first. Latest entry highlighted with subtle red tint. Added `tokenHistory` state (`SessionIdentifiersState[]`) — `handleSessionIdentifiers` now pushes onto array instead of replacing. Settings "Show Session Tokens" toggle still controls overall visibility. Uses `ChevronDown`/`ChevronRight` from lucide-react, `aria-expanded` for accessibility, monospace font, dark mode support via existing theme variables. Build passes (1.99s), all 13 tests pass.
-- **Token Panel: Full Tokens + Menu-Style Collapse (2026-03-22)**: Fixed two issues Brian reported. (1) **Removed all token truncation** — deleted `truncate()` helper that used `slice(0, 12)+"…"`. Full tokens now display in header and history list with `break-all` for natural wrapping. Removed `title` tooltip attributes (no longer needed). (2) **Matched menu panel collapse style** — replaced `ChevronDown`/`ChevronRight` icon swap with single `ChevronDown` + `motion.span` rotation animation (rotate 0↔180°, 0.2s), matching `menu-panel.tsx` pattern exactly. Chevron moved to upper-right via `justify-between` on button. Added `AnimatePresence` + `motion.div` for smooth height/opacity expand/collapse (0.25s easeInOut), matching menu panel. Removed unused `ChevronRight` import, added `AnimatePresence` and `motion` imports from framer-motion. History items use `items-start` instead of `items-center` for better multi-line token alignment. Build passes (2.07s).
+### 2026-03-19: Frontend Rebrand & Performance Hardening (Consolidated)
+
+**Sonic Rebrand:**
+- CSS custom properties (HSL values) in index.css for theming — Tailwind consumes via `hsl(var(...))` pattern. Update CSS variables to rebrand.
+- Brand colors: Cherry Red #E40046, Dark Blue #285780, Yellow #FEDD00, Light Blue #74D2E7, Green #328500.
+- Font: Fredoka → Nunito Sans for cleaner, energetic Sonic alignment.
+- Brand voice: "crew member" → "carhop". Menu: coffee/donuts → slushes/burgers/shakes/tots.
+- Test data (`dummyOrder.json`, `dummyTranscripts.json`) and test assertions must sync with branding.
+
+**Frontend Performance Overhaul (2026-03-19T13-21):**
+- AudioContext reuse: Recorder & Player now reuse contexts instead of recreating per start/reset (~50-100ms saved per session).
+- Audio recorder: O(n²) buffer copying replaced with pre-allocated ring buffer using copyWithin() (zero-alloc shifting).
+- Audio player: charCodeAt loop replaced slow `Uint8Array.from(binary, c => c.charCodeAt(0))` callback.
+- TranscriptPanel: Removed `setInterval` constantly re-rendering — timestamp now uses adjacent transcript timestamps only.
+- React.memo applied to: OrderSummary, OrderItemRow, TranscriptPanel, TranscriptItem, MenuPanel, StatusMessage, BrandHero, SessionTokenBanner.
+- Settings component lazy-loaded (7.4 kB saved from critical path).
+- Vite chunking: Replaced per-package manualChunks with strategic vendor groups (react-vendor, ui-vendor, i18n, motion). Disabled sourcemaps in prod. Added cache-busting.
+- WebSocket reconnection: Exponential backoff with jitter (1s→30s cap) instead of instant retry.
+- getUserMedia: Specific audio constraints (sampleRate: 24000, mono, echoCancellation, noiseSuppression, autoGainControl) for lower latency.
+
+### 2026-03-19 through 2026-03-22: Audio Feedback Loop & Echo Suppression (Consolidated)
+
+**Initial Feedback Loop (2026-03-19):**
+- VAD threshold: 0.6 → 0.8 (aggressive, to reject echoed speech)
+- Silence duration: 400ms → 500ms for better turn detection
+- Disabled autoGainControl (was amplifying echoed speaker output)
+- Removed unnecessary worklet routing to speakers
+- Added mic muting during AI playback via gain node (set to 0/1)
+
+**Early Mute Timing Fix (2026-03-19):**
+- Moved mic muting from `response.audio.delta` to `response.created` (earliest hook)
+- Frontend sends `input_audio_buffer.clear` on `response.created` to flush pre-buffered echo
+- Used `sendJsonMessageRef` pattern to break circular dependency
+- Barge-in now unmutes mic and resets state for user interrupts
+
+**Coordinated Server-Side Echo Suppression (2026-03-21):**
+- Summer implemented server-side audio gating in `rtmt.py` (drops `input_audio_buffer.append` during `ai_speaking`, 300ms cooldown, buffer flush)
+- Combined with frontend early muting = zero phantom transcriptions
+- Barge-in ~300ms latency acceptable for drive-thru UX
+- Result: all 100 backend + 13 frontend tests pass
+
+**Demo Readiness Tuning (2026-03-21):**
+- VAD threshold: 0.8 → 0.7 (echo suppression now robust, threshold can be more forgiving for natural speech)
+- Prefix padding: 200ms → 300ms (avoids plosive clipping like "burger")
+- Rationale: With multi-layered echo suppression working, VAD can focus on natural speech detection rather than echo rejection
+
+### 2026-03-22: UI Enhancements for Demo
+
+**Verbose Logging & Logging Toggle:**
+- Added "Verbose Logging" toggle to Settings panel (localStorage-persisted, default OFF)
+- Sends `{"type": "extension.set_verbose_logging", "enabled": true/false}` via WebSocket
+- Added "Log to File" sub-toggle under verbose logging (only visible when verbose is ON)
+- Sends `{"type": "extension.set_log_to_file", "enabled": true/false}` via WebSocket
+- State survives page refresh via localStorage
+
+**Menu Categories Collapse/Expand:**
+- Made category headers clickable buttons with `aria-expanded` for accessibility
+- ChevronDown icon rotates 180° when open (framer-motion)
+- Category items animate in/out with AnimatePresence (height auto, opacity, 0.25s easeInOut)
+- First category expanded by default, rest collapsed
+- Spacing tightened from `space-y-8` to `space-y-4`
+
+**Session Token Panel Collapsible:**
+- Replaced flat `SessionTokenBanner` with collapsible panel (defaults collapsed)
+- Single-line header: chevron + session token (full, no truncation) + round number
+- Expand reveals scrollable history list (max-height 10rem) with all snapshots newest-first
+- Latest entry highlighted with subtle red tint
+- Settings "Show Session Tokens" toggle still controls overall visibility
+- Chevron uses rotation animation matching menu panel style
+- Supports multi-line token wrapping with `break-all`
+
+### 2026-03-19: Menu Size Production Data Sync
+
+Created `scripts/update_menu_sizes.py` to sync `menuItems.json` with production `sonic-menu-items.json`. Drinks (Cherry Limeade, Blue Raspberry, Ocean Water) now have 5 sizes (mini, small, medium, large, rt 44). Shakes get mini added (4 sizes). SONIC Blast corrected to 3 sizes. Prices sourced from production data. Production data uses prefixes ("Mini ", "Sm ", "Lg ", "RT 44®") — script strips and normalizes.
+
+### 2026-03-19: Azure Speech Hook Tool Response Fix
+
+Fixed `useAzureSpeech.tsx`: (1) `onReceivedToolResponse` parameter was declared but never destructured — order updates silently dropped. (2) Added `tool_results` processing from `/azurespeech/speech-to-text` response, constructing `ExtensionMiddleTierToolResponse` objects matching WebSocket pattern. (3) Added `session_id` flow using `useRef<string>(crypto.randomUUID())` — regenerated on `startSession()`, sent in every request for backend order state tracking. Backward compatible: missing `tool_results` handled gracefully.
+
+
