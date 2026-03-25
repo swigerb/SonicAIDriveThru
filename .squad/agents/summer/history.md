@@ -39,7 +39,14 @@ Series of debugging and feature work across demo readiness, debugging sprint, an
 
 <!-- Append new learnings below. Each entry is something lasting about the project. -->
 
-## Learnings — Current (Phase 4)
+## Learnings — Current (Phase 5)
+
+### 2026-03-25: Phase 5 — RTMT + Tool Calling Test Coverage
+- **Test Coverage Sprint (Birdperson):** Two new test files (141 tests) covering the two largest zero-coverage gaps: (1) `test_rtmt.py` (75 tests) — WebSocket lifecycle, SessionManager creation/cleanup/concurrency/greeting/idle-timeout, ContextMonitor thresholds, EchoSuppressor state machine (audio delta/done/cooldown/barge-in/greeting suppression), TYPE_RE regex, pre-serialized messages, ToolResult/Tool/RTToolCall value objects, HMAC token create/validate, RTMiddleTier init/attach/config, message processing (session.update injection, passthrough audio, session.created stripping, tool execution with TO_BOTH routing, error logging, malformed JSON), WebSocket handler (origin rejection, token rejection). (2) `test_tool_calling.py` (66 tests) — search pipeline (formatting, sizes, empty results, errors, caching with TTL/eviction/clear/case-insensitive), OOS annotations, order CRUD (add/remove/quantity limits per-item 10/total 25, incremental), get_order/reset_order, tax calculation, upsell hints (burger→combo, drink→addon, side→drink, combo→upgrade), combo validation, menu_utils normalize_size/infer_category, extras validation, edge cases (special chars, duplicate items, empty cart). Total suite: 337/337 passing (196 pre-existing + 141 new). All Azure/OpenAI calls mocked at boundaries.
+- **Flagged Issue (Pre-existing):** `INVALID_MODS` referenced in `tools.py:112` but never defined — would raise `NameError` if any item with parenthesized customizations hit `validate_customization()`. Noted for future review.
+- **EchoSuppressor Async:** `on_audio_done()` uses `asyncio.ensure_future()` internally — tests wrapped with `asyncio.run()` for proper event loop context. No issues.
+
+## Learnings — Current (Phase 4 — Archived)
 
 ### 2026-03-25: Phase 4 — Demo-Safe Security
 - **Token Provider Async Refresh (Task 1):** Replaced blocking `self._token_provider()` call in `_forward_messages` with background refresh loop (`_refresh_token_loop`) that proactively refreshes the Azure AD token every 5 minutes via `run_in_executor`. Cached token served to new connections. Startup warm-up still synchronous (fine for one-time init). Background task starts on app startup, cancels on shutdown.

@@ -1171,3 +1171,70 @@ On failure: `logger.critical()` + `sys.exit(1)` — the server never starts in a
 - `sys.exit(1)` replaces `RuntimeError` for missing env vars — team tests should use `SystemExit` assertion
 - `_startup_checks` module-level dict is the source of truth for health state
 - 3 new tests passing, all existing tests unaffected
+
+## Phase 5 — RTMT + Tool Calling Test Coverage (2026-03-25)
+
+**Author:** Birdperson (Tester)  
+**Status:** Complete ✅
+
+### Decision
+
+Comprehensive test coverage for the two largest zero-coverage gaps in the codebase:
+
+1. **`test_rtmt.py`** (75 tests)
+   - **SessionManager**: Creation, cleanup, concurrency, greeting, idle-timeout
+   - **ContextMonitor**: Threshold validation (6 tests)
+   - **EchoSuppressor**: State machine (audio delta, done, cooldown, barge-in, greeting suppression) — 18 tests
+   - **Message & Protocol**: TYPE_RE regex, pre-serialized messages, ToolResult/Tool/RTToolCall value objects, HMAC tokens — 15 tests
+   - **RTMiddleTier**: Initialization, configuration, attachment — 12 tests
+   - **Message Processing & WebSocket**: Session.update injection, passthrough audio, session.created stripping, tool execution with TO_BOTH routing, error logging, origin/token rejection — 12 tests
+
+2. **`test_tool_calling.py`** (66 tests)
+   - **Search**: Query formatting, size variants, empty results, errors, caching (TTL, eviction, clear, case-insensitive)
+   - **OOS Annotations**: 3 tests
+   - **Order Management**: Add/remove, quantity limits (per-item max 10, total max 25, incremental), get_order, reset_order — 24 tests
+   - **Tax & Pricing**: 8 tests
+   - **Upsell Hints**: Burger→combo, drink→addon, side→drink, combo→upgrade — 8 tests
+   - **Menu Utilities**: normalize_size, infer_category — 5 tests
+   - **Combo Validation**: 3 tests
+   - **Extras Validation**: 1 test
+
+### Coverage Impact
+
+| Module | Before | After | Added |
+|--------|--------|-------|-------|
+| rtmt.py | 0 | 75 | 75 |
+| tools.py | 9 | 66 | 57 |
+| menu_utils.py | 0 | 16 | 16 |
+| audio_pipeline.py | 0 | 14 | 14 |
+| **TOTAL** | **196** | **337** | **141** |
+
+### Approach
+
+- All Azure/OpenAI calls mocked at service boundaries (zero real API calls)
+- Tests target behavior and contracts, not implementation details
+- Matches existing project style (unittest framework, sys.path setup, singleton reset pattern)
+- Comprehensive edge case coverage (special chars, empty carts, concurrent operations, state transitions)
+
+### Notable Findings
+
+**INVALID_MODS Dead Code** (Pre-existing)
+- Referenced in `tools.py:112` but never defined
+- Would raise `NameError` if any order item with parenthesized customizations reached `validate_customization()`
+- **Status**: Flagged for Summer to review
+
+**EchoSuppressor Async Behavior**
+- `on_audio_done()` uses `asyncio.ensure_future()` internally
+- Tests wrapped with `asyncio.run()` to provide event loop context
+- No issues; matches expected async patterns
+
+**Formatting Detail**
+- `get_grouped_order_for_readback()` format: totals use plain decimals ("6.46"), not "$6.46"
+- Tests match actual implementation behavior
+
+### Test Execution
+
+- **Command**: `python -m pytest app/backend/tests/ -v`
+- **Result**: 337/337 passing ✅
+- **Commit**: ac27ba9
+- **Ready**: CI/CD integration, merge to main
