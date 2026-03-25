@@ -187,13 +187,14 @@ class OrderState:
                                         if display not in components:
                                             components.append(display)
                                     # Rebuild combo display with components
-                                    base_name = combo_item.item
-                                    mods = ""
-                                    if "(" in combo_item.display:
-                                        mods_start = combo_item.display.find("(")
-                                        mods_end = combo_item.display.find(")")
-                                        if mods_end > mods_start:
-                                            mods = " " + combo_item.display[mods_start:mods_end + 1]
+                                    # Strip existing mods from base_name to avoid duplication
+                                    raw_name = combo_item.item
+                                    if "(" in raw_name:
+                                        base_name = raw_name[:raw_name.find("(")].strip()
+                                        mods = " " + raw_name[raw_name.find("("):]
+                                    else:
+                                        base_name = raw_name
+                                        mods = ""
                                     combo_item.display = f"{base_name}{mods} w/ {' & '.join(components)}"
                                     break
 

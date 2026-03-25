@@ -442,6 +442,30 @@ class OrderStateTests(unittest.TestCase):
         req = order_state_singleton.get_combo_requirements(session_id)
         self.assertTrue(req["is_complete"])
 
+    def test_combo_display_no_duplicate_mods(self):
+        """Mods like '(Pickles Only)' must appear exactly once in the combo display."""
+        session_id = order_state_singleton.create_session()
+        # Standalone burger with mods
+        order_state_singleton.handle_order_update(
+            session_id, "add", "SuperSONIC Double Cheeseburger (Pickles Only)", "standard", 1, 6.59
+        )
+        # Convert to combo — mods carry over
+        order_state_singleton.handle_order_update(
+            session_id, "add", "SuperSONIC Double Cheeseburger Combo", "standard", 1, 10.19
+        )
+        # Add side and drink (absorbed into combo)
+        order_state_singleton.handle_order_update(session_id, "add", "Tots", "medium", 1, 2.79)
+        order_state_singleton.handle_order_update(session_id, "add", "Diet Coke", "medium", 1, 2.49)
+
+        combo = order_state_singleton.get_order_items(session_id)[0]
+        # "(Pickles Only)" must appear exactly once
+        self.assertEqual(combo.display.count("(Pickles Only)"), 1,
+                         f"Mods duplicated in display: {combo.display}")
+        # Should show side & drink
+        self.assertIn("w/", combo.display)
+        self.assertIn("Tots", combo.display)
+        self.assertIn("Diet Coke", combo.display)
+
     def test_side_not_absorbed_when_no_combo(self):
         """Side added without any combo stays as standalone at full price."""
         session_id = order_state_singleton.create_session()
