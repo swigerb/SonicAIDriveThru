@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import os
@@ -191,31 +192,39 @@ async def search(
     _top = _search_cfg.get("top_results", 3)
 
     try:
-        search_results = await search_client.search(
+        search_results = await asyncio.wait_for(search_client.search(
             search_text=query,
             query_type="semantic",
             semantic_configuration_name=semantic_configuration,
             top=_top,
             vector_queries=vector_queries or None,
             select=select_fields,
-        )
+        ), timeout=_search_cfg.get("timeout_seconds", 10))
+    except asyncio.TimeoutError:
+        logger.error("Azure AI Search timed out for query '%s'", query)
+        _err = _prompt_loader.render_error("search_service_unavailable") if _prompt_loader else "I'm having trouble reaching our menu right now — could you try that again?"
+        return ToolResult(_err, ToolResultDirection.TO_SERVER)
     except HttpResponseError as exc:
         # Gracefully handle schema/field mismatches (e.g., invalid $select fields) by retrying with a minimal projection.
         if "Could not find a property named" in str(exc):
             logger.warning("Retrying search with minimal fields after select mismatch: %s", exc)
             fallback_select = [identifier_field or "id", content_field or "description"]
-            search_results = await search_client.search(
+            search_results = await asyncio.wait_for(search_client.search(
                 search_text=query,
                 query_type="semantic",
                 semantic_configuration_name=semantic_configuration,
                 top=_top,
                 vector_queries=vector_queries or None,
                 select=[f for f in fallback_select if f],
-            )
+            ), timeout=_search_cfg.get("timeout_seconds", 10))
         else:
             logger.error("Azure AI Search request failed: %s", exc)
             _err = _prompt_loader.render_error("search_service_unavailable") if _prompt_loader else "I'm sorry, I can't reach our menu data right now."
             return ToolResult(_err, ToolResultDirection.TO_SERVER)
+    except Exception as exc:
+        logger.error("Unexpected error during search for '%s': %s", query, exc)
+        _err = _prompt_loader.render_error("search_service_unavailable") if _prompt_loader else "I had a little glitch looking that up — could you say that again?"
+        return ToolResult(_err, ToolResultDirection.TO_SERVER)
 
     results = []
     async for record in search_results:

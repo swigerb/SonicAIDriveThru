@@ -32,6 +32,7 @@ audio:
 search:
   k_nearest_neighbors: 15
   top_results: 3
+  timeout_seconds: 10
 
 connection:
   ws_heartbeat_seconds: 15.0
