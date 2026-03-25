@@ -98,6 +98,15 @@ EXTRAS_KEYWORDS = (
 ALLOWED_EXTRA_CATEGORIES = {"slushes & drinks", "shakes & ice cream", "burgers & sandwiches", "drinks", "slushes", "shakes", "combos"}
 BLOCKED_EXTRA_CATEGORIES = {"hot dogs & tots", "sides", "hot dogs"}
 
+# Map category keywords → mods that don't make sense for that category
+INVALID_MODS = {
+    "shake": ["lettuce", "tomato", "onion", "mustard", "ketchup", "pickle", "jalapeño", "relish"],
+    "slush": ["lettuce", "tomato", "onion", "mustard", "ketchup", "pickle", "jalapeño", "cheese", "bacon", "patty"],
+    "drink": ["lettuce", "tomato", "onion", "mustard", "ketchup", "pickle", "jalapeño", "cheese", "bacon", "patty"],
+    "side": ["whipped cream", "chocolate", "vanilla", "strawberry"],
+    "hot dog": ["whipped cream", "chocolate", "vanilla", "strawberry"],
+}
+
 
 def _is_extra_item(item_name: str) -> bool:
     normalized = item_name.lower()
