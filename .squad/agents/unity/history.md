@@ -113,3 +113,15 @@
 - **File structure proposed:** `app/backend/prompts/sonic/` with `manifest.yaml`, `system_prompt.yaml`, `greeting.yaml`, `tool_schemas.yaml`, `error_messages.yaml`, `hints.yaml`.
 - **Decision written:** `.squad/decisions/inbox/unity-prompt-strategy.md` — full strategy with 6 implementation phases.
 - **Tests affected:** 5 existing tests regex-parse `app.py` for prompt content — will need updating to read YAML after externalization.
+
+### Prompt Externalization — YAML Content Files (2026-07-25)
+- **Created 6 YAML files** in `app/backend/prompts/sonic/`: `system_prompt.yaml`, `greeting.yaml`, `tool_schemas.yaml`, `error_messages.yaml`, `hints.yaml`, `manifest.yaml`.
+- **System prompt extraction:** 22 named sections with priority ordering, extracted verbatim from `app.py:127-250`. Section order matches the original concatenation order exactly. Loader concatenates by priority to rebuild the full prompt string.
+- **Greeting extraction:** Pre-serialized `_GREETING_MSG` from `rtmt.py:141-150` — the exact "Say EXACTLY this greeting" directive preserved.
+- **Tool schemas:** All 4 tool definitions (`search`, `update_order`, `get_order`, `reset_order`) from `tools.py:198-525`. Descriptions improved to be brand-specific ("Sonic Drive-In menu" instead of "knowledge base", "Carhop Ticket" instead of "current order") — flagged as a quick win in the audit.
+- **Error messages:** 12 messages extracted from `tools.py` error paths with Jinja2 template variables for runtime values (`{{item_name}}`, `{{max_per_item}}`, etc.). Messages preserved in their original carhop voice.
+- **Hints:** 6 category-specific upsell hints from `tools.py:474-486`, plus system hint templates (combo incomplete, OOS, happy hour) and delta text templates for add/remove confirmations.
+- **Manifest:** Brand config with file references, model name (`gpt-4o-realtime-preview`), voice (`coral`), temperature (0.6), and max_tokens (4096).
+- **Key decision — voice in manifest:** Used `coral` (not `sage`) based on actual code (`app.py:121` defaults to "coral") and team history confirming coral is the Sonic carhop voice.
+- **All 6 files validated** with `yaml.safe_load()` — no parse errors.
+- **Content-only extraction:** No Python code modified. Summer's prompt loader will consume these files. Existing tests unaffected.
