@@ -95,6 +95,8 @@ class OrderState:
             "round_trip_token": self._format_round_trip_token(session_token, 0),
             "absorbed_sides": 0,
             "absorbed_drinks": 0,
+            "absorbed_side_display": "",
+            "absorbed_drink_display": "",
         }
         logger.info("Session created: %s", session_id)
         return session_id
@@ -165,6 +167,36 @@ class OrderState:
                             result_info["absorbed_into_combo"] = True
                             result_info["absorbed_component"] = component
                             result_info["absorbed_display"] = display
+
+                            # Update the combo item's display to show the absorbed component
+                            for combo_item in order_state:
+                                if "combo" in combo_item.item.lower():
+                                    # Build component list from absorbed sides/drinks
+                                    components = []
+                                    if session.get("absorbed_side_display"):
+                                        components.append(session["absorbed_side_display"])
+                                    if session.get("absorbed_drink_display"):
+                                        components.append(session["absorbed_drink_display"])
+                                    # Store current component display for future reference
+                                    if component == "sides":
+                                        session["absorbed_side_display"] = display
+                                        if display not in components:
+                                            components.append(display)
+                                    else:
+                                        session["absorbed_drink_display"] = display
+                                        if display not in components:
+                                            components.append(display)
+                                    # Rebuild combo display with components
+                                    base_name = combo_item.item
+                                    mods = ""
+                                    if "(" in combo_item.display:
+                                        mods_start = combo_item.display.find("(")
+                                        mods_end = combo_item.display.find(")")
+                                        if mods_end > mods_start:
+                                            mods = " " + combo_item.display[mods_start:mods_end + 1]
+                                    combo_item.display = f"{base_name}{mods} w/ {' & '.join(components)}"
+                                    break
+
                             logger.info("Post-combo absorption: '%s' absorbed as combo %s", display, component)
                             if remaining <= 0:
                                 self._update_summary(session_id)
