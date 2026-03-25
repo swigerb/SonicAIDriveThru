@@ -381,7 +381,7 @@ class AppStartupTests(unittest.IsolatedAsyncioTestCase):
             "RUNNING_IN_PRODUCTION": "1",
         }, clear=True):
             from app import create_app
-            with self.assertRaises(RuntimeError):
+            with self.assertRaises(SystemExit):
                 await create_app()
 
 

@@ -4,6 +4,7 @@ import os
 import sys
 from pathlib import Path
 
+import aiohttp
 from aiohttp import web
 from azure.core.credentials import AzureKeyCredential
 from azure.identity import AzureDeveloperCliCredential, DefaultAzureCredential
@@ -31,6 +32,24 @@ _STATIC_IMMUTABLE_MAX_AGE = _compression_cfg.get("static_immutable_max_age", 31_
 _STATIC_DEFAULT_MAX_AGE = _compression_cfg.get("static_default_max_age", 3600)
 # Compressible content-type substrings
 _COMPRESSIBLE_TYPES = ("text/", "application/json", "application/javascript", "image/svg")
+
+# App version — exposed via /health endpoint
+_APP_VERSION = "1.0.0"
+
+# Required environment variables for the app to function
+_REQUIRED_ENV_VARS = [
+    "AZURE_OPENAI_EASTUS2_ENDPOINT",
+    "AZURE_OPENAI_REALTIME_DEPLOYMENT",
+    "AZURE_SEARCH_ENDPOINT",
+    "AZURE_SEARCH_INDEX",
+]
+
+# Startup validation state — read by /health endpoint
+_startup_checks = {
+    "prompts_loaded": False,
+    "config_loaded": True,  # validated at module load by get_config()
+    "env_vars": False,
+}
 
 
 def _get_bool_env(variable_name: str, default: bool = False) -> bool:
@@ -86,7 +105,36 @@ async def _index_handler(_request: web.Request) -> web.FileResponse:
 
 
 async def _health_handler(_request: web.Request) -> web.Response:
-    return web.json_response({"status": "healthy"})
+    all_ok = all(_startup_checks.values())
+    return web.json_response(
+        {
+            "status": "healthy" if all_ok else "unhealthy",
+            "version": _APP_VERSION,
+            "checks": _startup_checks,
+        },
+        status=200 if all_ok else 503,
+    )
+
+
+async def _check_service_connectivity() -> None:
+    """Verify Azure service endpoints are reachable. Non-blocking — logs warnings only."""
+    endpoints = {
+        "Azure OpenAI": os.environ.get("AZURE_OPENAI_EASTUS2_ENDPOINT"),
+        "Azure Search": os.environ.get("AZURE_SEARCH_ENDPOINT"),
+    }
+    timeout = aiohttp.ClientTimeout(total=5)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            for name, url in endpoints.items():
+                if not url:
+                    continue
+                try:
+                    async with session.get(url, ssl=True) as resp:
+                        logger.info("✅ %s reachable (HTTP %d)", name, resp.status)
+                except Exception as exc:
+                    logger.warning("⚠️ %s unreachable at %s — %s (non-fatal)", name, url, exc)
+    except Exception as exc:
+        logger.warning("⚠️ Service connectivity check failed — %s (non-fatal)", exc)
 
 
 async def create_app() -> web.Application:
@@ -96,20 +144,42 @@ async def create_app() -> web.Application:
         logger.info("Running in development mode; loading values from .env")
         load_dotenv()
 
-    # ── Load prompts from YAML (fail-fast on missing/malformed files) ──
+    # ── Startup Validation ────────────────────────────────────────────────
+
+    # 1. Validate required environment variables
+    missing_vars = [v for v in _REQUIRED_ENV_VARS if not os.environ.get(v)]
+    if missing_vars:
+        logger.critical(
+            "FATAL: Missing required environment variables: %s", ", ".join(missing_vars)
+        )
+        sys.exit(1)
+    _startup_checks["env_vars"] = True
+
+    # 2. Load prompts from YAML (fail-fast on missing/malformed files)
     try:
         prompt_loader = PromptLoader(brand="sonic")
     except (FileNotFoundError, ValueError) as exc:
         logger.critical("FATAL: Failed to load prompts — %s", exc)
         sys.exit(1)
+    _startup_checks["prompts_loaded"] = True
+
+    # 3. Optional: verify Azure service connectivity (non-blocking)
+    await _check_service_connectivity()
+
+    env_count = len(_REQUIRED_ENV_VARS)
+    logger.info(
+        "✅ Startup validation passed: prompts loaded, config valid, %d/%d env vars set",
+        env_count,
+        env_count,
+    )
+
+    # ── App Configuration ─────────────────────────────────────────────────
 
     model_cfg = _config.get("model", {})
     conn_cfg = _config.get("connection", {})
 
     llm_endpoint = os.environ.get("AZURE_OPENAI_EASTUS2_ENDPOINT")
     llm_deployment = os.environ.get("AZURE_OPENAI_REALTIME_DEPLOYMENT")
-    if not llm_endpoint or not llm_deployment:
-        raise RuntimeError("Azure OpenAI realtime endpoint and deployment must be configured.")
 
     llm_key = os.environ.get("AZURE_OPENAI_EASTUS2_API_KEY")
     search_key = os.environ.get("AZURE_SEARCH_API_KEY")

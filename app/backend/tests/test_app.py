@@ -1,8 +1,9 @@
+import json
 import os
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
@@ -43,12 +44,15 @@ class CreateAppConfigTests(unittest.IsolatedAsyncioTestCase):
         """Run create_app with mocked Azure services; return (class_mock, instance_mock)."""
         with patch("app.RTMiddleTier") as mock_cls, \
              patch("app.attach_tools_rtmt"), \
+             patch("app._check_service_connectivity", new_callable=AsyncMock), \
              patch.dict(os.environ, {
                  "RUNNING_IN_PRODUCTION": "1",
                  "AZURE_OPENAI_EASTUS2_ENDPOINT": "https://fake.openai.azure.com",
                  "AZURE_OPENAI_REALTIME_DEPLOYMENT": "gpt-4o-realtime",
                  "AZURE_OPENAI_EASTUS2_API_KEY": "fake-key",
                  "AZURE_SEARCH_API_KEY": "fake-search-key",
+                 "AZURE_SEARCH_ENDPOINT": "https://fake.search.windows.net",
+                 "AZURE_SEARCH_INDEX": "test-index",
                  "AZURE_OPENAI_REALTIME_VOICE_CHOICE": "",
              }):
             mock_instance = MagicMock()
@@ -72,6 +76,53 @@ class CreateAppConfigTests(unittest.IsolatedAsyncioTestCase):
     async def test_system_prompt_contains_get_order_tool_instruction(self):
         _, mock_instance = await self._run_create_app()
         self.assertIn("get_order", mock_instance.system_message)
+
+
+class HealthEndpointTests(unittest.IsolatedAsyncioTestCase):
+    """Tests for the /health endpoint response structure."""
+
+    async def test_health_returns_200_when_all_checks_pass(self):
+        from app import _health_handler, _startup_checks
+        original = dict(_startup_checks)
+        _startup_checks.update(prompts_loaded=True, config_loaded=True, env_vars=True)
+        try:
+            response = await _health_handler(MagicMock())
+            self.assertEqual(response.status, 200)
+            body = json.loads(response.body)
+            self.assertEqual(body["status"], "healthy")
+            self.assertEqual(body["version"], "1.0.0")
+            self.assertTrue(all(body["checks"].values()))
+        finally:
+            _startup_checks.update(original)
+
+    async def test_health_returns_503_when_check_fails(self):
+        from app import _health_handler, _startup_checks
+        original = dict(_startup_checks)
+        _startup_checks.update(prompts_loaded=False, config_loaded=True, env_vars=True)
+        try:
+            response = await _health_handler(MagicMock())
+            self.assertEqual(response.status, 503)
+            body = json.loads(response.body)
+            self.assertEqual(body["status"], "unhealthy")
+            self.assertFalse(body["checks"]["prompts_loaded"])
+        finally:
+            _startup_checks.update(original)
+
+    async def test_health_response_has_required_fields(self):
+        from app import _health_handler, _startup_checks
+        original = dict(_startup_checks)
+        _startup_checks.update(prompts_loaded=True, config_loaded=True, env_vars=True)
+        try:
+            response = await _health_handler(MagicMock())
+            body = json.loads(response.body)
+            self.assertIn("status", body)
+            self.assertIn("version", body)
+            self.assertIn("checks", body)
+            self.assertIn("prompts_loaded", body["checks"])
+            self.assertIn("config_loaded", body["checks"])
+            self.assertIn("env_vars", body["checks"])
+        finally:
+            _startup_checks.update(original)
 
 
 if __name__ == "__main__":
