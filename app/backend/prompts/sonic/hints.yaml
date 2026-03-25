@@ -1,0 +1,45 @@
+version: "1.0.0"
+upsell_hints:
+  combo:
+    trigger_categories:
+      - "combos"
+    hint: "Combos are a great base! Ask if they want to upgrade to a Large size, or add a delicious Shake or Dessert!"
+
+  burger:
+    trigger_categories:
+      - "burgers"
+      - "burgers & sandwiches"
+    hint: "Perfect choice! Ask if they want to make it a combo meal with Tots or Fries and a refreshing Drink!"
+
+  drink:
+    trigger_categories:
+      - "drinks"
+      - "slushes"
+    hint: "Great drink choice! Ask if they want to add a Flavor Add-In to customize it, or pair it with a tasty side!"
+
+  shake:
+    trigger_categories:
+      - "shakes"
+      - "desserts"
+      - "shakes & ice cream"
+    hint: "Yum! Shakes are perfect on their own, but ask if they'd like to add Whipped Cream or pair with a snack!"
+
+  side:
+    trigger_categories:
+      - "sides"
+      - "hot dogs"
+      - "hot dogs & tots"
+    hint: "Tasty! Ask if they want to add a refreshing Drink or Slush to complete their meal!"
+
+  generic:
+    trigger_categories: []
+    hint: "Ask if they'd like to add anything else — maybe a drink, side, or dessert!"
+
+system_hints:
+  combo_incomplete: "SYSTEM HINT: {{prompt_hint}}"
+  out_of_stock: "OOS: {{oos_reason}}"
+  happy_hour_active: "HAPPY HOUR ACTIVE: drinks and slushes are half-price!"
+
+delta_templates:
+  item_added: "Added {{quantity}} {{display_name}} — your total is now ${{total}}"
+  item_removed: "Removed {{quantity}} {{display_name}} — your total is now ${{total}}"

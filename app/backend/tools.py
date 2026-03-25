@@ -2,7 +2,6 @@ import json
 import logging
 import os
 import time
-from pathlib import Path
 from typing import Any
 
 from azure.core.credentials import AzureKeyCredential
@@ -11,19 +10,30 @@ from azure.identity import DefaultAzureCredential
 from azure.search.documents.aio import SearchClient
 from azure.search.documents.models import VectorizableTextQuery
 
+from config_loader import get_config
 from order_state import order_state_singleton, is_happy_hour
+from menu_utils import infer_category as _infer_category, normalize_size, MENU_CATEGORY_MAP
 from rtmt import RTMiddleTier, Tool, ToolResult, ToolResultDirection
 
 logger = logging.getLogger(__name__)
 
 __all__ = ["attach_tools_rtmt"]
 
+# Load centralized config
+_config = get_config()
+_cache_cfg = _config.get("cache", {})
+_search_cfg = _config.get("search", {})
+_biz_cfg = _config.get("business_rules", {})
+
+# Module-level prompt loader — set by attach_tools_rtmt() at startup
+_prompt_loader = None
+
 # ---------------------------------------------------------------------------
 # Search result cache — avoids redundant Azure AI Search round-trips for
 # repeated menu queries within a short window (e.g. "what sizes do you have?").
 # ---------------------------------------------------------------------------
-_SEARCH_CACHE_TTL_SEC = 60.0
-_SEARCH_CACHE_MAX_SIZE = 128
+_SEARCH_CACHE_TTL_SEC = _cache_cfg.get("search_ttl_seconds", 60.0)
+_SEARCH_CACHE_MAX_SIZE = _cache_cfg.get("search_max_size", 128)
 
 class _SearchCache:
     """Simple TTL cache for search results. Not thread-safe, but fine for
@@ -60,8 +70,8 @@ _search_cache = _SearchCache()
 # Order quantity limits — prevents abuse (e.g. ordering 100 burgers) while
 # staying realistic for a drive-thru window.
 # ---------------------------------------------------------------------------
-MAX_QUANTITY_PER_ITEM = 10   # max of any single item (name+size combo)
-MAX_TOTAL_ITEMS = 25         # max total items across the entire order
+MAX_QUANTITY_PER_ITEM = _biz_cfg.get("max_item_quantity", 10)
+MAX_TOTAL_ITEMS = _biz_cfg.get("max_order_items", 25)
 
 
 # ---------------------------------------------------------------------------
@@ -89,76 +99,9 @@ ALLOWED_EXTRA_CATEGORIES = {"slushes & drinks", "shakes & ice cream", "burgers &
 BLOCKED_EXTRA_CATEGORIES = {"hot dogs & tots", "sides", "hot dogs"}
 
 
-def _load_menu_category_map() -> dict[str, str]:
-    env_override = (
-        os.environ.get("SONIC_MENU_ITEMS_PATH")
-        or os.environ.get("MENU_ITEMS_PATH")
-    )
-
-    candidate_paths = []
-    if env_override:
-        candidate_paths.append(Path(env_override))
-
-    # Preferred: keep backend self-contained (Docker image can copy this in).
-    candidate_paths.append(Path(__file__).resolve().parent / "data" / "menuItems.json")
-
-    # Fallback: repo layout (local dev).
-    candidate_paths.append(Path(__file__).resolve().parent.parent / "frontend" / "src" / "data" / "menuItems.json")
-
-    menu_path = next((path for path in candidate_paths if path.exists()), None)
-    if menu_path is None:
-        return {}
-    try:
-        with menu_path.open("r", encoding="utf-8") as f:
-            data = json.load(f)
-        mapping = {}
-        for category_entry in data.get("menuItems", []):
-            category = category_entry.get("category", "").strip().lower()
-            for item in category_entry.get("items", []):
-                name = item.get("name")
-                if name:
-                    mapping[name.lower()] = category
-        return mapping
-    except Exception as exc:  # pragma: no cover - defensive fallback
-        logger.warning("Failed to load menu items; falling back to keyword category inference: %s", exc)
-        return {}
-
-
-MENU_CATEGORY_MAP = _load_menu_category_map()
-
-
 def _is_extra_item(item_name: str) -> bool:
     normalized = item_name.lower()
     return any(keyword in normalized for keyword in EXTRAS_KEYWORDS)
-
-
-def _infer_category(item_name: str) -> str:
-    normalized = item_name.lower()
-    if normalized in MENU_CATEGORY_MAP:
-        return MENU_CATEGORY_MAP[normalized]
-    if "slush" in normalized or "limeade" in normalized or "ocean water" in normalized:
-        return "slushes"
-    if "shake" in normalized or "blast" in normalized or "malt" in normalized:
-        return "shakes"
-    if "burger" in normalized or "combo" in normalized:
-        return "combos"
-    if "hot dog" in normalized or "coney" in normalized:
-        return "hot dogs"
-    if "tot" in normalized or "fries" in normalized or "onion rings" in normalized:
-        return "sides"
-    if "drink" in normalized or "tea" in normalized or "lemonade" in normalized:
-        return "drinks"
-    return ""
-
-
-# ---------------------------------------------------------------------------
-# Customization validation — prevents nonsensical mods (mustard on a shake, etc.)
-# ---------------------------------------------------------------------------
-INVALID_MODS = {
-    "shakes": ["mustard", "ketchup", "mayo", "pickles", "onions", "lettuce"],
-    "slushes": ["cheese", "bacon", "patty"],
-    "burgers": ["whipped cream", "cherry", "strawberry fruit"],
-}
 
 
 def validate_customization(item_name: str, mods_string: str) -> str | None:
@@ -170,28 +113,16 @@ def validate_customization(item_name: str, mods_string: str) -> str | None:
         if cat_key in category.lower():
             for forbidden in forbidden_list:
                 if forbidden in mods_lower:
+                    if _prompt_loader:
+                        return _prompt_loader.render_error("invalid_mod", forbidden_item=forbidden, base_name=base_name)
                     return f"I can't add {forbidden} to a {base_name} — that's a new one! Want to try a different topping?"
     return None
 
 
 def _format_size_human_readable(size: str) -> str:
-    """Convert size codes to human-readable format."""
-    size_lower = size.lower().strip()
-    size_map = {
-        "mini": "Mini",
-        "small": "Small",
-        "s": "Small",
-        "medium": "Medium",
-        "m": "Medium",
-        "large": "Large",
-        "l": "Large",
-        "xl": "Extra Large",
-        "rt 44": "Route 44",
-        "rt44": "Route 44",
-        "44": "Route 44",
-        "standard": "Standard",
-    }
-    return size_map.get(size_lower, size.capitalize())
+    """Convert size codes to human-readable format using shared size map."""
+    result = normalize_size(size)
+    return result if result else size.capitalize()
 
 
 
@@ -237,7 +168,7 @@ async def search(
 
     vector_queries = []
     if use_vector_query and embedding_field:
-        vector_queries.append(VectorizableTextQuery(text=query, k_nearest_neighbors=15, fields=embedding_field))
+        vector_queries.append(VectorizableTextQuery(text=query, k_nearest_neighbors=_search_cfg.get("k_nearest_neighbors", 15), fields=embedding_field))
 
     # Only request fields we actually format into the result string
     select_fields = [
@@ -248,12 +179,14 @@ async def search(
         "sizes",
     ]
 
+    _top = _search_cfg.get("top_results", 3)
+
     try:
         search_results = await search_client.search(
             search_text=query,
             query_type="semantic",
             semantic_configuration_name=semantic_configuration,
-            top=3,
+            top=_top,
             vector_queries=vector_queries or None,
             select=select_fields,
         )
@@ -266,13 +199,14 @@ async def search(
                 search_text=query,
                 query_type="semantic",
                 semantic_configuration_name=semantic_configuration,
-                top=3,
+                top=_top,
                 vector_queries=vector_queries or None,
                 select=[f for f in fallback_select if f],
             )
         else:
             logger.error("Azure AI Search request failed: %s", exc)
-            return ToolResult("I'm sorry, I can't reach our menu data right now.", ToolResultDirection.TO_SERVER)
+            _err = _prompt_loader.render_error("search_service_unavailable") if _prompt_loader else "I'm sorry, I can't reach our menu data right now."
+            return ToolResult(_err, ToolResultDirection.TO_SERVER)
 
     results = []
     async for record in search_results:
@@ -302,7 +236,8 @@ async def search(
 
     joined_results = "\n-----\n".join(results)
     logger.debug("Search results returned %d documents", len(results))
-    result = ToolResult(joined_results or "No matching menu entries found.", ToolResultDirection.TO_SERVER)
+    _no_results = _prompt_loader.get_error_messages().get("search_no_results", "No matching menu entries found.") if _prompt_loader else "No matching menu entries found."
+    result = ToolResult(joined_results or _no_results, ToolResultDirection.TO_SERVER)
 
     # Cache the result for repeated queries
     _search_cache.put(cache_key, result)
@@ -361,10 +296,8 @@ async def update_order(args, session_id: str) -> ToolResult:
     price = args.get("price", 0.0)
     if args["action"] == "add" and price <= 0.0:
         logger.warning("Model attempted to add item %s with invalid price $%.2f (rejecting $0 items)", item_name, price)
-        return ToolResult(
-            "I'm sorry, I had a glitch with the pricing for that. Could you say that again?",
-            ToolResultDirection.TO_SERVER,
-        )
+        _err = _prompt_loader.render_error("price_validation_failed") if _prompt_loader else "I'm sorry, I had a glitch with the pricing for that. Could you say that again?"
+        return ToolResult(_err, ToolResultDirection.TO_SERVER)
 
     if args["action"] == "add" and _is_extra_item(item_name):
         current_items = order_state_singleton.get_order_items(session_id)
@@ -379,14 +312,15 @@ async def update_order(args, session_id: str) -> ToolResult:
                 has_blocked_base = True
 
         if not has_allowed_base:
-            apology = (
-                "I can add extras to drinks, slushes, shakes, or combos, "
-                "but not to sides or hot dogs on their own."
-            )
             if has_blocked_base:
-                apology = (
+                apology = _prompt_loader.render_error("extras_blocked_category") if _prompt_loader else (
                     "I can add extras to drinks, slushes, shakes, or combos, "
                     "but I can't add them to sides or hot dogs on their own."
+                )
+            else:
+                apology = _prompt_loader.render_error("extras_no_base_item") if _prompt_loader else (
+                    "I can add extras to drinks, slushes, shakes, or combos, "
+                    "but not to sides or hot dogs on their own."
                 )
             logger.info("Blocked extra '%s' for session %s", item_name, session_id)
             return ToolResult(apology, ToolResultDirection.TO_SERVER)
@@ -407,17 +341,23 @@ async def update_order(args, session_id: str) -> ToolResult:
         if new_item_qty > MAX_QUANTITY_PER_ITEM:
             allowed = MAX_QUANTITY_PER_ITEM - existing_qty
             if allowed <= 0:
-                msg = (
-                    f"That's a lot of {item_name}! Our drive-thru can handle up to "
-                    f"{MAX_QUANTITY_PER_ITEM} of any item. You already have {existing_qty} — "
-                    f"would you like to keep it at {existing_qty}?"
-                )
+                if _prompt_loader:
+                    msg = _prompt_loader.render_error("per_item_limit_maxed", item_name=item_name, max_per_item=MAX_QUANTITY_PER_ITEM, existing_qty=existing_qty)
+                else:
+                    msg = (
+                        f"That's a lot of {item_name}! Our drive-thru can handle up to "
+                        f"{MAX_QUANTITY_PER_ITEM} of any item. You already have {existing_qty} — "
+                        f"would you like to keep it at {existing_qty}?"
+                    )
             else:
-                msg = (
-                    f"That's a lot of {item_name}! Our drive-thru can handle up to "
-                    f"{MAX_QUANTITY_PER_ITEM} of any item. I can add {allowed} more — "
-                    f"would you like me to do that?"
-                )
+                if _prompt_loader:
+                    msg = _prompt_loader.render_error("per_item_limit_partial", item_name=item_name, max_per_item=MAX_QUANTITY_PER_ITEM, allowed=allowed)
+                else:
+                    msg = (
+                        f"That's a lot of {item_name}! Our drive-thru can handle up to "
+                        f"{MAX_QUANTITY_PER_ITEM} of any item. I can add {allowed} more — "
+                        f"would you like me to do that?"
+                    )
             logger.info("Per-item limit hit for '%s' in session %s (requested %d, existing %d)",
                         item_name, session_id, quantity, existing_qty)
             return ToolResult(msg, ToolResultDirection.TO_SERVER)
@@ -427,17 +367,23 @@ async def update_order(args, session_id: str) -> ToolResult:
         if total_qty > MAX_TOTAL_ITEMS:
             remaining = MAX_TOTAL_ITEMS - sum(oi.quantity for oi in current_items)
             if remaining <= 0:
-                msg = (
-                    f"Wow, that's a big order! Our drive-thru tops out at "
-                    f"{MAX_TOTAL_ITEMS} items total so we can keep things moving. "
-                    f"You're already at the max — would you like to swap anything out?"
-                )
+                if _prompt_loader:
+                    msg = _prompt_loader.render_error("total_order_limit_maxed", max_total=MAX_TOTAL_ITEMS)
+                else:
+                    msg = (
+                        f"Wow, that's a big order! Our drive-thru tops out at "
+                        f"{MAX_TOTAL_ITEMS} items total so we can keep things moving. "
+                        f"You're already at the max — would you like to swap anything out?"
+                    )
             else:
-                msg = (
-                    f"Wow, that's a big order! Our drive-thru tops out at "
-                    f"{MAX_TOTAL_ITEMS} items total so we can keep things moving. "
-                    f"I can add {remaining} more — would you like me to do that?"
-                )
+                if _prompt_loader:
+                    msg = _prompt_loader.render_error("total_order_limit_partial", max_total=MAX_TOTAL_ITEMS, remaining=remaining)
+                else:
+                    msg = (
+                        f"Wow, that's a big order! Our drive-thru tops out at "
+                        f"{MAX_TOTAL_ITEMS} items total so we can keep things moving. "
+                        f"I can add {remaining} more — would you like me to do that?"
+                    )
             logger.info("Total order limit hit in session %s (would be %d items)", session_id, total_qty)
             return ToolResult(msg, ToolResultDirection.TO_SERVER)
 
@@ -458,7 +404,10 @@ async def update_order(args, session_id: str) -> ToolResult:
     action = args["action"]
     display_size = size if size and size.lower() not in {"", "standard", "n/a", "na", "none", "n.a."} else ""
     display_name = f"{display_size.capitalize() + ' ' if display_size else ''}{item_name}"
-    if action == "add":
+    if _prompt_loader:
+        tpl = _prompt_loader.get_delta_template(action)
+        delta_text = _prompt_loader.render_template(tpl, quantity=quantity, display_name=display_name, total=f"{summary.finalTotal:.2f}")
+    elif action == "add":
         delta_text = f"Added {quantity} {display_name} — your total is now ${summary.finalTotal:.2f}"
     else:
         delta_text = f"Removed {quantity} {display_name} — your total is now ${summary.finalTotal:.2f}"
@@ -472,18 +421,21 @@ async def update_order(args, session_id: str) -> ToolResult:
     elif action == "add":
         # ── Category-aware upsell hints (only when combo requirements are met) ──
         category = _infer_category(item_name)
-        if category == "combos":
-            delta_text += " (UPSELL HINT: Combos are a great base! Ask if they want to upgrade to a Large size, or add a delicious Shake or Dessert!)"
-        elif category in ("burgers", "burgers & sandwiches"):
-            delta_text += " (UPSELL HINT: Perfect choice! Ask if they want to make it a combo meal with Tots or Fries and a refreshing Drink!)"
-        elif category in ("drinks", "slushes"):
-            delta_text += " (UPSELL HINT: Great drink choice! Ask if they want to add a Flavor Add-In to customize it, or pair it with a tasty side!)"
-        elif category in ("shakes", "desserts", "shakes & ice cream"):
-            delta_text += " (UPSELL HINT: Yum! Shakes are perfect on their own, but ask if they'd like to add Whipped Cream or pair with a snack!)"
-        elif category in ("sides", "hot dogs", "hot dogs & tots"):
-            delta_text += " (UPSELL HINT: Tasty! Ask if they want to add a refreshing Drink or Slush to complete their meal!)"
+        if _prompt_loader:
+            delta_text += _prompt_loader.get_upsell_hint(category)
         else:
-            delta_text += " (UPSELL HINT: Ask if they'd like to add anything else — maybe a drink, side, or dessert!)"
+            if category == "combos":
+                delta_text += " (UPSELL HINT: Combos are a great base! Ask if they want to upgrade to a Large size, or add a delicious Shake or Dessert!)"
+            elif category in ("burgers", "burgers & sandwiches"):
+                delta_text += " (UPSELL HINT: Perfect choice! Ask if they want to make it a combo meal with Tots or Fries and a refreshing Drink!)"
+            elif category in ("drinks", "slushes"):
+                delta_text += " (UPSELL HINT: Great drink choice! Ask if they want to add a Flavor Add-In to customize it, or pair it with a tasty side!)"
+            elif category in ("shakes", "desserts", "shakes & ice cream"):
+                delta_text += " (UPSELL HINT: Yum! Shakes are perfect on their own, but ask if they'd like to add Whipped Cream or pair with a snack!)"
+            elif category in ("sides", "hot dogs", "hot dogs & tots"):
+                delta_text += " (UPSELL HINT: Tasty! Ask if they want to add a refreshing Drink or Slush to complete their meal!)"
+            else:
+                delta_text += " (UPSELL HINT: Ask if they'd like to add anything else — maybe a drink, side, or dessert!)"
         logger.debug("Upsell hint for category '%s'", category)
 
     happy_hour_note = " [HAPPY HOUR ACTIVE: drinks and slushes are half-price!]" if is_happy_hour() else ""
@@ -543,16 +495,26 @@ def attach_tools_rtmt(
     embedding_field: str,
     title_field: str,
     use_vector_query: bool,
+    prompt_loader=None,
 ) -> None:
     """Attach search and order tools to the RTMiddleTier instance."""
+    global _prompt_loader
+    _prompt_loader = prompt_loader
+
+    # Use tool schemas from YAML if available, else fall back to hardcoded
+    if prompt_loader:
+        yaml_schemas = prompt_loader.get_tool_schemas()
+        schema_map = {s["name"]: s for s in yaml_schemas}
+    else:
+        schema_map = {}
 
     if not isinstance(credentials, AzureKeyCredential):
         credentials.get_token("https://search.azure.com/.default")  # warm up prior to first call
     search_client = SearchClient(search_endpoint, search_index, credentials, user_agent="RTMiddleTier")
 
-    rtmt.tools["search"] = Tool(schema=search_tool_schema, target=lambda args: search(search_client, semantic_configuration, identifier_field, content_field, embedding_field, use_vector_query, args))
-    rtmt.tools["update_order"] = Tool(schema=update_order_tool_schema, target=lambda args, session_id: update_order(args, session_id))
-    rtmt.tools["get_order"] = Tool(schema=get_order_tool_schema, target=lambda args, session_id: get_order(args, session_id))
-    rtmt.tools["reset_order"] = Tool(schema=reset_order_tool_schema, target=lambda args, session_id: reset_order(args, session_id))
+    rtmt.tools["search"] = Tool(schema=schema_map.get("search", search_tool_schema), target=lambda args: search(search_client, semantic_configuration, identifier_field, content_field, embedding_field, use_vector_query, args))
+    rtmt.tools["update_order"] = Tool(schema=schema_map.get("update_order", update_order_tool_schema), target=lambda args, session_id: update_order(args, session_id))
+    rtmt.tools["get_order"] = Tool(schema=schema_map.get("get_order", get_order_tool_schema), target=lambda args, session_id: get_order(args, session_id))
+    rtmt.tools["reset_order"] = Tool(schema=schema_map.get("reset_order", reset_order_tool_schema), target=lambda args, session_id: reset_order(args, session_id))
 
 

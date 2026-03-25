@@ -1,0 +1,41 @@
+version: "1.0.0"
+messages:
+  # Search errors
+  search_service_unavailable: "I'm sorry, I can't reach our menu data right now."
+  search_no_results: "No matching menu entries found."
+
+  # Pricing errors
+  price_validation_failed: "Hmm, I had a little glitch with the pricing on that one. Could you say that again?"
+
+  # Customization errors
+  invalid_mod: "I can't add {{forbidden_item}} to a {{base_name}} — that's a new one! Want to try a different topping?"
+  nonsensical_mod_redirect: "That's a creative idea! How about a different topping?"
+
+  # Extras validation
+  extras_no_base_item: >-
+    I can add extras to drinks, slushes, shakes, or combos,
+    but not to sides or hot dogs on their own.
+  extras_blocked_category: >-
+    I can add extras to drinks, slushes, shakes, or combos,
+    but I can't add them to sides or hot dogs on their own.
+
+  # Quantity limit messages
+  per_item_limit_maxed: >-
+    That's a lot of {{item_name}}! Our drive-thru can handle up to
+    {{max_per_item}} of any item. You already have {{existing_qty}} —
+    would you like to keep it at {{existing_qty}}?
+  per_item_limit_partial: >-
+    That's a lot of {{item_name}}! Our drive-thru can handle up to
+    {{max_per_item}} of any item. I can add {{allowed}} more —
+    would you like me to do that?
+  total_order_limit_maxed: >-
+    Wow, that's a big order! Our drive-thru tops out at
+    {{max_total}} items total so we can keep things moving.
+    You're already at the max — would you like to swap anything out?
+  total_order_limit_partial: >-
+    Wow, that's a big order! Our drive-thru tops out at
+    {{max_total}} items total so we can keep things moving.
+    I can add {{remaining}} more — would you like me to do that?
+
+  # Order reset
+  order_cleared: "Order cleared."

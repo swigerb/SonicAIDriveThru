@@ -14,9 +14,15 @@ from aiohttp import web
 from azure.core.credentials import AzureKeyCredential
 from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 
+from config_loader import get_config
 from order_state import SessionIdentifiers, order_state_singleton
 
 logger = logging.getLogger("sonic-drive-in")
+
+# Load centralized config
+_config = get_config()
+_audio_cfg = _config.get("audio", {})
+_conn_cfg = _config.get("connection", {})
 
 # ── Verbose diagnostic logger ──
 # Separate logger so verbose output can be toggled without affecting production logs.
@@ -77,7 +83,7 @@ if _VERBOSE_LOG_FILE_GLOBAL:
     vlogger.addHandler(_global_file_handler)
 
 # Max characters of tool result text to log (prevents terminal flooding)
-_VERBOSE_RESULT_TRUNCATE = 500
+_VERBOSE_RESULT_TRUNCATE = _config.get("logging", {}).get("verbose_result_truncate", 500)
 
 __all__ = ["RTMiddleTier", "RTToolCall", "Tool", "ToolResult", "ToolResultDirection"]
 
@@ -117,8 +123,7 @@ _RESPONSE_CREATE_MSG = json.dumps({"type": "response.create"})
 _INPUT_AUDIO_CLEAR_MSG = json.dumps({"type": "input_audio_buffer.clear"})
 
 # Cooldown period (seconds) after AI audio ends before accepting user audio.
-# Covers timing gap between server sending last audio delta and speakers finishing.
-_ECHO_COOLDOWN_SEC = 1.5
+_ECHO_COOLDOWN_SEC = _audio_cfg.get("echo_cooldown_seconds", 1.5)
 
 # Fast substring markers for echo suppression (avoids regex/JSON parse overhead)
 _MARKER_AUDIO_APPEND = '"input_audio_buffer.append"'
@@ -132,13 +137,15 @@ _MARKER_VERBOSE_LOGGING = '"extension.set_verbose_logging"'
 _MARKER_LOG_TO_FILE = '"extension.set_log_to_file"'
 
 # Connection tuning constants
-_WS_HEARTBEAT_SEC = 15.0
-_WS_CONNECT_TIMEOUT = aiohttp.ClientTimeout(total=30, connect=10)
+_WS_HEARTBEAT_SEC = _conn_cfg.get("ws_heartbeat_seconds", 15.0)
+_WS_CONNECT_TIMEOUT = aiohttp.ClientTimeout(
+    total=_conn_cfg.get("ws_connect_timeout_total", 30),
+    connect=_conn_cfg.get("ws_connect_timeout_connect", 10),
+)
 
-# Pre-serialized greeting to avoid json.dumps at connection time.
-# IMPORTANT: This must be a direct command — NOT "how would you greet" or the AI
-# will generate meta-commentary about greeting instead of actually greeting.
-_GREETING_MSG = json.dumps({
+# Default greeting — overridden by PromptLoader at runtime.
+# Kept as fallback for tests and backwards compatibility.
+_DEFAULT_GREETING_MSG = json.dumps({
     "type": "conversation.item.create",
     "item": {
         "type": "message",
@@ -213,7 +220,7 @@ class RTMiddleTier:
     voice_choice: str | None = None
     api_version: str = "2024-10-01-preview"
 
-    def __init__(self, endpoint: str, deployment: str, credentials: AzureKeyCredential | DefaultAzureCredential, voice_choice: str | None = None):
+    def __init__(self, endpoint: str, deployment: str, credentials: AzureKeyCredential | DefaultAzureCredential, voice_choice: str | None = None, prompt_loader=None):
         self.endpoint = endpoint
         self.deployment = deployment
         self.voice_choice = voice_choice
@@ -221,6 +228,12 @@ class RTMiddleTier:
         self._token_provider = None
         self._session_map: dict[web.WebSocketResponse, str] = {}
         self._sent_greeting: set[str] = set()
+        self._prompt_loader = prompt_loader
+        # Use prompt loader greeting if available, else fallback
+        if prompt_loader is not None:
+            self._greeting_msg = prompt_loader.get_greeting_json_str()
+        else:
+            self._greeting_msg = _DEFAULT_GREETING_MSG
         if voice_choice is not None:
             logger.info("Realtime voice choice set to %s", voice_choice)
         if isinstance(credentials, AzureKeyCredential):
@@ -532,7 +545,7 @@ class RTMiddleTier:
                     _vlog(verbose, "  Echo suppression: ai_speaking=True (pre-set for greeting)")
                     # Flush any stale audio that arrived before session was configured
                     await target_ws.send_str(_INPUT_AUDIO_CLEAR_MSG)
-                    await target_ws.send_str(_GREETING_MSG)
+                    await target_ws.send_str(self._greeting_msg)
                     await target_ws.send_str(_RESPONSE_CREATE_MSG)
                     greeting_sent = True
                     if session_id is not None:
@@ -728,8 +741,10 @@ class RTMiddleTier:
                         session_file_handler = None
                     if session_id is not None:
                         order_state_singleton.delete_session(session_id)
-                    # Clean up the session map when the connection is closed
+                    # Clean up the session map and greeting tracker when the connection is closed
                     self._session_map.pop(ws, None)
+                    if session_id is not None:
+                        self._sent_greeting.discard(session_id)
 
     async def _websocket_handler(self, request: web.Request):
         ws = web.WebSocketResponse(

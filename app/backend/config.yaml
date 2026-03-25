@@ -1,0 +1,51 @@
+# Centralized configuration for Sonic AI Drive-Thru backend.
+# All magic numbers previously scattered across app.py, rtmt.py, tools.py, order_state.py
+# are collected here. Changes take effect on next startup (or immediately in DEV_MODE).
+
+model:
+  temperature: 0.6
+  max_response_output_tokens: 4096
+  api_version: "2024-10-01-preview"
+  default_voice: "coral"
+
+vad:
+  type: "server_vad"
+  threshold: 0.5
+  prefix_padding_ms: 300
+  silence_duration_ms: 200
+
+business_rules:
+  tax_rate: 0.08
+  max_item_quantity: 10
+  max_order_items: 25
+  happy_hour_start: 14
+  happy_hour_end: 16
+  happy_hour_discount: 0.5
+
+cache:
+  search_ttl_seconds: 60.0
+  search_max_size: 128
+
+audio:
+  echo_cooldown_seconds: 1.5
+
+search:
+  k_nearest_neighbors: 15
+  top_results: 3
+
+connection:
+  ws_heartbeat_seconds: 15.0
+  ws_connect_timeout_total: 30
+  ws_connect_timeout_connect: 10
+  client_max_size_bytes: 4194304
+  shutdown_timeout: 10.0
+  keepalive_timeout: 75.0
+
+compression:
+  min_size_bytes: 256
+  level: 6
+  static_immutable_max_age: 31536000
+  static_default_max_age: 3600
+
+logging:
+  verbose_result_truncate: 500

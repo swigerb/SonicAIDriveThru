@@ -231,65 +231,63 @@ class TestRebrandVerification(unittest.TestCase):
         )
 
     def test_backend_system_prompt_mentions_sonic(self):
-        """The backend system prompt in app.py must reference 'Sonic'."""
-        app_py = BACKEND_DIR / "app.py"
-        self.assertTrue(app_py.exists(), "app/backend/app.py not found")
-        content = app_py.read_text(encoding="utf-8", errors="replace")
-
-        # Extract the system_message assignment block
-        match = re.search(
-            r"system_message\s*=\s*\((.*?)\)",
-            content,
-            re.DOTALL,
-        )
-        self.assertIsNotNone(match, "Could not locate system_message in app.py")
-        prompt_text = match.group(1)
+        """The system prompt must reference 'Sonic'."""
+        # System prompt externalized to YAML — read from the source file
+        prompt_yaml = BACKEND_DIR / "prompts" / "sonic" / "system_prompt.yaml"
+        if prompt_yaml.exists():
+            prompt_text = prompt_yaml.read_text(encoding="utf-8", errors="replace")
+        else:
+            # Fallback: check app.py for inline system_message
+            app_py = BACKEND_DIR / "app.py"
+            self.assertTrue(app_py.exists(), "app/backend/app.py not found")
+            content = app_py.read_text(encoding="utf-8", errors="replace")
+            match = re.search(r"system_message\s*=\s*\((.*?)\)", content, re.DOTALL)
+            self.assertIsNotNone(match, "Could not locate system_message in app.py or prompts/sonic/system_prompt.yaml")
+            prompt_text = match.group(1)
 
         self.assertTrue(
             "sonic" in prompt_text.lower(),
-            "system_message in app.py does not mention 'Sonic'",
+            "system prompt does not mention 'Sonic'",
         )
 
     def test_backend_system_prompt_no_dunkin(self):
-        """The backend system prompt in app.py must NOT reference 'Dunkin'."""
-        app_py = BACKEND_DIR / "app.py"
-        self.assertTrue(app_py.exists(), "app/backend/app.py not found")
-        content = app_py.read_text(encoding="utf-8", errors="replace")
-
-        match = re.search(
-            r"system_message\s*=\s*\((.*?)\)",
-            content,
-            re.DOTALL,
-        )
-        self.assertIsNotNone(match, "Could not locate system_message in app.py")
-        prompt_text = match.group(1)
+        """The backend system prompt must NOT reference 'Dunkin'."""
+        prompt_yaml = BACKEND_DIR / "prompts" / "sonic" / "system_prompt.yaml"
+        if prompt_yaml.exists():
+            prompt_text = prompt_yaml.read_text(encoding="utf-8", errors="replace")
+        else:
+            app_py = BACKEND_DIR / "app.py"
+            self.assertTrue(app_py.exists(), "app/backend/app.py not found")
+            content = app_py.read_text(encoding="utf-8", errors="replace")
+            match = re.search(r"system_message\s*=\s*\((.*?)\)", content, re.DOTALL)
+            self.assertIsNotNone(match, "Could not locate system_message in app.py or prompts/sonic/system_prompt.yaml")
+            prompt_text = match.group(1)
 
         hits = []
         for i, line in enumerate(prompt_text.splitlines(), start=1):
             if re.search(r"\bdunkin\b", line, re.IGNORECASE):
-                hits.append(f"  system_message line {i}: {line.strip()}")
+                hits.append(f"  system prompt line {i}: {line.strip()}")
 
         self.assertEqual(
             hits, [],
-            f"\nsystem_message in app.py still references Dunkin:\n" + "\n".join(hits),
+            f"\nsystem prompt still references Dunkin:\n" + "\n".join(hits),
         )
 
     def test_backend_system_prompt_uses_carhop_not_crew_member(self):
         """The system prompt should say 'carhop', not 'crew member'."""
-        app_py = BACKEND_DIR / "app.py"
-        content = app_py.read_text(encoding="utf-8", errors="replace")
-
-        match = re.search(
-            r"system_message\s*=\s*\((.*?)\)",
-            content,
-            re.DOTALL,
-        )
-        self.assertIsNotNone(match, "Could not locate system_message in app.py")
-        prompt_text = match.group(1).lower()
+        prompt_yaml = BACKEND_DIR / "prompts" / "sonic" / "system_prompt.yaml"
+        if prompt_yaml.exists():
+            prompt_text = prompt_yaml.read_text(encoding="utf-8", errors="replace").lower()
+        else:
+            app_py = BACKEND_DIR / "app.py"
+            content = app_py.read_text(encoding="utf-8", errors="replace")
+            match = re.search(r"system_message\s*=\s*\((.*?)\)", content, re.DOTALL)
+            self.assertIsNotNone(match, "Could not locate system_message in app.py or prompts/sonic/system_prompt.yaml")
+            prompt_text = match.group(1).lower()
 
         self.assertNotIn(
             "crew member", prompt_text,
-            "system_message still uses 'crew member' — should be 'carhop'",
+            "system prompt still uses 'crew member' — should be 'carhop'",
         )
 
     # ── Scan finds files sanity check ────────────────────────────────

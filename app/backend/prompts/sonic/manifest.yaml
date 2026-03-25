@@ -1,0 +1,14 @@
+version: "1.0.0"
+brand: "sonic"
+display_name: "Sonic Drive-In"
+files:
+  system_prompt: "system_prompt.yaml"
+  greeting: "greeting.yaml"
+  tool_schemas: "tool_schemas.yaml"
+  error_messages: "error_messages.yaml"
+  hints: "hints.yaml"
+model_config:
+  name: "gpt-4o-realtime-preview"
+  voice: "coral"
+  temperature: 0.6
+  max_tokens: 4096

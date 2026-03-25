@@ -1,23 +1,45 @@
 import logging
+import os
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
+from config_loader import get_config
 from models import OrderItem, OrderSummary
+from menu_utils import infer_category, normalize_size
 
 __all__ = ["OrderState", "SessionIdentifiers", "order_state_singleton", "is_happy_hour"]
 
 logger = logging.getLogger("order_state")
 
+_config = get_config()
+_biz_cfg = _config.get("business_rules", {})
+
+# Configurable store timezone — defaults to Sonic HQ (Oklahoma City).
+# Override via STORE_TIMEZONE env var for stores in other time zones.
+_STORE_TZ = ZoneInfo(os.environ.get("STORE_TIMEZONE", "America/Chicago"))
+
 
 def is_happy_hour() -> bool:
-    """Check if the current time is between 2:00 PM and 4:00 PM local time."""
-    now = datetime.now()
-    return 14 <= now.hour < 16
+    """Check if the current time is within the happy hour window (store-local time)."""
+    now = datetime.now(_STORE_TZ)
+    start = _biz_cfg.get("happy_hour_start", 14)
+    end = _biz_cfg.get("happy_hour_end", 16)
+    return start <= now.hour < end
 
 
 def _infer_combo_component(item_name: str) -> str:
-    """Lightweight category check for combo component validation (sides vs drinks)."""
+    """Lightweight category check for combo component validation (sides vs drinks).
+
+    Delegates to the shared ``infer_category`` in menu_utils to avoid drift.
+    """
+    cat = infer_category(item_name)
+    if cat in ("sides",):
+        return "sides"
+    if cat in ("drinks", "slushes", "shakes", "shakes & ice cream", "slushes & drinks"):
+        return "drinks"
+    # Fallback: keyword scan for items that don't hit the JSON map
     n = item_name.lower()
     if "tot" in n or "fries" in n or "onion rings" in n:
         return "sides"
@@ -50,9 +72,9 @@ class OrderState:
         for item in order_items:
             item_total = item.price * item.quantity
             if happy_hour and _infer_combo_component(item.item) == "drinks":
-                item_total *= 0.5  # Happy Hour: 50% off drinks and slushes
+                item_total *= _biz_cfg.get("happy_hour_discount", 0.5)
             total += item_total
-        tax = total * 0.08  # 8% tax
+        tax = total * _biz_cfg.get("tax_rate", 0.08)
         finalTotal = total + tax
         summary = OrderSummary(items=order_items, total=total, tax=tax, finalTotal=finalTotal)
         session["order_summary"] = summary
@@ -88,15 +110,8 @@ class OrderState:
         session = self.sessions[session_id]
         order_state = session["order_state"]
 
-        normalized_size = (size or "").strip().lower()
-        if normalized_size in {"", "standard", "n/a", "na", "none", "n.a."}:
-            formatted_size = ""
-        elif normalized_size in {"rt44", "rt 44", "route 44", "44", "44oz"}:
-            formatted_size = "Route 44 "
-        elif normalized_size in {"mini", "small", "medium", "large"}:
-            formatted_size = f"{normalized_size.capitalize()} "
-        else:
-            formatted_size = ""
+        resolved = normalize_size(size)
+        formatted_size = f"{resolved} " if resolved else ""
 
         display = f"{formatted_size}{item_name}".strip()
 

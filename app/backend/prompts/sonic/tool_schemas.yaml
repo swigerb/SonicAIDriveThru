@@ -1,0 +1,67 @@
+version: "1.0.0"
+tools:
+  - name: "search"
+    type: "function"
+    description: >-
+      Search the Sonic Drive-In menu for items, prices, sizes, and availability.
+      The menu data is in English — translate to and from English if needed.
+      Results are formatted as a source name first in square brackets, followed
+      by the text content, and a line with '-----' at the end of each result.
+    parameters:
+      type: "object"
+      properties:
+        query:
+          type: "string"
+          description: "Search query for Sonic menu items (e.g., 'cheeseburger', 'cherry limeade sizes', 'combo meals')"
+      required:
+        - "query"
+      additionalProperties: false
+
+  - name: "update_order"
+    type: "function"
+    description: "Update the current Sonic Drive-In order by adding or removing menu items from the Carhop Ticket."
+    parameters:
+      type: "object"
+      properties:
+        action:
+          type: "string"
+          description: "Action to perform: 'add' or 'remove'."
+          enum:
+            - "add"
+            - "remove"
+        item_name:
+          type: "string"
+          description: "Name of the Sonic menu item to update, e.g., 'Cherry Limeade'."
+        size:
+          type: "string"
+          description: "Size of the item to update, e.g., 'Large'."
+        quantity:
+          type: "integer"
+          description: "Quantity of the item to update. Represents the number of items."
+        price:
+          type: "number"
+          description: "Price of a single item to add. Required only for 'add' action. Note: This is the price per individual item, not the total price for the quantity."
+      required:
+        - "action"
+        - "item_name"
+        - "size"
+        - "quantity"
+      additionalProperties: false
+
+  - name: "get_order"
+    type: "function"
+    description: "Retrieve the current Sonic Drive-In order summary from the Carhop Ticket, including all items and the total."
+    parameters:
+      type: "object"
+      properties: {}
+      required: []
+      additionalProperties: false
+
+  - name: "reset_order"
+    type: "function"
+    description: "Clear all items from the current Sonic Drive-In order and start a fresh Carhop Ticket."
+    parameters:
+      type: "object"
+      properties: {}
+      required: []
+      additionalProperties: false
