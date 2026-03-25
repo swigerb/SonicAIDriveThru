@@ -1,4 +1,7 @@
 import asyncio
+import base64
+import hashlib
+import hmac
 import json
 import logging
 import re
@@ -43,6 +46,7 @@ logger = logging.getLogger("sonic-drive-in")
 # Load centralized config
 _config = get_config()
 _conn_cfg = _config.get("connection", {})
+_security_cfg = _config.get("security", {})
 
 __all__ = ["RTMiddleTier", "RTToolCall", "Tool", "ToolResult", "ToolResultDirection"]
 
@@ -52,6 +56,30 @@ _WS_CONNECT_TIMEOUT = aiohttp.ClientTimeout(
     total=_conn_cfg.get("ws_connect_timeout_total", 30),
     connect=_conn_cfg.get("ws_connect_timeout_connect", 10),
 )
+
+# ── HMAC Session Token Utilities ──
+
+def create_hmac_token(secret: bytes, expiry_seconds: int = 900) -> str:
+    """Create an HMAC-signed session token with expiry."""
+    payload = {"exp": int(time.time()) + expiry_seconds}
+    payload_b64 = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode()
+    sig = hmac.new(secret, payload_b64.encode(), hashlib.sha256).hexdigest()
+    return f"{payload_b64}.{sig}"
+
+
+def validate_hmac_token(token: str, secret: bytes) -> bool:
+    """Validate an HMAC session token (signature + expiry)."""
+    if not token or "." not in token:
+        return False
+    try:
+        payload_b64, sig = token.rsplit(".", 1)
+        expected_sig = hmac.new(secret, payload_b64.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(sig, expected_sig):
+            return False
+        payload = json.loads(base64.urlsafe_b64decode(payload_b64))
+        return payload.get("exp", 0) > time.time()
+    except Exception:
+        return False
 
 
 class ToolResultDirection(Enum):
@@ -117,8 +145,11 @@ class RTMiddleTier:
         self.voice_choice = voice_choice
         self.tools = {}
         self._token_provider = None
+        self._cached_token: str | None = None
+        self._token_refresh_task: asyncio.Task | None = None
         self._prompt_loader = prompt_loader
         self._sessions = SessionManager(prompt_loader=prompt_loader)
+        self.app_secret: bytes = b""  # set by app.py at startup
         if voice_choice is not None:
             logger.info("Realtime voice choice set to %s", voice_choice)
         if isinstance(credentials, AzureKeyCredential):
@@ -126,6 +157,38 @@ class RTMiddleTier:
         else:
             self._token_provider = get_bearer_token_provider(credentials, "https://cognitiveservices.azure.com/.default")
             self._token_provider() # Warm up during startup so we have a token cached when the first request arrives
+
+    def _get_auth_token(self) -> str:
+        """Return the cached token, falling back to a synchronous call if needed."""
+        if self._cached_token is not None:
+            return self._cached_token
+        if self._token_provider is not None:
+            return self._token_provider()
+        return ""
+
+    async def _refresh_token_loop(self) -> None:
+        """Background task: proactively refresh the Azure AD token every 5 minutes."""
+        while True:
+            try:
+                loop = asyncio.get_event_loop()
+                token = await loop.run_in_executor(None, self._token_provider)
+                self._cached_token = token
+                logger.debug("Azure AD token refreshed successfully")
+            except Exception as e:
+                logger.warning("Token refresh failed: %s", e)
+            await asyncio.sleep(300)  # 5 minutes
+
+    def start_background_tasks(self) -> None:
+        """Start background tasks (token refresh, idle checker). Called once at app startup."""
+        if self._token_provider is not None:
+            self._token_refresh_task = asyncio.ensure_future(self._refresh_token_loop())
+        self._sessions.start_idle_checker()
+
+    def stop_background_tasks(self) -> None:
+        """Cancel background tasks. Called on app shutdown."""
+        if self._token_refresh_task and not self._token_refresh_task.done():
+            self._token_refresh_task.cancel()
+        self._sessions.stop_idle_checker()
 
     async def _process_message_to_client(self, msg: str, client_ws: web.WebSocketResponse, server_ws: web.WebSocketResponse, tools_pending: dict[str, RTToolCall], verbose: bool = False) -> str | None:
         data = msg.data
@@ -397,7 +460,7 @@ class RTMiddleTier:
             if self.key is not None:
                 headers = { "api-key": self.key }
             else:
-                headers = { "Authorization": f"Bearer {self._token_provider()}" } # NOTE: no async version of token provider, maybe refresh token on a timer?
+                headers = { "Authorization": f"Bearer {self._get_auth_token()}" }
             async with session.ws_connect(
                 "/openai/realtime",
                 headers=headers,
@@ -435,6 +498,9 @@ class RTMiddleTier:
                     nonlocal verbose, audio_frame_count, session_file_handler
                     async for msg in ws:
                         if msg.type == aiohttp.WSMsgType.TEXT:
+                            # Track activity for idle timeout
+                            if session_id:
+                                self._sessions.touch_activity(session_id)
                             # Intercept extension messages — don't forward to OpenAI
                             if _MARKER_VERBOSE_LOGGING in msg.data:
                                 try:
@@ -570,6 +636,30 @@ class RTMiddleTier:
                     self._sessions.cleanup_session(ws, session_id)
 
     async def _websocket_handler(self, request: web.Request):
+        # ── Origin validation (Task 3) ──
+        origin = request.headers.get("Origin", "")
+        allowed_origins = _security_cfg.get("allowed_origins", [])
+        host = request.headers.get("Host", "")
+        if origin and not origin.endswith(host) and origin not in allowed_origins:
+            logger.warning("Rejected WebSocket from disallowed origin: %s", origin)
+            return web.Response(status=403, text="Origin not allowed")
+
+        # ── HMAC session token validation (Task 4) ──
+        if _security_cfg.get("require_session_token", False):
+            token = request.query.get("token", "")
+            if not validate_hmac_token(token, self.app_secret):
+                logger.warning("Rejected WebSocket with invalid/expired session token")
+                return web.Response(status=401, text="Invalid or expired token")
+
+        # ── Concurrency limit (Task 2) ──
+        if not self._sessions.can_accept_session():
+            logger.warning("Rejected WebSocket — session limit reached (%d)", self._sessions.active_session_count)
+            ws = web.WebSocketResponse()
+            await ws.prepare(request)
+            await ws.send_json({"type": "error", "message": "Server is busy — please try again in a moment."})
+            await ws.close()
+            return ws
+
         ws = web.WebSocketResponse(
             heartbeat=_WS_HEARTBEAT_SEC,
             autoping=True,

@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 
 from config_loader import get_config
 from prompt_loader import PromptLoader
-from rtmt import RTMiddleTier
+from rtmt import RTMiddleTier, create_hmac_token
 from tools import attach_tools_rtmt
 
 # Production: INFO; override with LOG_LEVEL env var for debugging
@@ -208,6 +208,9 @@ async def create_app() -> web.Application:
         voice_choice=os.environ.get("AZURE_OPENAI_REALTIME_VOICE_CHOICE") or model_cfg.get("default_voice", "coral"),
         prompt_loader=prompt_loader,
     )
+    # Generate a random secret for HMAC session tokens
+    app_secret = os.urandom(32)
+    rtmt.app_secret = app_secret
     if api_version := os.environ.get("AZURE_OPENAI_REALTIME_API_VERSION"):
         rtmt.api_version = api_version
     else:
@@ -233,10 +236,16 @@ async def create_app() -> web.Application:
 
     rtmt.attach_to_app(app, "/realtime")
 
+    # ── HMAC Session Token Endpoint (Task 4) ──
+    async def get_session_token(_request: web.Request) -> web.Response:
+        token = create_hmac_token(app_secret, expiry_seconds=900)
+        return web.json_response({"token": token})
+
     current_directory = Path(__file__).parent
     app.add_routes([
         web.get('/', _index_handler),
         web.get('/health', _health_handler),
+        web.get('/api/auth/session', get_session_token),
     ])
     app.router.add_static(
         '/',
@@ -245,9 +254,15 @@ async def create_app() -> web.Application:
         append_version=True,
     )
 
+    async def _on_startup(app: web.Application):
+        rtmt.start_background_tasks()
+        logger.info("Background tasks started (token refresh, idle checker)")
+
     async def _on_shutdown(app: web.Application):
         logger.info("Graceful shutdown initiated — cleaning up active sessions")
+        rtmt.stop_background_tasks()
 
+    app.on_startup.append(_on_startup)
     app.on_shutdown.append(_on_shutdown)
 
     return app

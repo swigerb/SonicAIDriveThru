@@ -54,3 +54,9 @@ context:
   max_tokens: 128000
   warning_threshold_pct: 80
   critical_threshold_pct: 95
+
+security:
+  max_concurrent_sessions: 10
+  idle_timeout_seconds: 300
+  allowed_origins: []  # empty = same-origin only; add URLs for cross-origin
+  require_session_token: false  # set true to require HMAC session tokens

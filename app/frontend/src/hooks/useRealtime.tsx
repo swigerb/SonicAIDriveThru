@@ -1,5 +1,5 @@
 import useWebSocket from "react-use-websocket";
-import { useRef, useCallback, useEffect } from "react";
+import { useRef, useCallback, useEffect, useState } from "react";
 
 import {
     InputAudioBufferAppendCommand,
@@ -44,6 +44,18 @@ const MAX_RETRIES = 10;
 const BASE_DELAY_MS = 1000;
 const MAX_DELAY_MS = 30000;
 
+async function fetchSessionToken(): Promise<string | null> {
+    try {
+        const resp = await fetch("/api/auth/session");
+        if (!resp.ok) return null;
+        const data = await resp.json();
+        return data.token ?? null;
+    } catch {
+        // Endpoint doesn't exist or server unavailable — graceful fallback
+        return null;
+    }
+}
+
 export default function useRealTime({
     useDirectAoaiApi,
     aoaiEndpointOverride,
@@ -65,9 +77,22 @@ export default function useRealTime({
     onReceivedRoundTripToken,
     onReceivedError
 }: Parameters) {
-    const wsEndpoint = useDirectAoaiApi
-        ? `${aoaiEndpointOverride}/openai/realtime?api-key=${aoaiApiKeyOverride}&deployment=${aoaiModelOverride}&api-version=2024-10-01-preview`
-        : `/realtime`;
+    const [sessionToken, setSessionToken] = useState<string | null>(null);
+
+    // Fetch a session token on mount (graceful — null means no token required)
+    useEffect(() => {
+        fetchSessionToken().then(setSessionToken);
+    }, []);
+
+    const buildWsEndpoint = () => {
+        if (useDirectAoaiApi) {
+            return `${aoaiEndpointOverride}/openai/realtime?api-key=${aoaiApiKeyOverride}&deployment=${aoaiModelOverride}&api-version=2024-10-01-preview`;
+        }
+        const base = `/realtime`;
+        return sessionToken ? `${base}?token=${encodeURIComponent(sessionToken)}` : base;
+    };
+
+    const wsEndpoint = buildWsEndpoint();
 
     const retryCountRef = useRef(0);
     // Ref to break circular dependency: callbacks need sendJsonMessage,
@@ -139,7 +164,13 @@ export default function useRealTime({
             retryCountRef.current = 0;
             onWebSocketOpen?.();
         },
-        onClose: () => onWebSocketClose?.(),
+        onClose: (event) => {
+            // 401 close → refresh token and retry
+            if (event.code === 4001 || event.reason?.includes("expired")) {
+                fetchSessionToken().then(setSessionToken);
+            }
+            onWebSocketClose?.();
+        },
         onError: event => onWebSocketError?.(event),
         onMessage: onMessageReceived,
         shouldReconnect: () => true,
