@@ -191,6 +191,44 @@
 - **Implementation:** Addressed by Decisions #26 (TO_BOTH routing for conversation flow) and #27 (suggestive selling + technical guardrails).
 - **Impact:** Enables demo to showcase both conversational quality (no dead silence) and revenue impact (ACV-driving prompts).
 
+### Phase 4 — Demo-Safe Security Hardening (2026-03-25)
+
+#### 29. Background Token Refresh (Summer)
+- **Decision:** Azure AD token refreshed proactively every 5 minutes via `asyncio.run_in_executor()` (non-blocking).
+- **Rationale:** `get_bearer_token_provider()` is synchronous and blocks event loop (~200-500ms on refresh). Background loop eliminates per-connection blocking.
+- **Trade-off:** Token could be up to 5 minutes stale. Azure AD tokens valid for 60 minutes, so 5-min refresh well within safe margins.
+- **Config:** `security.token_refresh_interval_seconds` in config.yaml (default: 300)
+
+#### 30. Session & Connection Limits (Summer + Birdperson)
+- **Decision:** Max 10 concurrent WebSocket sessions, 300s idle timeout. Over-limit connections receive friendly JSON error. Idle checker runs every 60s.
+- **Rationale:** Demo uses 1-3 sessions; 10 is generous for multi-device testing while preventing runaway connections. 5-min idle timeout acceptable for drive-thru context.
+- **Files:** `session_manager.py` (SessionLimiter + idle timeout), `rtmt.py` (enforcement), `config.yaml` (security section)
+- **Config:** `security.max_concurrent_sessions`, `security.idle_timeout_seconds` (defaults: 10, 300)
+- **Test Coverage (Birdperson):** 31 tests covering accept/reject, close-and-reopen, idle cleanup, active survival
+
+#### 31. Origin Validation (Summer + Birdperson)
+- **Decision:** Reject cross-origin WebSocket connections unless origin matches Host header or is in `allowed_origins` list.
+- **Rationale:** Prevents CSRF-style attacks via WebSocket. Same-origin always works (frontend served by same app).
+- **Trade-off:** Developers testing from different ports must add origin to config.
+- **Files:** `rtmt.py` (_websocket_handler origin check), `config.yaml` (allowed_origins list)
+- **Config:** `security.allowed_origins` list (default: empty)
+- **Test Coverage (Birdperson):** Origin validation, same-origin, missing header, foreign origin, allowed_origins list, trailing slash normalization
+
+#### 32. HMAC Session Tokens (Summer + Birdperson)
+- **Decision:** `GET /api/auth/session` returns HMAC-signed tokens (15-min TTL). Validation enforced only when `require_session_token: true`.
+- **Rationale:** Prevents direct WebSocket abuse without breaking existing demo flow. Can be enabled for production without code changes.
+- **Trade-off:** Tokens not encrypted (base64 payload only signed). Sufficient for session binding; not for sensitive data.
+- **Files:** `app.py` (/api/auth/session endpoint), `rtmt.py` (token validation), `config.yaml` (require_session_token flag)
+- **Config:** `security.require_session_token` (default: false), token TTL (15 min, configurable)
+- **Test Coverage (Birdperson):** Valid/expired/malformed/tampering/signature/payload/secret/boundary cases, flag enforcement
+
+#### 33. Frontend Graceful Fallback (Summer)
+- **Decision:** Frontend fetches token from `/api/auth/session` on mount. If endpoint fails or returns non-200, connects without token.
+- **Rationale:** Backward compatibility — old backends without endpoint still work. No user-visible change.
+- **Files:** `useRealtime.tsx` (token fetch + URL wiring + 401 refresh)
+- **Fallback Behavior:** null token → no `?token=...` param appended; legacy backends work unchanged
+- **Impact:** Zero demo behavior change until `require_session_token: true` is set
+
 ## Governance
 
 - All meaningful changes require team consensus
