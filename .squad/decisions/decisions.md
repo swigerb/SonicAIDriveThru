@@ -1091,3 +1091,83 @@ Initial system prompt design leveraging Azure OpenAI GPT-4o Realtime for voice-b
 
 ### Repository Initialization (Squanchy, 2026-02-25)
 SonicAIDriveThru repository created with Azure Container Apps, Bicep IaC, React frontend (Vite, Tailwind, shadcn/ui), Python backend (aiohttp, WebSockets, Azure OpenAI Realtime, Azure AI Search).
+
+## Code Organization: rtmt.py Refactoring (2026-03-25)
+
+**Author:** Summer (Backend Dev)  
+**Status:** Implemented — Commit 1057cac
+
+### Decision
+
+Split monolithic `rtmt.py` (766 lines) into three focused modules for clarity and maintainability:
+
+1. **`session_manager.py`** (154 lines) — Session lifecycle, greeting state, context window monitoring
+2. **`audio_pipeline.py`** (199 lines) — Echo suppression state machine, verbose logging, audio constants
+3. **`rtmt.py`** (586 lines) — Thin orchestrator: RTMiddleTier, WebSocket routing, message processing
+
+### Key Design Decisions
+
+- **EchoSuppressor class**: Encapsulates `ai_speaking`, `cooldown_end`, `greeting_in_progress` into clean methods. Eliminates nonlocal variable sharing between nested closures.
+- **SessionManager class**: Owns `_session_map`, `_sent_greeting`, `_context_monitors`. Single cleanup method prevents state leaks.
+- **Public API preserved**: `from rtmt import RTMiddleTier, ToolResult, ToolResultDirection, Tool, RTToolCall` unchanged. No downstream import changes.
+- **Linear imports**: session_manager → order_state, config_loader; audio_pipeline → config_loader; rtmt → both new modules. No circular dependencies.
+
+### Context Window Monitoring (New Feature)
+
+- `ContextMonitor` class tracks estimated token usage per session (~4 chars/token heuristic)
+- Logs WARNING at 80%, CRITICAL at 95% of max_tokens (default 128K from config.yaml)
+- Monitors: system message, tool schemas, tool args/results, AI responses, user transcriptions
+- No truncation implemented yet — monitoring only for now
+
+### Impact
+
+- All 128 backend tests pass
+- No behavioral changes — purely structural refactoring + monitoring addition
+- Easier to navigate, test, and modify individual concerns independently
+
+## Startup Validation & Health Check Hardening (2026-03-25)
+
+**Author:** Squanchy (DevOps)  
+**Status:** Implemented
+
+### Decision
+
+Startup validation now runs before the server accepts connections. The app validates:
+
+1. All 4 required env vars (`AZURE_OPENAI_EASTUS2_ENDPOINT`, `AZURE_OPENAI_REALTIME_DEPLOYMENT`, `AZURE_SEARCH_ENDPOINT`, `AZURE_SEARCH_INDEX`)
+2. Prompt YAML files load via PromptLoader
+3. config.yaml is loaded (module-level via `get_config()`)
+4. Optional Azure service connectivity ping (non-blocking, warns only)
+
+On failure: `logger.critical()` + `sys.exit(1)` — the server never starts in a broken state.
+
+### Health Endpoint Contract
+
+`GET /health` returns:
+```json
+{
+  "status": "healthy",
+  "version": "1.0.0",
+  "checks": {
+    "prompts_loaded": true,
+    "config_loaded": true,
+    "env_vars": true
+  }
+}
+```
+
+- HTTP 200 when all checks pass, HTTP 503 when any check fails
+- No external service calls — fast enough for Azure Container Apps probes
+- Already consumed by startup/liveness/readiness probes in Bicep
+
+### Rationale
+
+- Fail-fast prevents containers from entering traffic rotation while broken
+- Structured health response enables probe-level diagnostics in Azure portal
+- Non-blocking connectivity check catches network issues early without blocking startup
+
+### Impact
+
+- `sys.exit(1)` replaces `RuntimeError` for missing env vars — team tests should use `SystemExit` assertion
+- `_startup_checks` module-level dict is the source of truth for health state
+- 3 new tests passing, all existing tests unaffected
