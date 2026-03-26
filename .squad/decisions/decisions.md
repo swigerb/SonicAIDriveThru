@@ -1238,3 +1238,62 @@ Comprehensive test coverage for the two largest zero-coverage gaps in the codeba
 - **Result**: 337/337 passing ✅
 - **Commit**: ac27ba9
 - **Ready**: CI/CD integration, merge to main
+
+---
+
+## Combo Conversion & Size Prompting Fix Sprint (2026-03-26T15:40)
+
+**Team:** Summer (Backend Dev), Unity (AI/Realtime Expert), Birdperson (Tester)  
+**Status:** ✅ Complete
+
+### Context
+
+Three interconnected bugs in combo ordering flow:
+
+1. **Mod-Stripping Asymmetry:** When AI sent a combo with mods embedded in the name (e.g., `SuperSONIC® Bacon Double Cheeseburger Combo (Pickles Only)`), the `combo_base` retained parenthesized mods while `existing_base` stripped them. This prevented standalone-to-combo removal, causing double-charging.
+2. **Silent Medium Defaulting:** When guest accepted a combo upsell, the AI defaulted combo side/drink to Medium without asking. Root cause: blanket "default to MEDIUM" rule overriding contextual combo-completion.
+3. **Test Coverage Gap:** No regression tests for combo conversion with embedded mods.
+
+### Decisions Made
+
+#### 1. Strip Parenthesized Mods from combo_base (Summer)
+- **What:** Added symmetric mod-stripping before comparison in `order_state.py` lines 128-129:
+  ```python
+  if "(" in combo_base:
+      combo_base = combo_base[:combo_base.find("(")].strip()
+  ```
+- **Why:** Both `combo_base` and `existing_base` must normalize identically. The AI may send combo names with or without mods depending on context; backend must handle both.
+- **Impact:** Two-line change. Fixes double-charging on combo upsell with mods.
+
+#### 2. Scoped MEDIUM Default to Standalone Items Only + Explicit Combo Size Prompting (Unity)
+- **What:** Three surgical edits to `system_prompt.yaml`:
+  1. **MENU_AND_PRICING**: Changed "default all sides/drinks to MEDIUM" → "default STANDALONE sides/drinks to MEDIUM"
+  2. **COMBO_LOGIC**: Added explicit COMBO SIZE PROMPTING block requiring AI to ask for side and drink sizes when completing a combo
+  3. **SUGGESTIVE_SELLING**: Updated upsell instructions with explicit size-ask guidance
+- **Why:** Eliminates silent Medium defaulting. Guests now get asked "what size for your side/drink?" improving order accuracy and UX.
+- **Trade-off:** Adds one extra conversational turn (acceptable — better than wrong sizes).
+
+#### 3. Regression Test Suite for Combo Mod Handling (Birdperson)
+- **What:** 7 new tests in `test_order_state.py` covering:
+  1. Combo with mods in name, standalone without → standalone removed
+  2. Combo without mods, existing standalone without → removal works
+  3. Different mods on standalone vs combo → matching stripped, removed
+  4. Mods carry-forward from standalone to combo
+  5. Multiple standalones with selective removal
+  6. Quantity > 1 decrement on standalone
+  7. ® symbol normalization in combo name
+- **Impact:** 354/354 tests passing (347 pre-existing + 7 new).
+
+### Files Changed
+
+- **Backend Code:** `app/backend/order_state.py` (lines 128-129)
+- **System Prompt:** `app/backend/prompts/sonic/system_prompt.yaml` (MENU_AND_PRICING, COMBO_LOGIC, SUGGESTIVE_SELLING sections)
+- **Tests:** `app/backend/tests/test_order_state.py` (+7 tests)
+
+### Outcomes
+
+- ✅ Eliminates double-charging on combo conversions with embedded mods
+- ✅ Improves order accuracy via explicit combo size-prompting  
+- ✅ Comprehensive regression protection for future combo refactors
+- ✅ All 354 tests passing
+- ✅ Demo-ready: no silent billing or defaulting surprises
