@@ -124,6 +124,9 @@ class OrderState:
             # ── Combo conversion: auto-remove matching standalone entree ──
             if is_combo:
                 combo_base = item_name.lower().replace(" combo", "").replace("®", "").strip()
+                # Strip parenthesized mods so "burger (Pickles Only)" matches "burger"
+                if "(" in combo_base:
+                    combo_base = combo_base[:combo_base.find("(")].strip()
                 for i, existing in enumerate(order_state):
                     if "combo" in existing.item.lower():
                         continue  # skip other combos

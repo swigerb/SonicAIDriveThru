@@ -489,6 +489,148 @@ class OrderStateTests(unittest.TestCase):
         summary = order_state_singleton.get_order_summary(session_id)
         self.assertAlmostEqual(summary.total, 8.49 + 3.29, places=2)
 
+    # ── Combo conversion with mods regression tests (mod-in-combo-name bug) ──
+
+    def test_combo_with_mods_in_name_removes_standalone(self):
+        """BUG REGRESSION: AI sends combo with mods already in name
+        e.g. 'SuperSONIC® Bacon Double Cheeseburger Combo (Pickles Only)'.
+        Must still match and remove the standalone 'SuperSONIC® Bacon Double Cheeseburger (Pickles Only)'."""
+        session_id = order_state_singleton.create_session()
+        order_state_singleton.handle_order_update(
+            session_id, "add",
+            "SuperSONIC® Bacon Double Cheeseburger (Pickles Only)", "standard", 1, 7.99
+        )
+        result_info = order_state_singleton.handle_order_update(
+            session_id, "add",
+            "SuperSONIC® Bacon Double Cheeseburger Combo (Pickles Only)", "standard", 1, 10.99
+        )
+        items = order_state_singleton.get_order_items(session_id)
+        item_names = [i.item for i in items]
+        # Standalone must be removed — not duplicated on the ticket
+        self.assertNotIn("SuperSONIC® Bacon Double Cheeseburger (Pickles Only)", item_names)
+        self.assertEqual(len(items), 1, "Only the combo should remain")
+        self.assertIn("Combo", items[0].item)
+        self.assertIn("combo_converted_from", result_info)
+
+    def test_combo_conversion_without_mods_regression(self):
+        """Regression: basic combo conversion (no mods) still works after the fix."""
+        session_id = order_state_singleton.create_session()
+        order_state_singleton.handle_order_update(
+            session_id, "add", "Fish Sandwich", "standard", 1, 5.49
+        )
+        result_info = order_state_singleton.handle_order_update(
+            session_id, "add", "Fish Sandwich Combo", "standard", 1, 8.49
+        )
+        items = order_state_singleton.get_order_items(session_id)
+        item_names = [i.item for i in items]
+        self.assertNotIn("Fish Sandwich", item_names)
+        self.assertEqual(len(items), 1)
+        self.assertIn("Fish Sandwich Combo", item_names)
+        self.assertIn("combo_converted_from", result_info)
+        summary = order_state_singleton.get_order_summary(session_id)
+        self.assertAlmostEqual(summary.total, 8.49, places=2)
+
+    def test_combo_conversion_with_different_mods_still_matches(self):
+        """Standalone has mods A, combo arrives with mods B — base item matches,
+        standalone still removed (mods are irrelevant for base matching)."""
+        session_id = order_state_singleton.create_session()
+        order_state_singleton.handle_order_update(
+            session_id, "add",
+            "SuperSONIC® Bacon Double Cheeseburger (No Lettuce)", "standard", 1, 7.99
+        )
+        result_info = order_state_singleton.handle_order_update(
+            session_id, "add",
+            "SuperSONIC® Bacon Double Cheeseburger Combo (Extra Pickles)", "standard", 1, 10.99
+        )
+        items = order_state_singleton.get_order_items(session_id)
+        # Standalone removed because base names match
+        self.assertEqual(len(items), 1)
+        self.assertIn("Combo", items[0].item)
+        self.assertIn("combo_converted_from", result_info)
+
+    def test_combo_conversion_carries_mods_from_standalone(self):
+        """When standalone has '(Pickles Only)' and combo has no mods,
+        the mods must carry forward to the combo display."""
+        session_id = order_state_singleton.create_session()
+        order_state_singleton.handle_order_update(
+            session_id, "add",
+            "SuperSONIC® Bacon Double Cheeseburger (Pickles Only)", "standard", 1, 7.99
+        )
+        order_state_singleton.handle_order_update(
+            session_id, "add",
+            "SuperSONIC® Bacon Double Cheeseburger Combo", "standard", 1, 10.99
+        )
+        items = order_state_singleton.get_order_items(session_id)
+        self.assertEqual(len(items), 1)
+        combo = items[0]
+        self.assertIn("(Pickles Only)", combo.item,
+                       "Mods from standalone must carry to combo item name")
+
+    def test_multiple_standalones_only_matching_one_removed(self):
+        """Two different standalones on order. Converting one to combo
+        removes only the matching standalone, other stays."""
+        session_id = order_state_singleton.create_session()
+        order_state_singleton.handle_order_update(
+            session_id, "add", "Fish Sandwich", "standard", 1, 5.49
+        )
+        order_state_singleton.handle_order_update(
+            session_id, "add",
+            "SuperSONIC® Bacon Double Cheeseburger (No Onions)", "standard", 1, 7.99
+        )
+        # Convert only the bacon cheeseburger to combo
+        order_state_singleton.handle_order_update(
+            session_id, "add",
+            "SuperSONIC® Bacon Double Cheeseburger Combo (No Onions)", "standard", 1, 10.99
+        )
+        items = order_state_singleton.get_order_items(session_id)
+        item_names = [i.item for i in items]
+        # Fish Sandwich must survive
+        self.assertIn("Fish Sandwich", item_names)
+        # Bacon standalone must be gone
+        matching_standalone = [n for n in item_names if "Bacon Double Cheeseburger" in n and "Combo" not in n]
+        self.assertEqual(len(matching_standalone), 0, "Matching standalone should be removed")
+        # Combo must exist
+        combos = [n for n in item_names if "Combo" in n]
+        self.assertEqual(len(combos), 1)
+        self.assertEqual(len(items), 2, "Fish Sandwich + combo")
+
+    def test_combo_conversion_quantity_gt1_decrements(self):
+        """Standalone has quantity 2. Adding combo removes one unit,
+        leaving standalone with quantity 1."""
+        session_id = order_state_singleton.create_session()
+        order_state_singleton.handle_order_update(
+            session_id, "add",
+            "SuperSONIC® Bacon Double Cheeseburger (Pickles Only)", "standard", 2, 7.99
+        )
+        order_state_singleton.handle_order_update(
+            session_id, "add",
+            "SuperSONIC® Bacon Double Cheeseburger Combo (Pickles Only)", "standard", 1, 10.99
+        )
+        items = order_state_singleton.get_order_items(session_id)
+        # Should have both: standalone qty 1 + combo qty 1
+        standalone = [i for i in items if "Combo" not in i.item]
+        combos = [i for i in items if "Combo" in i.item]
+        self.assertEqual(len(standalone), 1, "Standalone should remain with reduced qty")
+        self.assertEqual(standalone[0].quantity, 1, "Standalone qty should decrement from 2 to 1")
+        self.assertEqual(len(combos), 1)
+        self.assertEqual(combos[0].quantity, 1)
+
+    def test_combo_with_registered_trademark_symbol_matches(self):
+        """Ensures ® symbol is stripped during comparison so names match."""
+        session_id = order_state_singleton.create_session()
+        # Standalone without ®
+        order_state_singleton.handle_order_update(
+            session_id, "add", "SuperSONIC Bacon Double Cheeseburger", "standard", 1, 7.99
+        )
+        # Combo with ® — should still match
+        result_info = order_state_singleton.handle_order_update(
+            session_id, "add", "SuperSONIC® Bacon Double Cheeseburger Combo", "standard", 1, 10.99
+        )
+        items = order_state_singleton.get_order_items(session_id)
+        self.assertEqual(len(items), 1)
+        self.assertIn("Combo", items[0].item)
+        self.assertIn("combo_converted_from", result_info)
+
 
 if __name__ == "__main__":
     unittest.main()
