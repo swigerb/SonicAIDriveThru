@@ -37,8 +37,6 @@ Beyond the drive-in experience, this sample demonstrates how Microsoft’s Respo
   - [Ingesting Menu Items into Azure AI Search](#ingesting-menu-items-into-azure-ai-search)
     - [From JSON](#from-json)
       - [Steps (JSON)](#steps-json)
-    - [From PDF](#from-pdf)
-      - [Steps (PDF)](#steps-pdf)
   - [Running the App Locally](#running-the-app-locally)
     - [Option 1: Direct Local Execution (Recommended for Development)](#option-1-direct-local-execution-recommended-for-development)
     - [Option 2: Docker-based Local Execution](#option-2-docker-based-local-execution)
@@ -289,23 +287,6 @@ If you have a JSON file containing the menu items for your drive-in, you can use
 This notebook demonstrates how to configure Azure OpenAI and Azure AI Search services, prepare the JSON data for ingestion, and upload the data to Azure AI Search for hybrid semantic search capabilities.
 
 [Link to JSON Ingestion Notebook](scripts/menu_ingestion_search_json.ipynb)
-
-### From PDF
-
-If you have a PDF file of a drive-in's menu that you would like to use, you can use the provided Jupyter notebook to extract text from the PDF, parse it into structured JSON format, and ingest the data into Azure AI Search.
-
-#### Steps (PDF)
-
-1. Open the `menu_ingestion_search_pdf.ipynb` notebook.
-2. Follow the instructions to extract text from the PDF using OCR.
-3. Parse the extracted text using GPT-4o into structured JSON format.
-4. Configure Azure OpenAI and Azure AI Search services.
-5. Prepare the parsed data for ingestion.
-6. Upload the prepared data to Azure AI Search.
-
-This notebook demonstrates how to extract text from a menu PDF using OCR, parse the extracted text into structured JSON format, configure Azure OpenAI and Azure AI Search services, prepare the parsed data for ingestion, and upload the data to Azure AI Search for hybrid semantic search capabilities.
-
-[Link to PDF Ingestion Notebook](scripts/menu_ingestion_search_pdf.ipynb)
 
 ## Running the App Locally
 
