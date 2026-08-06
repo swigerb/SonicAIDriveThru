@@ -392,6 +392,14 @@ class ResetOrderTests(unittest.TestCase):
 class TaxCalculationTests(unittest.TestCase):
     """Test tax calculation accuracy."""
 
+    def setUp(self):
+        # Pin happy hour OFF so drink prices aren't affected by wall-clock time.
+        self._hh_patcher = patch("order_state.is_happy_hour", return_value=False)
+        self._hh_patcher.start()
+
+    def tearDown(self):
+        self._hh_patcher.stop()
+
     def test_tax_rate_applied_correctly(self):
         sid = _make_session()
         order_state_singleton.handle_order_update(sid, "add", "Tots", "medium", 1, 10.00)
@@ -406,6 +414,18 @@ class TaxCalculationTests(unittest.TestCase):
         summary = order_state_singleton.get_order_summary(sid)
         expected_subtotal = (2 * 2.99) + 2.79
         expected_tax = expected_subtotal * 0.08
+        self.assertTrue(math.isclose(summary.tax, expected_tax, rel_tol=1e-9))
+
+    @patch("order_state.is_happy_hour", return_value=True)
+    def test_tax_on_multiple_items_during_happy_hour(self, _mock_hh):
+        """Tax is computed on the discounted subtotal during happy hour."""
+        sid = _make_session()
+        order_state_singleton.handle_order_update(sid, "add", "Cherry Limeade", "medium", 2, 2.99)
+        order_state_singleton.handle_order_update(sid, "add", "Tots", "medium", 1, 2.79)
+        summary = order_state_singleton.get_order_summary(sid)
+        expected_subtotal = (2 * 2.99 * 0.5) + 2.79
+        expected_tax = expected_subtotal * 0.08
+        self.assertTrue(math.isclose(summary.total, expected_subtotal, rel_tol=1e-9))
         self.assertTrue(math.isclose(summary.tax, expected_tax, rel_tol=1e-9))
 
 

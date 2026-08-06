@@ -3,6 +3,7 @@ import math
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
@@ -14,6 +15,12 @@ from tools import update_order
 class ExtrasRuleTests(unittest.TestCase):
     def setUp(self):
         order_state_singleton.sessions = {}
+        # Pin happy hour OFF so tests are deterministic regardless of wall-clock time.
+        self._hh_patcher = patch("order_state.is_happy_hour", return_value=False)
+        self._hh_patcher.start()
+
+    def tearDown(self):
+        self._hh_patcher.stop()
 
     def _add_item(self, session_id: str, name: str, size: str, qty: int, price: float):
         order_state_singleton.handle_order_update(session_id, "add", name, size, qty, price)
@@ -249,6 +256,73 @@ class ExtrasRuleTests(unittest.TestCase):
         self.assertEqual(result.destination, ToolResultDirection.TO_BOTH)
         summary = order_state_singleton.get_order_summary(session_id)
         self.assertEqual(len(summary.items), 0)
+
+
+class HappyHourPricingTests(unittest.TestCase):
+    """Explicit coverage for happy-hour drink discount business rule."""
+
+    def setUp(self):
+        order_state_singleton.sessions = {}
+
+    def _add_item(self, session_id: str, name: str, size: str, qty: int, price: float):
+        order_state_singleton.handle_order_update(session_id, "add", name, size, qty, price)
+
+    @patch("order_state.is_happy_hour", return_value=False)
+    def test_drink_full_price_outside_happy_hour(self, _mock_hh):
+        """Outside happy hour, drinks are charged at full price."""
+        session_id = order_state_singleton.create_session()
+        self._add_item(session_id, "Cherry Limeade", "medium", 2, 2.99)
+        self._add_item(session_id, "Tots", "medium", 1, 2.79)
+        summary = order_state_singleton.get_order_summary(session_id)
+        expected_subtotal = (2 * 2.99) + 2.79
+        self.assertTrue(math.isclose(summary.total, expected_subtotal, rel_tol=1e-9))
+        expected_tax = expected_subtotal * 0.08
+        self.assertTrue(math.isclose(summary.tax, expected_tax, rel_tol=1e-9))
+
+    @patch("order_state.is_happy_hour", return_value=True)
+    def test_drink_discounted_during_happy_hour(self, _mock_hh):
+        """During happy hour, drinks receive a 50% discount; sides are unaffected."""
+        session_id = order_state_singleton.create_session()
+        self._add_item(session_id, "Cherry Limeade", "medium", 2, 2.99)
+        self._add_item(session_id, "Tots", "medium", 1, 2.79)
+        summary = order_state_singleton.get_order_summary(session_id)
+        # Drinks discounted 50%, sides at full price
+        expected_subtotal = (2 * 2.99 * 0.5) + 2.79
+        self.assertTrue(math.isclose(summary.total, expected_subtotal, rel_tol=1e-9))
+        expected_tax = expected_subtotal * 0.08
+        self.assertTrue(math.isclose(summary.tax, expected_tax, rel_tol=1e-9))
+
+    @patch("order_state.is_happy_hour", return_value=True)
+    def test_happy_hour_does_not_discount_non_drinks(self, _mock_hh):
+        """Happy hour only applies to drink-category items."""
+        session_id = order_state_singleton.create_session()
+        self._add_item(session_id, "Chili Cheese Coney", "standard", 1, 3.99)
+        self._add_item(session_id, "Tots", "medium", 1, 2.79)
+        summary = order_state_singleton.get_order_summary(session_id)
+        expected_subtotal = 3.99 + 2.79
+        self.assertTrue(math.isclose(summary.total, expected_subtotal, rel_tol=1e-9))
+
+    @patch("order_state.is_happy_hour", return_value=True)
+    def test_happy_hour_multiple_drink_types(self, _mock_hh):
+        """All drink-category items are discounted during happy hour."""
+        session_id = order_state_singleton.create_session()
+        self._add_item(session_id, "Cherry Limeade", "medium", 1, 2.99)
+        self._add_item(session_id, "Ocean Water", "large", 1, 3.49)
+        self._add_item(session_id, "Classic Vanilla Shake", "large", 1, 4.99)
+        summary = order_state_singleton.get_order_summary(session_id)
+        expected_subtotal = (2.99 * 0.5) + (3.49 * 0.5) + (4.99 * 0.5)
+        self.assertTrue(math.isclose(summary.total, expected_subtotal, rel_tol=1e-9))
+
+    @patch("order_state.is_happy_hour", return_value=True)
+    def test_extras_total_with_happy_hour_drink(self, _mock_hh):
+        """Extras (non-drinks) are full price even when paired with a discounted drink."""
+        session_id = order_state_singleton.create_session()
+        self._add_item(session_id, "Cherry Limeade", "medium", 1, 2.99)
+        self._add_item(session_id, "Flavor Add-In", "standard", 1, 0.50)
+        summary = order_state_singleton.get_order_summary(session_id)
+        # Cherry Limeade discounted, Flavor Add-In full price
+        expected_subtotal = (2.99 * 0.5) + 0.50
+        self.assertTrue(math.isclose(summary.total, expected_subtotal, rel_tol=1e-9))
 
 
 if __name__ == "__main__":
