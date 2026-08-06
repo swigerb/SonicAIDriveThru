@@ -15,18 +15,17 @@ export default defineConfig({
         cssMinify: true,
         rollupOptions: {
             output: {
-                manualChunks: {
-                    "react-vendor": ["react", "react-dom"],
-                    "ui-vendor": [
-                        "@radix-ui/react-dialog",
-                        "@radix-ui/react-select",
-                        "@radix-ui/react-slider",
-                        "@radix-ui/react-slot",
-                        "@radix-ui/react-label",
-                        "@radix-ui/react-tooltip"
-                    ],
-                    "i18n": ["i18next", "react-i18next", "i18next-browser-languagedetector", "i18next-http-backend"],
-                    "motion": ["framer-motion"]
+                // Function form (not the object form) so that subpath imports
+                // like `react-dom/client` and the `react/jsx-runtime` used by
+                // the automatic JSX transform are matched by resolved path.
+                // The object form only matched the bare specifiers, so React
+                // fell through into the entry chunk and react-vendor built empty.
+                manualChunks(id) {
+                    if (!id.includes("node_modules")) return;
+                    if (/[\\/]node_modules[\\/](react|react-dom|scheduler)[\\/]/.test(id)) return "react-vendor";
+                    if (/[\\/]node_modules[\\/]@radix-ui[\\/]/.test(id)) return "ui-vendor";
+                    if (/[\\/]node_modules[\\/](i18next|react-i18next|i18next-browser-languagedetector|i18next-http-backend)[\\/]/.test(id)) return "i18n";
+                    if (/[\\/]node_modules[\\/](framer-motion|motion-dom|motion-utils)[\\/]/.test(id)) return "motion";
                 },
                 assetFileNames: "assets/[name]-[hash][extname]",
                 chunkFileNames: "js/[name]-[hash].js",
