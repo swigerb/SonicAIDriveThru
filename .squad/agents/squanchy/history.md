@@ -1,7 +1,7 @@
 # Project Context
 
 - **Owner:** Brian Swiger
-- **Project:** Dunkin Voice Chat Assistant — AI-powered voice ordering experience using Azure OpenAI GPT-4o Realtime, Azure AI Search, and Azure Container Apps
+- **Project:** Sonic AI Drive-Thru Voice Assistant — AI-powered voice ordering experience using Azure OpenAI GPT-4o Realtime, Azure AI Search, and Azure Container Apps
 - **Stack:** Python backend (aiohttp, WebSockets, Azure OpenAI Realtime, Azure AI Search, Azure Speech SDK), React/TypeScript frontend (Vite, Tailwind CSS, shadcn/ui), Bicep IaC (infra/), Docker, azd CLI
 - **Created:** 2026-03-19
 
@@ -47,3 +47,10 @@
 - **Module-level Truth:** `_startup_checks` module-level dict is single source of truth for health state — atomic updates, no locks needed.
 - **Testing:** Added 3 new tests for health endpoint. All existing tests unaffected. Team should use `SystemExit` assertion for env var validation tests (replaces old `RuntimeError`).
 - **Coordination:** Integrated with Summer's parallel code refactoring (rtmt.py split into session_manager + audio_pipeline) without conflicts. Both changes ready for single git commit.
+
+### 2026-08-06: Stale Dunkin Branding Cleanup & Roster Population
+- **Squad state rebrand**: Updated `team.md` (line 3 tagline + Project Context description) and all 10 agent `history.md` Project lines (rick, morty, summer, birdperson, squanchy, unity, fenster, hockney, keaton, mcmanus) from stale Dunkin branding to "Sonic AI Drive-Thru Voice Assistant". Preserved role-specific suffixes on each agent line.
+- **Preserved historical records**: Left rebrand history intact in `decisions/decisions.md` (6 entries), `rick/history.md` line 10 (rebrand scope), `summer/history.md` line 10 (rebrand completion), `birdperson/history.md` lines 18-19 (verification tests), and `squanchy/history.md` lines 14-15 (fork provenance).
+- **Roster populated**: Filled `.squad/roster.md` template placeholders with real data from `team.md` — owner, stack, description, created date, and full 8-member roster (Rick/Morty/Summer/Birdperson/Squanchy/Unity + Scribe/Ralph). Preserved Coding Agent section, `copilot-auto-assign` comment, and Capabilities block.
+- **Notebook outputs cleared**: Stripped all cached cell outputs and reset `execution_count` to null in `scripts/menu_ingestion_search_json.ipynb` via Python `json` module. Removed ~110 Dunkin hits (stale pip install paths leaking `c:\users\brswig\source\repos\dunkinvoicechat\...`) and old Dunkin menu data outputs. Source cells verified clean — zero Dunkin references. Notebook remains valid JSON with 1-space indentation preserved.
+- **Verification**: `squad doctor` passes (11/11). Final `grep -rin dunkin .squad scripts` returns only the preserved historical records.

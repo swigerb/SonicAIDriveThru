@@ -1,7 +1,7 @@
 # McManus — History
 
 ## Project Context
-- **Project:** Dunkin Voice Chat Assistant — React 18 + TypeScript + Vite frontend
+- **Project:** Sonic AI Drive-Thru Voice Assistant — React 18 + TypeScript + Vite frontend
 - **Stack:** Radix UI + Tailwind CSS + shadcn/ui, react-use-websocket, i18next, Framer Motion
 - **User:** Brian Swiger
 - **Key files:** app/frontend/src/App.tsx, app/frontend/src/hooks/useRealtime.tsx, app/frontend/src/types.ts

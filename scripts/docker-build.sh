@@ -30,8 +30,8 @@ fi
 
 # Build the Docker image (frontend config is read from app/frontend/.env)
 echo "🔨 Building Docker image..."
-docker build --no-cache -t coffee-chat-app -f ./app/Dockerfile ./app
+docker build --no-cache -t sonic-drive-thru-app -f ./app/Dockerfile ./app
 
 # Run the container
 echo "🚀 Running Docker container..."
-docker run -p 8000:8000 --env-file ./app/backend/.env coffee-chat-app:latest
+docker run -p 8000:8000 --env-file ./app/backend/.env sonic-drive-thru-app:latest

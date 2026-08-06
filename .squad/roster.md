@@ -1,6 +1,6 @@
 # Team Roster
 
-> {One-line project description}
+> Sonic AI Drive-Thru Voice Assistant — AI-powered drive-thru ordering experience
 
 ## Coordinator
 
@@ -12,10 +12,12 @@
 
 | Name | Role | Charter | Status |
 |------|------|---------|--------|
-| {Name} | {Role} | `.squad/agents/{name}/charter.md` | ✅ Active |
-| {Name} | {Role} | `.squad/agents/{name}/charter.md` | ✅ Active |
-| {Name} | {Role} | `.squad/agents/{name}/charter.md` | ✅ Active |
-| {Name} | {Role} | `.squad/agents/{name}/charter.md` | ✅ Active |
+| Rick | Lead | `.squad/agents/rick/charter.md` | 🏗️ Active |
+| Morty | Frontend Dev | `.squad/agents/morty/charter.md` | ⚛️ Active |
+| Summer | Backend Dev | `.squad/agents/summer/charter.md` | 🔧 Active |
+| Birdperson | Tester | `.squad/agents/birdperson/charter.md` | 🧪 Active |
+| Squanchy | DevOps | `.squad/agents/squanchy/charter.md` | ⚙️ Active |
+| Unity | AI / Realtime Expert | `.squad/agents/unity/charter.md` | 🤖 Active |
 | Scribe | Session Logger | `.squad/agents/scribe/charter.md` | 📋 Silent |
 | Ralph | Work Monitor | — | 🔄 Monitor |
 
@@ -54,7 +56,7 @@
 
 ## Project Context
 
-- **Owner:** {user name}
-- **Stack:** {languages, frameworks, tools}
-- **Description:** {what the project does, in one sentence}
-- **Created:** {timestamp}
+- **Owner:** Brian Swiger
+- **Stack:** Python backend (aiohttp, WebSockets, Azure OpenAI Realtime, Azure AI Search, Azure Speech SDK), React/TypeScript frontend (Vite, Tailwind CSS, shadcn/ui), Bicep IaC, Docker, azd CLI
+- **Description:** Voice-driven drive-thru ordering experience showcasing Azure OpenAI GPT-4o Realtime, Azure AI Search, and Azure Container Apps
+- **Created:** 2026-03-19

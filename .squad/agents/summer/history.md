@@ -1,7 +1,7 @@
 # Project Context
 
 - **Owner:** Brian Swiger
-- **Project:** Sonic Voice Chat Assistant — AI-powered voice ordering experience using Azure OpenAI GPT-4o Realtime, Azure AI Search, and Azure Container Apps
+- **Project:** Sonic AI Drive-Thru Voice Assistant — AI-powered voice ordering experience using Azure OpenAI GPT-4o Realtime, Azure AI Search, and Azure Container Apps
 - **Stack:** Python backend (aiohttp, WebSockets, Azure OpenAI Realtime, Azure AI Search, Azure Speech SDK), React/TypeScript frontend (Vite, Tailwind CSS, shadcn/ui), Bicep IaC, Docker, azd CLI
 - **Created:** 2026-03-19
 
@@ -38,6 +38,16 @@ Series of debugging and feature work across demo readiness, debugging sprint, an
 
 
 <!-- Append new learnings below. Each entry is something lasting about the project. -->
+
+## Learnings — Current (Phase 7)
+
+### 2026-08-06: Dependency Update Sprint — Security + Version Bumps
+- **Security-Critical Upgrades:** aiohttp 3.10.11→3.14.3 (33+ CVEs including PYSEC-2026-2102, PYSEC-2026-3545, PYSEC-2026-237), python-dotenv 1.0.1→1.2.2 (PYSEC-2026-2270), cryptography ≥50.0.0 added as floor pin (9 CVEs in transitive 46.0.0). pip-audit now reports zero known vulnerabilities.
+- **Major Bumps Taken:** azure-search-documents 11.6.0→12.0.0 (verified: breaking changes only affect beta API users, not our `SearchClient`/`VectorizableTextQuery` surface in tools.py), azure-identity 1.19.0→1.25.3, azure-storage-blob 12.24.0→12.30.0, cffi 1.17.1→2.1.1 (required by cryptography ≥50), rich 13.9.4→15.0.0 (only used in setup_intvect.py).
+- **Deliberately Skipped:** openai stays at 1.109.1 (latest 1.x) — not imported anywhere in backend code (app uses raw aiohttp WebSockets to Azure OpenAI Realtime), but scripts/notebooks in `scripts/` use `from openai import AzureOpenAI` and would break on 2.x. gunicorn stays at 23.0.0 — no CVEs, UNIX-only server, 26.0.0 is a 3-major jump with insufficient changelog visibility.
+- **pyproject.toml Fix:** `target-version` corrected from `"py311"` to `"py312"` — Dockerfile uses `python:3.12-slim`, devcontainer uses `python:1-3.12-bookworm`.
+- **Key Insight:** cffi is pinned in requirements.txt but is purely a transitive dependency (not imported in any backend source). cryptography ≥50.0.0 requires cffi ≥2.0, so the two pins must move together. msal constrains cryptography to <51.
+- **Test Results:** 354/354 passing before AND after changes. Zero regressions.
 
 ## Learnings — Current (Phase 6)
 

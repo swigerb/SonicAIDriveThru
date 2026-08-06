@@ -1,6 +1,6 @@
 # Squad Team
 
-> Dunkin Voice Chat Assistant — AI-powered drive-thru ordering experience
+> Sonic AI Drive-Thru Voice Assistant — AI-powered drive-thru ordering experience
 
 ## Coordinator
 
@@ -24,7 +24,7 @@
 ## Project Context
 
 - **Owner:** Brian Swiger
-- **Project:** Dunkin Voice Chat Assistant — an Inspire Brands–themed, voice-driven ordering experience showcasing Azure OpenAI GPT-4o Realtime, Azure AI Search, and Azure Container Apps. Emulates a Dunkin crew member who can search the menu, hold multilingual conversations, and keep orders in sync across devices.
+- **Project:** Sonic AI Drive-Thru Voice Assistant — a voice-driven drive-thru ordering experience showcasing Azure OpenAI GPT-4o Realtime, Azure AI Search, and Azure Container Apps. Emulates a Sonic Drive-In carhop who can search the menu, hold multilingual conversations, and keep orders in sync across devices.
 - **Repo:** https://github.com/swigerb/SonicAIDriveThru
 - **Stack:**
   - **Frontend:** React, TypeScript, Vite, Tailwind CSS, shadcn/ui

@@ -65,7 +65,7 @@ set +a
 # Check if the app name is provided
 if [ -z "$APP_NAME" ]; then
     echo "Usage: $0 [--env-file path/to/backend/env] [--frontend-env-file path/to/frontend/env] [--dockerfile path/to/Dockerfile] [--context path/to/context] <app_name>"
-    echo "Example: $0 coffee-chat-assistant"
+    echo "Example: $0 sonic-drive-thru-assistant"
     echo "All parameters are optional and default to:"
     echo "  --env-file ./app/backend/.env"
     echo "  --frontend-env-file ./app/frontend/.env"

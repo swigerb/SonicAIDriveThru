@@ -1,7 +1,7 @@
 # Fenster — History
 
 ## Project Context
-- **Project:** Dunkin Voice Chat Assistant — Python aiohttp backend with Azure OpenAI Realtime + Azure AI Search
+- **Project:** Sonic AI Drive-Thru Voice Assistant — Python aiohttp backend with Azure OpenAI Realtime + Azure AI Search
 - **Stack:** aiohttp, Pydantic v2, Azure SDKs, python-dotenv, gunicorn
 - **User:** Brian Swiger
 - **Key files:** app/backend/app.py, app/backend/rtmt.py, app/backend/tools.py, app/backend/order_state.py, app/backend/models.py

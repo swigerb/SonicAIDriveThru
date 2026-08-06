@@ -1,7 +1,7 @@
 # Keaton — History
 
 ## Project Context
-- **Project:** Dunkin Voice Chat Assistant — voice-driven ordering using Azure OpenAI GPT-4o Realtime + Azure AI Search RAG
+- **Project:** Sonic AI Drive-Thru Voice Assistant — voice-driven ordering using Azure OpenAI GPT-4o Realtime + Azure AI Search RAG
 - **Stack:** Python 3.11+ (aiohttp) backend, React 18 + TypeScript + Vite frontend
 - **User:** Brian Swiger
 - **Key files:** app/backend/app.py, app/backend/rtmt.py, app/backend/tools.py, app/frontend/src/App.tsx

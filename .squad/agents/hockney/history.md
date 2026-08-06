@@ -1,7 +1,7 @@
 # Hockney — History
 
 ## Project Context
-- **Project:** Dunkin Voice Chat Assistant — testing for Python backend + React frontend
+- **Project:** Sonic AI Drive-Thru Voice Assistant — testing for Python backend + React frontend
 - **Stack:** Python unittest (backend), Vitest + React Testing Library (frontend)
 - **User:** Brian Swiger
 - **Existing tests:** app/backend/tests/test_order_state.py, app/backend/tests/test_extras_rules.py

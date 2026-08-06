@@ -1,14 +1,14 @@
 // For format details, see https://aka.ms/devcontainer.json. For config options, see the
 // README at: https://github.com/devcontainers/templates/tree/main/src/python
 {
-    "name": "Coffee Chat",
+    "name": "Sonic AI Drive-Thru",
 	"image": "mcr.microsoft.com/devcontainers/python:1-3.12-bookworm",
     // Features to add to the dev container. More info: https://containers.dev/features.
     "features": {
         "ghcr.io/devcontainers/features/azure-cli:1": {},
         "ghcr.io/azure/azure-dev/azd:latest": {},
         "ghcr.io/devcontainers/features/node:1": {
-            "version": "20"
+            "version": "22"
         }
     },
     // Configure tool-specific properties.

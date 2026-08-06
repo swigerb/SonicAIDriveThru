@@ -31,13 +31,21 @@ SCAN_EXTENSIONS = {
     ".py", ".ts", ".tsx", ".js", ".jsx",
     ".html", ".css", ".json", ".md",
     ".yaml", ".yml", ".bicep", ".env-sample",
+    ".sh",
 }
 
-# Directories and files to exclude from scanning
+# Filenames to scan that have no extension (e.g. Dockerfile)
+SCAN_FILENAMES = {"Dockerfile"}
+
+# Directories to exclude from scanning.
+# .squad is excluded deliberately — it contains historical rebrand records and
+# Squad-managed scaffolding that legitimately reference the old brand name for
+# traceability.  All other config/CI dirs (.devcontainer, .github, .vscode,
+# .copilot) are intentionally NOT excluded so the scanner catches stale branding.
 EXCLUDED_DIRS = {
-    ".squad", ".git", "node_modules", "__pycache__",
-    ".venv", "venv", "env", ".devcontainer", ".copilot",
-    ".github", ".vscode",
+    ".git", "node_modules", "__pycache__",
+    ".venv", "venv", "env",
+    ".squad",
 }
 
 EXCLUDED_FILES = {
@@ -50,8 +58,8 @@ EXCLUDED_FILES = {
 
 def _should_scan(path: Path) -> bool:
     """Return True if *path* should be included in the rebrand scan."""
-    # Suffix check
-    if path.suffix not in SCAN_EXTENSIONS:
+    # Check by extension OR by exact filename (for extensionless files)
+    if path.suffix not in SCAN_EXTENSIONS and path.name not in SCAN_FILENAMES:
         return False
     # Excluded file names
     if path.name in EXCLUDED_FILES:

@@ -1,7 +1,7 @@
 # Project Context
 
 - **Owner:** Brian Swiger
-- **Project:** Sonic Drive-In Voice Ordering Assistant — AI-powered voice ordering experience using Azure OpenAI GPT-4o Realtime, Azure AI Search, and Azure Container Apps
+- **Project:** Sonic AI Drive-Thru Voice Assistant — AI-powered voice ordering experience using Azure OpenAI GPT-4o Realtime, Azure AI Search, and Azure Container Apps
 - **Stack:** React/TypeScript frontend (Vite, Tailwind CSS, shadcn/ui), Python backend (aiohttp, WebSockets), Bicep IaC, Docker, azd CLI
 - **Created:** 2026-03-19
 
@@ -86,4 +86,28 @@ Created `scripts/update_menu_sizes.py` to sync `menuItems.json` with production 
 
 Fixed `useAzureSpeech.tsx`: (1) `onReceivedToolResponse` parameter was declared but never destructured — order updates silently dropped. (2) Added `tool_results` processing from `/azurespeech/speech-to-text` response, constructing `ExtensionMiddleTierToolResponse` objects matching WebSocket pattern. (3) Added `session_id` flow using `useRef<string>(crypto.randomUUID())` — regenerated on `startSession()`, sent in every request for backend order state tracking. Backward compatible: missing `tool_results` handled gracefully.
 
+### 2026-08-06: Frontend Dependency Updates
 
+**Major upgrades applied (all verified green — build + 13/13 tests pass):**
+- Vite 5 → 6 (6.4.3), @vitejs/plugin-react 4 → 5 (5.2.0)
+- Vitest 1 → 2 (2.1.9), @vitest/coverage-v8 1 → 2 (2.1.9)
+- lucide-react 0.445 → 1.28 — `Github` icon removed upstream (trademark); replaced with `FaGithub` from `react-icons/fa` in `App.tsx`
+- i18next 23 → 26 (26.3.6), react-i18next 15 → 17 (17.0.11), i18next-http-backend 2 → 4 (4.0.1)
+- tailwind-merge 2 → 3 (3.6.0)
+- @testing-library/jest-dom 6 → 7 (7.0.0)
+- @types/node 22 → 26 (26.1.2)
+- jsdom 24 → 29 (29.1.1)
+- prettier-plugin-tailwindcss 0.6 → 0.8 (0.8.1)
+
+**In-range semver updates (minor/patch):**
+- All @radix-ui/* packages, axios, class-variance-authority, darkreader, framer-motion (11.18.2), i18next-browser-languagedetector, react-draggable, react-icons, react-use-websocket, autoprefixer, postcss, prettier, typescript (5.9.3), @types/react, @types/react-dom, @testing-library/user-event, tailwindcss (3.4.19)
+
+**Source changes:** `App.tsx` — replaced `Github` import from `lucide-react` with `FaGithub` from `react-icons/fa` (lucide-react 1.x removed branded icons).
+
+**Deferred upgrades with rationale:**
+- **React 18 → 19**: `react-draggable` uses `findDOMNode` (removed in React 19). `@testing-library/react` 14 doesn't support React 19 (needs v16). Would require auditing all Radix UI, framer-motion, and react-use-websocket peer compatibility. High risk to demo stability. **Migration steps:** (1) Upgrade react-draggable or replace with a ref-based alternative, (2) upgrade @testing-library/react to 16, (3) update @types/react + @types/react-dom to 19, (4) audit all peer deps, (5) test all UI interactions.
+- **Tailwind CSS 3 → 4**: CSS-first config model, requires rewriting tailwind.config.js, postcss.config.js, and CSS entrypoint. `tailwindcss-animate` and `prettier-plugin-tailwindcss` compatibility uncertain. High visual regression risk for demo app. **Migration steps:** (1) Replace `tailwind.config.js` with `@theme` directives in CSS, (2) replace `postcss-config.js` plugin with `@tailwindcss/postcss`, (3) audit all `hsl(var(...))` color patterns, (4) verify tailwindcss-animate compatibility, (5) full visual regression test.
+- **TypeScript 5 → 7**: Major version, potential breaking type-checking changes. Current 5.9.3 is latest 5.x. **Migration steps:** review TS 6/7 release notes for breaking changes, run `tsc --strict` and fix any new errors.
+- **Vite 6 → 8**: Would require @vitejs/plugin-react 6 (which requires Vite 8). Multiple major jumps. Current Vite 6 is stable. **Migration steps:** upgrade vite to 8 + @vitejs/plugin-react to 6 together, review config for breaking changes.
+- **Vitest 2 → 4**: Would require @vitest/coverage-v8 4. Current v2 is stable and working. **Migration steps:** upgrade both together, review config for API changes.
+- **framer-motion 11 → 13**: v13 is alpha only. Package being renamed to `motion`. **Migration steps:** wait for stable 12.x/13.x release, rename import from `framer-motion` to `motion`, update vite.config.ts manualChunks.
