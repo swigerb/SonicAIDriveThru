@@ -211,10 +211,6 @@ async def create_app() -> web.Application:
     # Generate a random secret for HMAC session tokens
     app_secret = os.urandom(32)
     rtmt.app_secret = app_secret
-    if api_version := os.environ.get("AZURE_OPENAI_REALTIME_API_VERSION"):
-        rtmt.api_version = api_version
-    else:
-        rtmt.api_version = model_cfg.get("api_version", "2024-10-01-preview")
     rtmt.temperature = model_cfg.get("temperature", 0.6)
     rtmt.max_tokens = model_cfg.get("max_response_output_tokens", 4096)
     rtmt.system_message = prompt_loader.get_system_prompt()

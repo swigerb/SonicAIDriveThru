@@ -8,7 +8,7 @@ files:
   error_messages: "error_messages.yaml"
   hints: "hints.yaml"
 model_config:
-  name: "gpt-4o-realtime-preview"
+  name: "gpt-realtime-1.5"
   voice: "coral"
   temperature: 0.6
   max_tokens: 4096

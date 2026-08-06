@@ -5,7 +5,6 @@
 model:
   temperature: 0.6
   max_response_output_tokens: 4096
-  api_version: "2024-10-01-preview"
   default_voice: "coral"
 
 vad:

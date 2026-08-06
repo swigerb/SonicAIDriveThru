@@ -77,13 +77,23 @@ if _VERBOSE_LOG_FILE_GLOBAL:
 _VERBOSE_RESULT_TRUNCATE = _config.get("logging", {}).get("verbose_result_truncate", 500)
 
 # High-frequency server message types that never need middleware modification.
+# Includes both GA (v1) and legacy (2024-10-01-preview) event names.
 _PASSTHROUGH_SERVER_TYPES = frozenset({
+    # GA event names (gpt-realtime-1.5 via /openai/v1/realtime)
+    "response.output_audio.delta",
+    "response.output_audio.done",
+    "response.output_audio_transcript.delta",
+    "response.output_audio_transcript.done",
+    "response.output_text.delta",
+    "response.output_text.done",
+    # Legacy event names (2024-10-01-preview via /openai/realtime)
     "response.audio.delta",
     "response.audio.done",
     "response.audio_transcript.delta",
     "response.audio_transcript.done",
     "response.text.delta",
     "response.text.done",
+    # Unchanged across versions
     "response.content_part.added",
     "response.content_part.done",
     "input_audio_buffer.speech_started",
@@ -91,6 +101,17 @@ _PASSTHROUGH_SERVER_TYPES = frozenset({
     "input_audio_buffer.committed",
     "rate_limits.updated",
 })
+
+# GA → legacy event name translation for client compatibility.
+# The frontend expects legacy names; the GA /openai/v1 endpoint sends these.
+_GA_TO_LEGACY_EVENTS: dict[str, str] = {
+    "response.output_audio.delta": "response.audio.delta",
+    "response.output_audio.done": "response.audio.done",
+    "response.output_audio_transcript.delta": "response.audio_transcript.delta",
+    "response.output_audio_transcript.done": "response.audio_transcript.done",
+    "response.output_text.delta": "response.text.delta",
+    "response.output_text.done": "response.text.done",
+}
 
 # Client messages that never need middleware modification.
 _PASSTHROUGH_CLIENT_TYPES = frozenset({
@@ -109,16 +130,19 @@ INPUT_AUDIO_CLEAR_MSG = json.dumps({"type": "input_audio_buffer.clear"})
 # Cooldown period (seconds) after AI audio ends before accepting user audio.
 ECHO_COOLDOWN_SEC = _audio_cfg.get("echo_cooldown_seconds", 1.5)
 
-# Fast substring markers for echo suppression
+# Fast substring markers for echo suppression (GA event names)
 MARKER_AUDIO_APPEND = '"input_audio_buffer.append"'
-MARKER_AUDIO_DELTA = '"response.audio.delta"'
-MARKER_AUDIO_DONE = '"response.audio.done"'
+MARKER_AUDIO_DELTA = '"response.output_audio.delta"'
+MARKER_AUDIO_DONE = '"response.output_audio.done"'
 MARKER_SPEECH_STARTED = '"input_audio_buffer.speech_started"'
 MARKER_SESSION_UPDATE = '"session.update"'
 MARKER_SESSION_UPDATED = '"session.updated"'
 MARKER_RESPONSE_CANCEL = '"response.cancel"'
 MARKER_VERBOSE_LOGGING = '"extension.set_verbose_logging"'
 MARKER_LOG_TO_FILE = '"extension.set_log_to_file"'
+# Legacy markers for backward compatibility
+MARKER_AUDIO_DELTA_LEGACY = '"response.audio.delta"'
+MARKER_AUDIO_DONE_LEGACY = '"response.audio.done"'
 
 
 def vlog(verbose: bool, msg: str, *args: Any) -> None:

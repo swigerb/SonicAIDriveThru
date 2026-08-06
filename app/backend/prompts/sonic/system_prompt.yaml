@@ -1,5 +1,5 @@
 version: "1.0.0"
-model: "gpt-4o-realtime-preview"
+model: "gpt-realtime-1.5"
 sections:
   - name: "IDENTITY"
     priority: 1

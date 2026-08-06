@@ -18,6 +18,7 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 from aiohttp import web
 
 from audio_pipeline import (
+    _GA_TO_LEGACY_EVENTS,
     _PASSTHROUGH_CLIENT_TYPES,
     _PASSTHROUGH_SERVER_TYPES,
     ECHO_COOLDOWN_SEC,
@@ -445,6 +446,20 @@ class PreSerializedMessagesTests(unittest.TestCase):
         self.assertEqual(parsed["type"], "input_audio_buffer.clear")
 
 
+class GAEventTranslationTests(unittest.TestCase):
+    """Test GA-to-legacy event name translation mapping."""
+
+    def test_all_ga_events_are_in_passthrough_set(self):
+        for ga_name in _GA_TO_LEGACY_EVENTS:
+            self.assertIn(ga_name, _PASSTHROUGH_SERVER_TYPES,
+                          f"GA event {ga_name} must be in passthrough set")
+
+    def test_all_legacy_events_are_in_passthrough_set(self):
+        for legacy_name in _GA_TO_LEGACY_EVENTS.values():
+            self.assertIn(legacy_name, _PASSTHROUGH_SERVER_TYPES,
+                          f"Legacy event {legacy_name} must be in passthrough set")
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # RTMT CORE CLASSES TESTS
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -652,6 +667,53 @@ class ProcessMessageToClientTests(unittest.IsolatedAsyncioTestCase):
         result = await rtmt._process_message_to_client(msg, client_ws, server_ws, tools_pending)
         self.assertEqual(result, msg.data)
 
+    async def test_ga_audio_delta_translated_to_legacy(self):
+        """GA event names are translated to legacy names for client compatibility."""
+        rtmt = self._make_rtmt()
+        client_ws = _make_mock_ws()
+        server_ws = _make_mock_ws()
+        tools_pending = {}
+        msg = MagicMock()
+        msg.data = json.dumps({"type": "response.output_audio.delta", "delta": "base64audio"})
+        result = await rtmt._process_message_to_client(msg, client_ws, server_ws, tools_pending)
+        parsed = json.loads(result)
+        self.assertEqual(parsed["type"], "response.audio.delta")
+
+    async def test_ga_transcript_delta_translated_to_legacy(self):
+        """GA transcript event names are translated to legacy names."""
+        rtmt = self._make_rtmt()
+        client_ws = _make_mock_ws()
+        server_ws = _make_mock_ws()
+        tools_pending = {}
+        msg = MagicMock()
+        msg.data = json.dumps({"type": "response.output_audio_transcript.delta", "delta": "hello"})
+        result = await rtmt._process_message_to_client(msg, client_ws, server_ws, tools_pending)
+        parsed = json.loads(result)
+        self.assertEqual(parsed["type"], "response.audio_transcript.delta")
+
+    async def test_conversation_item_added_handles_function_call(self):
+        """GA conversation.item.added event registers tool calls like conversation.item.created."""
+        rtmt = self._make_rtmt()
+        client_ws = _make_mock_ws()
+        server_ws = _make_mock_ws()
+        tools_pending = {}
+        order_state_singleton.sessions = {}
+        rtmt._sessions.create_session(client_ws)
+        msg = MagicMock()
+        msg.data = json.dumps({
+            "type": "conversation.item.added",
+            "previous_item_id": "prev-1",
+            "item": {
+                "type": "function_call",
+                "call_id": "call-ga-1",
+                "name": "test_tool",
+                "arguments": "{}"
+            }
+        })
+        result = await rtmt._process_message_to_client(msg, client_ws, server_ws, tools_pending)
+        self.assertIsNone(result)
+        self.assertIn("call-ga-1", tools_pending)
+
     async def test_session_created_strips_instructions(self):
         rtmt = self._make_rtmt()
         rtmt.voice_choice = "coral"
@@ -678,6 +740,7 @@ class ProcessMessageToClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(parsed["session"]["instructions"], "")
         self.assertEqual(parsed["session"]["tools"], [])
         self.assertEqual(parsed["session"]["voice"], "coral")
+        self.assertEqual(parsed["session"]["audio"]["output"]["voice"], "coral")
 
     async def test_unknown_message_type_returned_as_data(self):
         """Unknown message types should pass through without crashing."""

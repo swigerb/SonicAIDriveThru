@@ -87,5 +87,44 @@
 
 **Validation:** YAML valid, 347 tests pass (1 pre-existing async failure unrelated).
 
+### 2026-07-09: Model Migration — gpt-4o-realtime-preview → gpt-realtime-1.5 (GA)
+
+**Problem:** The demo was pinned to `gpt-4o-realtime-preview` (version `2024-10-01`), which has been retired from Azure and can no longer be deployed. `azd up` would fail at provisioning.
+
+**Target:** `gpt-realtime-1.5` version `2026-02-23` (GA, `GlobalStandard` SKU, retirement 2027-08-24 — longest runway of any realtime model).
+
+**GA API Surface Changes (verified against official docs):**
+- **WebSocket URL:** `/openai/realtime?api-version=X&deployment=Y` → `/openai/v1/realtime?model=Y` (no api-version param)
+- **Event names (server→client):** `response.audio.delta` → `response.output_audio.delta`, `response.audio.done` → `response.output_audio.done`, `response.audio_transcript.delta` → `response.output_audio_transcript.delta`, `response.audio_transcript.done` → `response.output_audio_transcript.done`, `response.text.delta` → `response.output_text.delta`, `response.text.done` → `response.output_text.done`, `conversation.item.created` → `conversation.item.added`
+- **Session config:** Voice moved from `session.voice` to `session.audio.output.voice`; audio format to nested `audio.input/output`; turn detection to `audio.input.turn_detection`
+- **Auth:** Kept `cognitiveservices.azure.com/.default` scope (matches Brian's `Microsoft.CognitiveServices/account` resource type)
+- **Doc sources:** `https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/realtime-audio-websockets`, `https://developers.openai.com/api/reference/resources/realtime`
+
+**Key Design Decision — Frontend Compatibility:**
+Since `app/frontend/` is off-limits, the middleware (`rtmt.py` + `audio_pipeline.py`) translates GA event names back to legacy names before forwarding to the client. Both GA and legacy names are in `_PASSTHROUGH_SERVER_TYPES`. A `_GA_TO_LEGACY_EVENTS` mapping dict handles the translation.
+
+**Voice:** Unified on `coral` (warm, friendly, clear — fits carhop persona). Fixed inconsistency where `config.yaml` had `coral` but `main.parameters.json` defaulted to `alloy`.
+
+**Files Changed (16):**
+- `infra/main.bicep` — deployment name/model/version updated
+- `infra/main.parameters.json` — voice default `alloy` → `coral`
+- `app/backend/rtmt.py` — removed `api_version`, changed WS URL/params, added GA event translation, dual voice injection, `conversation.item.added` handling, echo suppression for both marker sets
+- `app/backend/audio_pipeline.py` — expanded passthrough sets, added `_GA_TO_LEGACY_EVENTS` mapping, updated markers
+- `app/backend/config.yaml` — removed `api_version` line
+- `app/backend/app.py` — removed `api_version` assignment
+- `app/backend/.env-sample` — updated deployment name, removed version env var
+- `app/backend/prompts/sonic/system_prompt.yaml`, `manifest.yaml` — model name updated
+- `docs/existing_services.md`, `docs/manual_setup.md`, `voice_rag_README.md` — model references updated
+- `app/backend/tests/test_rtmt.py` — 5 new tests for GA event translation and passthrough coverage
+- `app/backend/tests/test_app.py`, `test_performance.py` — deployment name in mock env vars
+
+**Validation:** Bicep builds (pre-existing BCP420 error in `container-apps.bicep` unrelated). 365 tests passed (360 original + 5 new). Ruff clean.
+
+**Needs Live Verification:**
+- Does `cognitiveservices.azure.com/.default` auth scope work with `/openai/v1` endpoint?
+- Does the GA server accept flat `session.update` format alongside nested?
+- Which exact event names appear on the wire from `gpt-realtime-1.5`?
+- Which voices does `gpt-realtime-1.5` actually support? (docs don't enumerate per-model)
+
 <!-- Older detailed sections archived above for space. Current learnings focused on Phase 3 integration. -->
 

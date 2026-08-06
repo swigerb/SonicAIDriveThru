@@ -48,7 +48,7 @@ class CreateAppConfigTests(unittest.IsolatedAsyncioTestCase):
              patch.dict(os.environ, {
                  "RUNNING_IN_PRODUCTION": "1",
                  "AZURE_OPENAI_EASTUS2_ENDPOINT": "https://fake.openai.azure.com",
-                 "AZURE_OPENAI_REALTIME_DEPLOYMENT": "gpt-4o-realtime",
+                 "AZURE_OPENAI_REALTIME_DEPLOYMENT": "gpt-realtime-1.5",
                  "AZURE_OPENAI_EASTUS2_API_KEY": "fake-key",
                  "AZURE_SEARCH_API_KEY": "fake-search-key",
                  "AZURE_SEARCH_ENDPOINT": "https://fake.search.windows.net",

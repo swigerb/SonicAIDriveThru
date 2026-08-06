@@ -86,7 +86,9 @@ export default function useRealTime({
 
     const buildWsEndpoint = () => {
         if (useDirectAoaiApi) {
-            return `${aoaiEndpointOverride}/openai/realtime?api-key=${aoaiApiKeyOverride}&deployment=${aoaiModelOverride}&api-version=2024-10-01-preview`;
+            // GA realtime surface: /openai/v1/realtime addressed by `model`,
+            // replacing the retired /openai/realtime?deployment=&api-version= form.
+            return `${aoaiEndpointOverride}/openai/v1/realtime?api-key=${aoaiApiKeyOverride}&model=${aoaiModelOverride}`;
         }
         const base = `/realtime`;
         return sessionToken ? `${base}?token=${encodeURIComponent(sessionToken)}` : base;

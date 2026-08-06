@@ -113,8 +113,8 @@ You can run this app locally using either the Azure services you provisioned by 
 
    ```shell
    AZURE_OPENAI_ENDPOINT=wss://<your instance name>.openai.azure.com
-   AZURE_OPENAI_REALTIME_DEPLOYMENT=gpt-4o-realtime-preview
-   AZURE_OPENAI_REALTIME_VOICE_CHOICE=<choose one: echo, alloy, shimmer>
+   AZURE_OPENAI_REALTIME_DEPLOYMENT=gpt-realtime-1.5
+   AZURE_OPENAI_REALTIME_VOICE_CHOICE=<choose one: coral, alloy, echo, shimmer>
    AZURE_OPENAI_API_KEY=<your api key>
    AZURE_SEARCH_ENDPOINT=https://<your service name>.search.windows.net
    AZURE_SEARCH_INDEX=<your index name>
@@ -152,7 +152,7 @@ Pricing varies per region and usage, so it isn't possible to predict exact costs
 However, you can try the [Azure pricing calculator](https://azure.com/e/a87a169b256e43c089015fda8182ca87) for the resources below.
 
 * Azure Container Apps: Consumption plan with 1 CPU core, 2.0 GB RAM. Pricing with Pay-as-You-Go. [Pricing](https://azure.microsoft.com/pricing/details/container-apps/)
-* Azure OpenAI: Standard tier, gpt-4o-realtime and text-embedding-3-large models. Pricing per 1K tokens used. [Pricing](https://azure.microsoft.com/pricing/details/cognitive-services/openai-service/)
+* Azure OpenAI: Standard tier, gpt-realtime-1.5 and text-embedding-3-large models. Pricing per 1K tokens used. [Pricing](https://azure.microsoft.com/pricing/details/cognitive-services/openai-service/)
 * Azure AI Search: Standard tier, 1 replica, free level of semantic search. Pricing per hour. [Pricing](https://azure.microsoft.com/pricing/details/search/)
 * Azure Blob Storage: Standard tier with ZRS (Zone-redundant storage). Pricing per storage and read operations. [Pricing](https://azure.microsoft.com/pricing/details/storage/blobs/)
 * Azure Monitor: Pay-as-you-go tier. Costs based on data ingested. [Pricing](https://azure.microsoft.com/pricing/details/monitor/)

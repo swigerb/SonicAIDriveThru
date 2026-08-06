@@ -15,6 +15,7 @@ from azure.core.credentials import AzureKeyCredential
 from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 
 from audio_pipeline import (
+    _GA_TO_LEGACY_EVENTS,
     _PASSTHROUGH_CLIENT_TYPES,
     _PASSTHROUGH_SERVER_TYPES,
     _VERBOSE_GLOBAL,
@@ -22,7 +23,9 @@ from audio_pipeline import (
     INPUT_AUDIO_CLEAR_MSG as _INPUT_AUDIO_CLEAR_MSG,
     MARKER_AUDIO_APPEND as _MARKER_AUDIO_APPEND,
     MARKER_AUDIO_DELTA as _MARKER_AUDIO_DELTA,
+    MARKER_AUDIO_DELTA_LEGACY as _MARKER_AUDIO_DELTA_LEGACY,
     MARKER_AUDIO_DONE as _MARKER_AUDIO_DONE,
+    MARKER_AUDIO_DONE_LEGACY as _MARKER_AUDIO_DONE_LEGACY,
     MARKER_LOG_TO_FILE as _MARKER_LOG_TO_FILE,
     MARKER_RESPONSE_CANCEL as _MARKER_RESPONSE_CANCEL,
     MARKER_SESSION_UPDATE as _MARKER_SESSION_UPDATE,
@@ -137,7 +140,6 @@ class RTMiddleTier:
     max_tokens: int | None = None
     disable_audio: bool | None = None
     voice_choice: str | None = None
-    api_version: str = "2024-10-01-preview"
 
     def __init__(self, endpoint: str, deployment: str, credentials: AzureKeyCredential | DefaultAzureCredential, voice_choice: str | None = None, prompt_loader=None):
         self.endpoint = endpoint
@@ -197,26 +199,31 @@ class RTMiddleTier:
         # Audio deltas are ~95% of server messages — avoid json.loads entirely.
         m = _TYPE_RE.search(data)
         if m is not None and m.group(1) in _PASSTHROUGH_SERVER_TYPES:
+            # Translate GA event names to legacy names for client compatibility
+            event_type = m.group(1)
+            legacy_name = _GA_TO_LEGACY_EVENTS.get(event_type)
+            if legacy_name is not None:
+                data = data.replace(f'"{event_type}"', f'"{legacy_name}"', 1)
+                event_type = legacy_name
             # Verbose: log passthrough types (skip audio delta data to avoid flooding)
             if verbose or _VERBOSE_GLOBAL:
-                pt = m.group(1)
-                if pt == "response.audio.delta":
+                if event_type == "response.audio.delta":
                     _vlog(verbose, "─── [Server → Client] response.audio.delta (audio data) ───")
-                elif pt == "response.audio_transcript.delta":
+                elif event_type == "response.audio_transcript.delta":
                     # Extract transcript snippet from raw JSON
                     td_match = re.search(r'"delta"\s*:\s*"([^"]{0,120})', data)
                     snippet = td_match.group(1) if td_match else ""
                     _vlog(verbose, '─── [AI → Client] response.audio_transcript.delta ───\n"%s"', snippet)
-                elif pt == "response.audio_transcript.done":
+                elif event_type == "response.audio_transcript.done":
                     td_match = re.search(r'"transcript"\s*:\s*"([^"]{0,200})', data)
                     snippet = td_match.group(1) if td_match else ""
                     _vlog(verbose, '─── [AI → Client] response.audio_transcript.done ───\n"%s"', snippet)
-                elif pt == "input_audio_buffer.speech_started":
+                elif event_type == "input_audio_buffer.speech_started":
                     _vlog(verbose, "─── [Server] input_audio_buffer.speech_started ───")
-                elif pt == "input_audio_buffer.speech_stopped":
+                elif event_type == "input_audio_buffer.speech_stopped":
                     _vlog(verbose, "─── [Server] input_audio_buffer.speech_stopped ───")
                 else:
-                    _vlog(verbose, "─── [Server → Client] %s ───", pt)
+                    _vlog(verbose, "─── [Server → Client] %s ───", event_type)
             return data
 
         message = json.loads(data)
@@ -240,7 +247,10 @@ class RTMiddleTier:
                     # tools, this will need updating
                     session["instructions"] = ""
                     session["tools"] = []
+                    # Set voice in both legacy and GA locations for client compatibility
                     session["voice"] = self.voice_choice
+                    audio = session.setdefault("audio", {})
+                    audio.setdefault("output", {})["voice"] = self.voice_choice
                     session["tool_choice"] = "none"
                     session["max_response_output_tokens"] = None
                     updated_message = json.dumps(message)
@@ -269,13 +279,13 @@ class RTMiddleTier:
                         _vlog(verbose, "  Tool call registered: %s (call_id=%s)", item.get("name"), item.get("call_id"))
                         updated_message = None
 
-                case "conversation.item.created":
+                case "conversation.item.created" | "conversation.item.added":
                     if "item" in message and message["item"]["type"] == "function_call":
                         item = message["item"]
                         # Always overwrite — may upgrade fallback from output_item.added
                         # with the correct previous_item_id
-                        tools_pending[item["call_id"]] = RTToolCall(item["call_id"], message["previous_item_id"])
-                        _vlog(verbose, "  Tool pending confirmed: call_id=%s, prev=%s", item["call_id"], message["previous_item_id"])
+                        tools_pending[item["call_id"]] = RTToolCall(item["call_id"], message.get("previous_item_id", ""))
+                        _vlog(verbose, "  Tool pending confirmed: call_id=%s, prev=%s", item["call_id"], message.get("previous_item_id", ""))
                         updated_message = None
                     elif "item" in message and message["item"]["type"] == "function_call_output":
                         updated_message = None
@@ -416,7 +426,10 @@ class RTMiddleTier:
                     if self.disable_audio is not None:
                         session["disable_audio"] = self.disable_audio
                     if self.voice_choice is not None:
+                        # Set voice in both legacy and GA locations
                         session["voice"] = self.voice_choice
+                        audio = session.setdefault("audio", {})
+                        audio.setdefault("output", {})["voice"] = self.voice_choice
                     session["tool_choice"] = "auto" if len(self.tools) > 0 else "none"
                     session["tools"] = [tool.schema for tool in self.tools.values()]
                     tool_names = [t.get("name", "?") for t in session["tools"]]
@@ -455,7 +468,7 @@ class RTMiddleTier:
             base_url=self.endpoint,
             timeout=_WS_CONNECT_TIMEOUT,
         ) as session:
-            params = { "api-version": self.api_version, "deployment": self.deployment}
+            params = {"model": self.deployment}
             headers = {}
             if "x-ms-client-request-id" in ws.headers:
                 headers["x-ms-client-request-id"] = ws.headers["x-ms-client-request-id"]
@@ -464,7 +477,7 @@ class RTMiddleTier:
             else:
                 headers = { "Authorization": f"Bearer {self._get_auth_token()}" }
             async with session.ws_connect(
-                "/openai/realtime",
+                "/openai/v1/realtime",
                 headers=headers,
                 params=params,
                 heartbeat=_WS_HEARTBEAT_SEC,
@@ -586,9 +599,9 @@ class RTMiddleTier:
                     async for msg in target_ws:
                         if msg.type == aiohttp.WSMsgType.TEXT:
                             data = msg.data
-                            if _MARKER_AUDIO_DELTA in data:
+                            if _MARKER_AUDIO_DELTA in data or _MARKER_AUDIO_DELTA_LEGACY in data:
                                 echo.on_audio_delta(verbose)
-                            elif _MARKER_AUDIO_DONE in data:
+                            elif _MARKER_AUDIO_DONE in data or _MARKER_AUDIO_DONE_LEGACY in data:
                                 echo.on_audio_done(loop, target_ws, verbose)
                             elif _MARKER_SPEECH_STARTED in data:
                                 echo.on_speech_started(verbose)
