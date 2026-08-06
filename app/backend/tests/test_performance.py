@@ -19,7 +19,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from models import OrderItem, OrderSummary
-from order_state import OrderState, order_state_singleton
+from order_state import order_state_singleton
 from rtmt import ToolResult, ToolResultDirection
 
 # ---------------------------------------------------------------------------
@@ -417,8 +417,9 @@ class HealthEndpointTests(unittest.IsolatedAsyncioTestCase):
                  "AZURE_SEARCH_INDEX": "menu-index",
              }):
             mock_rt.return_value = MagicMock()
-            from app import create_app
             from aiohttp.test_utils import TestClient, TestServer
+
+            from app import create_app
 
             app = await create_app()
             async with TestClient(TestServer(app)) as client:
@@ -447,8 +448,9 @@ class CorsConfigTests(unittest.IsolatedAsyncioTestCase):
                  "AZURE_SEARCH_INDEX": "menu-index",
              }):
             mock_rt.return_value = MagicMock()
-            from app import create_app
             from aiohttp.test_utils import TestClient, TestServer
+
+            from app import create_app
 
             app = await create_app()
             async with TestClient(TestServer(app)) as client:

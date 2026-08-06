@@ -11,34 +11,34 @@ import sys
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from aiohttp import web
-from order_state import order_state_singleton
 
-# ── Imports under test ──
-from session_manager import SessionManager, ContextMonitor
 from audio_pipeline import (
-    EchoSuppressor,
-    ECHO_COOLDOWN_SEC,
-    TYPE_RE,
-    RESPONSE_CREATE_MSG,
-    INPUT_AUDIO_CLEAR_MSG,
-    _PASSTHROUGH_SERVER_TYPES,
     _PASSTHROUGH_CLIENT_TYPES,
+    _PASSTHROUGH_SERVER_TYPES,
+    ECHO_COOLDOWN_SEC,
+    INPUT_AUDIO_CLEAR_MSG,
+    RESPONSE_CREATE_MSG,
+    TYPE_RE,
+    EchoSuppressor,
 )
+from order_state import order_state_singleton
 from rtmt import (
     RTMiddleTier,
+    RTToolCall,
     Tool,
     ToolResult,
     ToolResultDirection,
-    RTToolCall,
     create_hmac_token,
     validate_hmac_token,
 )
 
+# ── Imports under test ──
+from session_manager import ContextMonitor, SessionManager
 
 # ── Helpers ──
 
@@ -659,7 +659,7 @@ class ProcessMessageToClientTests(unittest.IsolatedAsyncioTestCase):
         server_ws = _make_mock_ws()
         tools_pending = {}
         order_state_singleton.sessions = {}
-        sid = rtmt._sessions.create_session(client_ws)
+        rtmt._sessions.create_session(client_ws)
 
         msg = MagicMock()
         msg.data = json.dumps({
@@ -697,7 +697,7 @@ class ProcessMessageToClientTests(unittest.IsolatedAsyncioTestCase):
         client_ws = _make_mock_ws()
         server_ws = _make_mock_ws()
         order_state_singleton.sessions = {}
-        sid = rtmt._sessions.create_session(client_ws)
+        rtmt._sessions.create_session(client_ws)
 
         # Register a mock tool
         mock_tool_target = AsyncMock(return_value=ToolResult("tool result", ToolResultDirection.TO_SERVER))
@@ -727,7 +727,7 @@ class ProcessMessageToClientTests(unittest.IsolatedAsyncioTestCase):
         client_ws = _make_mock_ws()
         server_ws = _make_mock_ws()
         order_state_singleton.sessions = {}
-        sid = rtmt._sessions.create_session(client_ws)
+        rtmt._sessions.create_session(client_ws)
 
         mock_tool_target = AsyncMock(return_value=ToolResult(
             "Added 1 Burger", ToolResultDirection.TO_BOTH, client_text='{"items":[]}'

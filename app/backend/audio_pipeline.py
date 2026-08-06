@@ -10,7 +10,7 @@ import logging
 import os
 import pathlib
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from config_loader import get_config
@@ -40,13 +40,13 @@ _LOGS_DIR = pathlib.Path(__file__).parent / "logs"
 def create_verbose_file_handler() -> logging.FileHandler:
     """Create a FileHandler that writes verbose logs to a timestamped file in app/backend/logs/."""
     _LOGS_DIR.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M")
+    ts = datetime.now(UTC).strftime("%Y-%m-%dT%H-%M")
     log_path = _LOGS_DIR / f"verbose-{ts}.log"
     fh = logging.FileHandler(log_path, encoding="utf-8")
     fh.setLevel(logging.DEBUG)
     fh.setFormatter(logging.Formatter("%(message)s"))
     fh.stream.reconfigure(line_buffering=True)  # type: ignore[union-attr]
-    header = f"═══ Verbose Log Started: {datetime.now(timezone.utc).isoformat()} ═══"
+    header = f"═══ Verbose Log Started: {datetime.now(UTC).isoformat()} ═══"
     fh.stream.write(header + "\n")
     fh.stream.flush()
     logger.info("Verbose log file opened: %s", log_path)

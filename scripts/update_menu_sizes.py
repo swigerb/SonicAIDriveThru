@@ -3,7 +3,6 @@ Update menuItems.json to include all size variants from production data.
 Adds Mini and RT 44 sizes to drink/slush/shake/blast items.
 """
 import json
-import re
 from pathlib import Path
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "app" / "frontend" / "src" / "data"
@@ -36,7 +35,7 @@ PRODUCT_SEARCH_MAP = {
 
 
 def load_production_products():
-    with open(PRODUCTION_FILE, "r", encoding="utf-8") as f:
+    with open(PRODUCTION_FILE, encoding="utf-8") as f:
         data = json.load(f)
     menu = list(data["menus"].values())[0]
     return menu.get("products", {})
@@ -81,7 +80,7 @@ def find_sizes_for_product(products, search_term):
 def update_menu():
     products = load_production_products()
 
-    with open(MENU_FILE, "r", encoding="utf-8") as f:
+    with open(MENU_FILE, encoding="utf-8") as f:
         menu_data = json.load(f)
 
     updated_count = 0

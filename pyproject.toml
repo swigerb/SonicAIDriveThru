@@ -3,3 +3,7 @@ target-version = "py312"
 lint.select = ["E", "F", "I", "UP"]
 lint.ignore = ["E501", "E701"]
 src = ["app/backend"]
+
+# Keep aliased imports grouped with their module instead of emitting a
+# separate `from x import (y as z)` statement per alias.
+lint.isort.combine-as-imports = true

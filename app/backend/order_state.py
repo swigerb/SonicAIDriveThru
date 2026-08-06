@@ -6,8 +6,8 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from config_loader import get_config
-from models import OrderItem, OrderSummary
 from menu_utils import infer_category, normalize_size
+from models import OrderItem, OrderSummary
 
 __all__ = ["OrderState", "SessionIdentifiers", "order_state_singleton", "is_happy_hour"]
 

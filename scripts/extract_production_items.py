@@ -93,7 +93,7 @@ def get_size_variants(product, products, product_groups):
 # ── main extraction ──────────────────────────────────────────────────────
 
 def extract_production_items():
-    with open(POS_DATA_PATH, "r", encoding="utf-8") as f:
+    with open(POS_DATA_PATH, encoding="utf-8") as f:
         raw_data = json.load(f)
 
     menu = list(raw_data["menus"].values())[0]
@@ -145,7 +145,7 @@ def extract_production_items():
 
 
 def load_ui_items():
-    with open(UI_MENU_PATH, "r", encoding="utf-8") as f:
+    with open(UI_MENU_PATH, encoding="utf-8") as f:
         data = json.load(f)
     items = []
     for group in data.get("menuItems", []):

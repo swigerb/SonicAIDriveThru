@@ -14,32 +14,32 @@ from aiohttp import web
 from azure.core.credentials import AzureKeyCredential
 from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 
-from config_loader import get_config
-from order_state import order_state_singleton
-from session_manager import SessionManager
 from audio_pipeline import (
-    EchoSuppressor,
-    vlog as _vlog, vlogger,
-    create_verbose_file_handler as _create_verbose_file_handler,
-    remove_verbose_file_handler as _remove_verbose_file_handler,
-    TYPE_RE as _TYPE_RE,
-    RESPONSE_CREATE_MSG as _RESPONSE_CREATE_MSG,
+    _PASSTHROUGH_CLIENT_TYPES,
+    _PASSTHROUGH_SERVER_TYPES,
+    _VERBOSE_GLOBAL,
+    _VERBOSE_RESULT_TRUNCATE,
     INPUT_AUDIO_CLEAR_MSG as _INPUT_AUDIO_CLEAR_MSG,
-    ECHO_COOLDOWN_SEC as _ECHO_COOLDOWN_SEC,
     MARKER_AUDIO_APPEND as _MARKER_AUDIO_APPEND,
     MARKER_AUDIO_DELTA as _MARKER_AUDIO_DELTA,
     MARKER_AUDIO_DONE as _MARKER_AUDIO_DONE,
-    MARKER_SPEECH_STARTED as _MARKER_SPEECH_STARTED,
+    MARKER_LOG_TO_FILE as _MARKER_LOG_TO_FILE,
+    MARKER_RESPONSE_CANCEL as _MARKER_RESPONSE_CANCEL,
     MARKER_SESSION_UPDATE as _MARKER_SESSION_UPDATE,
     MARKER_SESSION_UPDATED as _MARKER_SESSION_UPDATED,
-    MARKER_RESPONSE_CANCEL as _MARKER_RESPONSE_CANCEL,
+    MARKER_SPEECH_STARTED as _MARKER_SPEECH_STARTED,
     MARKER_VERBOSE_LOGGING as _MARKER_VERBOSE_LOGGING,
-    MARKER_LOG_TO_FILE as _MARKER_LOG_TO_FILE,
-    _PASSTHROUGH_SERVER_TYPES,
-    _PASSTHROUGH_CLIENT_TYPES,
-    _VERBOSE_GLOBAL,
-    _VERBOSE_RESULT_TRUNCATE,
+    RESPONSE_CREATE_MSG as _RESPONSE_CREATE_MSG,
+    TYPE_RE as _TYPE_RE,
+    EchoSuppressor,
+    create_verbose_file_handler as _create_verbose_file_handler,
+    remove_verbose_file_handler as _remove_verbose_file_handler,
+    vlog as _vlog,
+    vlogger,
 )
+from config_loader import get_config
+from order_state import order_state_singleton
+from session_manager import SessionManager
 
 logger = logging.getLogger("sonic-drive-in")
 

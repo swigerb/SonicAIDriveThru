@@ -9,17 +9,12 @@ These tests mock the expected interfaces so they pass regardless of whether
 Summer's implementation has landed. Adjust mocks once the real code merges.
 """
 
-import asyncio
 import base64
 import hashlib
 import hmac
-import json
-import os
 import sys
 import time
-import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 

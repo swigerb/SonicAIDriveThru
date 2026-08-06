@@ -1,7 +1,6 @@
 import asyncio
 import json
 import logging
-import os
 import time
 from typing import Any
 
@@ -12,8 +11,8 @@ from azure.search.documents.aio import SearchClient
 from azure.search.documents.models import VectorizableTextQuery
 
 from config_loader import get_config
-from order_state import order_state_singleton, is_happy_hour
-from menu_utils import infer_category as _infer_category, normalize_size, MENU_CATEGORY_MAP
+from menu_utils import infer_category as _infer_category, normalize_size
+from order_state import is_happy_hour, order_state_singleton
 from rtmt import RTMiddleTier, Tool, ToolResult, ToolResultDirection
 
 logger = logging.getLogger(__name__)
@@ -200,7 +199,7 @@ async def search(
             vector_queries=vector_queries or None,
             select=select_fields,
         ), timeout=_search_cfg.get("timeout_seconds", 10))
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.error("Azure AI Search timed out for query '%s'", query)
         _err = _prompt_loader.render_error("search_service_unavailable") if _prompt_loader else "I'm having trouble reaching our menu right now — could you try that again?"
         return ToolResult(_err, ToolResultDirection.TO_SERVER)

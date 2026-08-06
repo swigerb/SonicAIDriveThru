@@ -1,5 +1,7 @@
 import asyncio
+
 from order_state import order_state_singleton
+
 
 async def test_combo_logic():
     # 1. Start a new session

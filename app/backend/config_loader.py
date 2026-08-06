@@ -4,7 +4,6 @@ Loads config.yaml once at startup and exposes it via get_config().
 Fail-fast: raises on missing or malformed config file.
 """
 
-import os
 from pathlib import Path
 from typing import Any
 

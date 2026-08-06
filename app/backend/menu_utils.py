@@ -10,7 +10,6 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Dict
 
 __all__ = [
     "SIZE_MAP",
@@ -25,7 +24,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Canonical size map  (display-ready values)
 # ---------------------------------------------------------------------------
-SIZE_MAP: Dict[str, str] = {
+SIZE_MAP: dict[str, str] = {
     "mini": "Mini",
     "small": "Small",
     "medium": "Medium",
@@ -36,7 +35,7 @@ SIZE_MAP: Dict[str, str] = {
 }
 
 # Aliases that normalise to a canonical key above
-SIZE_ALIASES: Dict[str, str] = {
+SIZE_ALIASES: dict[str, str] = {
     "s": "small",
     "m": "medium",
     "l": "large",
@@ -71,7 +70,7 @@ def normalize_size(size: str) -> str:
 # ---------------------------------------------------------------------------
 # Menu category map (loaded once from menuItems.json)
 # ---------------------------------------------------------------------------
-def _load_menu_category_map() -> Dict[str, str]:
+def _load_menu_category_map() -> dict[str, str]:
     env_override = (
         os.environ.get("SONIC_MENU_ITEMS_PATH")
         or os.environ.get("MENU_ITEMS_PATH")
@@ -90,7 +89,7 @@ def _load_menu_category_map() -> Dict[str, str]:
     try:
         with menu_path.open("r", encoding="utf-8") as f:
             data = json.load(f)
-        mapping: Dict[str, str] = {}
+        mapping: dict[str, str] = {}
         for category_entry in data.get("menuItems", []):
             category = category_entry.get("category", "").strip().lower()
             for item in category_entry.get("items", []):
@@ -103,7 +102,7 @@ def _load_menu_category_map() -> Dict[str, str]:
         return {}
 
 
-MENU_CATEGORY_MAP: Dict[str, str] = _load_menu_category_map()
+MENU_CATEGORY_MAP: dict[str, str] = _load_menu_category_map()
 
 
 def infer_category(item_name: str) -> str:

@@ -41,6 +41,14 @@ Series of debugging and feature work across demo readiness, debugging sprint, an
 
 ## Learnings — Current (Phase 7)
 
+### 2026-08-06: Ruff Lint Cleanup — 70 Errors → 0
+- **Baseline:** 70 ruff errors across backend + scripts (F401×29, I001×13, F541×6, UP015×6, UP006×5, F841×5, UP017×2, UP035×2, E402×1, UP041×1). 354 tests passing.
+- **Auto-fixed (66):** `ruff check . --fix` handled all F401 (unused imports), I001 (import sorting), F541 (empty f-strings), UP006 (Dict→dict annotations), UP015 (redundant open modes), UP017 (timezone.utc→UTC alias), UP035 (typing.Dict→dict), UP041 (TimeoutError alias). Zero test regressions.
+- **Hand-fixed (4):** F841×5 — three `sid = create_session()` in test_rtmt.py were side-effect calls (removed assignment); two `response = upload_documents()` in notebooks were side-effect calls (renamed to `_`). None were latent bugs. E402×1 — `from collections import Counter` mid-cell in notebook, suppressed with `# noqa: E402, I001` (legitimate placement near usage in 150-line data-processing cell).
+- **No global ignores added.** All suppressions are targeted per-line noqa with justification.
+- **Key Insight:** The test_rebrand_verification.py branding guard was safe — its f-strings without placeholders were just `f"message"` strings that ruff correctly converted to plain strings; the test's scanning constants were not affected.
+- **Test Results:** 354/354 passing after all changes. Zero regressions.
+
 ### 2026-08-06: Dependency Update Sprint — Security + Version Bumps
 - **Security-Critical Upgrades:** aiohttp 3.10.11→3.14.3 (33+ CVEs including PYSEC-2026-2102, PYSEC-2026-3545, PYSEC-2026-237), python-dotenv 1.0.1→1.2.2 (PYSEC-2026-2270), cryptography ≥50.0.0 added as floor pin (9 CVEs in transitive 46.0.0). pip-audit now reports zero known vulnerabilities.
 - **Major Bumps Taken:** azure-search-documents 11.6.0→12.0.0 (verified: breaking changes only affect beta API users, not our `SearchClient`/`VectorizableTextQuery` surface in tools.py), azure-identity 1.19.0→1.25.3, azure-storage-blob 12.24.0→12.30.0, cffi 1.17.1→2.1.1 (required by cryptography ≥50), rich 13.9.4→15.0.0 (only used in setup_intvect.py).
