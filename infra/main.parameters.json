@@ -33,7 +33,7 @@
       "value": "${AZURE_OPENAI_REALTIME_DEPLOYMENT}"
     },
     "openAiRealtimeVoiceChoice": {
-      "value": "${AZURE_OPENAI_REALTIME_VOICE_CHOICE=coral}"
+      "value": "${AZURE_OPENAI_REALTIME_VOICE_CHOICE=shimmer}"
     },
     "searchIndexName": {
       "value": "${AZURE_SEARCH_INDEX=sonic-menu-items}"

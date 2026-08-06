@@ -123,6 +123,86 @@ class RTToolCall:
         self.tool_call_id = tool_call_id
         self.previous_id = previous_id
 
+
+# Session keys the GA realtime API accepts at the top level. Anything else that
+# the legacy (2024-10-01-preview) clients send is dropped, because GA rejects
+# unknown parameters outright instead of ignoring them.
+_GA_SESSION_TOP_LEVEL = frozenset({
+    "type", "model", "instructions", "tools", "tool_choice",
+    "max_output_tokens", "output_modalities", "audio", "tracing",
+    "include", "prompt", "truncation",
+})
+
+# Legacy audio formats were bare strings ("pcm16"); GA expects an object.
+_GA_AUDIO_FORMATS = {
+    "pcm16": {"type": "audio/pcm", "rate": 24000},
+    "g711_ulaw": {"type": "audio/pcmu"},
+    "g711_alaw": {"type": "audio/pcma"},
+}
+
+
+def _ga_audio_format(value: Any) -> Any:
+    if isinstance(value, str):
+        return _GA_AUDIO_FORMATS.get(value, {"type": "audio/pcm", "rate": 24000})
+    return value
+
+
+def _to_ga_session(session: dict) -> dict:
+    """Translate a legacy realtime `session` object into the GA shape.
+
+    The browser client speaks the 2024-10-01-preview dialect. The GA endpoint
+    moved most audio settings under `audio.input` / `audio.output`, renamed a
+    couple of fields, requires a `type` discriminator, and errors on unknown
+    parameters rather than ignoring them. Doing the translation here keeps the
+    client contract stable and keeps the failure modes in one place.
+    """
+    ga: dict = dict(session)
+    audio: dict = dict(ga.get("audio") or {})
+    audio_in: dict = dict(audio.get("input") or {})
+    audio_out: dict = dict(audio.get("output") or {})
+
+    # input side
+    if (turn_detection := ga.pop("turn_detection", None)) is not None:
+        audio_in["turn_detection"] = turn_detection
+    if (transcription := ga.pop("input_audio_transcription", None)) is not None:
+        audio_in["transcription"] = transcription
+    if (in_fmt := ga.pop("input_audio_format", None)) is not None:
+        audio_in["format"] = _ga_audio_format(in_fmt)
+    if (noise := ga.pop("input_audio_noise_reduction", None)) is not None:
+        audio_in["noise_reduction"] = noise
+
+    # output side
+    if (voice := ga.pop("voice", None)) is not None:
+        audio_out["voice"] = voice
+    if (out_fmt := ga.pop("output_audio_format", None)) is not None:
+        audio_out["format"] = _ga_audio_format(out_fmt)
+    if (speed := ga.pop("speed", None)) is not None:
+        audio_out["speed"] = speed
+
+    # renamed top-level fields
+    if (max_tokens := ga.pop("max_response_output_tokens", None)) is not None:
+        ga["max_output_tokens"] = max_tokens
+    if (modalities := ga.pop("modalities", None)) is not None:
+        ga["output_modalities"] = modalities
+
+    if audio_in:
+        audio["input"] = audio_in
+    if audio_out:
+        audio["output"] = audio_out
+    if audio:
+        ga["audio"] = audio
+
+    ga["type"] = "realtime"
+
+    # `temperature` and `disable_audio` are not part of the GA session object.
+    dropped = [k for k in ga if k not in _GA_SESSION_TOP_LEVEL]
+    for key in dropped:
+        ga.pop(key)
+    if dropped:
+        logger.debug("session.update: dropped non-GA keys %s", dropped)
+
+    return ga
+
 class RTMiddleTier:
     endpoint: str
     deployment: str
@@ -426,17 +506,20 @@ class RTMiddleTier:
                     if self.disable_audio is not None:
                         session["disable_audio"] = self.disable_audio
                     if self.voice_choice is not None:
-                        # Set voice in both legacy and GA locations
                         session["voice"] = self.voice_choice
-                        audio = session.setdefault("audio", {})
-                        audio.setdefault("output", {})["voice"] = self.voice_choice
                     session["tool_choice"] = "auto" if len(self.tools) > 0 else "none"
                     session["tools"] = [tool.schema for tool in self.tools.values()]
                     tool_names = [t.get("name", "?") for t in session["tools"]]
+                    # Clients speak the legacy (2024-10-01-preview) session shape.
+                    # Translate to the GA shape here so the browser contract is
+                    # unchanged, and so unsupported legacy keys are dropped rather
+                    # than rejected outright by the server.
+                    session = _to_ga_session(session)
+                    message["session"] = session
                     logger.info(
                         "session.update: injected %d tools %s, tool_choice=%s, max_tokens=%s",
                         len(session["tools"]), tool_names, session["tool_choice"],
-                        session.get("max_response_output_tokens"),
+                        session.get("max_output_tokens"),
                     )
                     _vlog(verbose, "  Injected %d tools: %s, tool_choice=%s",
                           len(session["tools"]), tool_names, session["tool_choice"])

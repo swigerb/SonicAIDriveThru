@@ -5,7 +5,9 @@
 model:
   temperature: 0.6
   max_response_output_tokens: 4096
-  default_voice: "coral"
+  # Soft, calm female voice for the carhop persona. `marin` and `cedar` are the
+  # newer high-fidelity GA voices; `shimmer` and `sage` are the calmer classics.
+  default_voice: "shimmer"
 
 vad:
   type: "server_vad"

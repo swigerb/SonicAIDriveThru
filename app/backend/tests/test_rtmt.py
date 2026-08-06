@@ -632,11 +632,46 @@ class ProcessMessageToServerTests(unittest.IsolatedAsyncioTestCase):
         })
         result = await rtmt._process_message_to_server(msg, ws)
         parsed = json.loads(result)
-        self.assertEqual(parsed["session"]["instructions"], "You are a carhop.")
-        self.assertEqual(parsed["session"]["temperature"], 0.6)
-        self.assertEqual(parsed["session"]["voice"], "coral")
-        self.assertEqual(parsed["session"]["tool_choice"], "auto")
-        self.assertEqual(len(parsed["session"]["tools"]), 1)
+        session = parsed["session"]
+        self.assertEqual(session["instructions"], "You are a carhop.")
+        self.assertEqual(session["tool_choice"], "auto")
+        self.assertEqual(len(session["tools"]), 1)
+        # GA shape: discriminator present, voice nested under audio.output,
+        # and `temperature` dropped because GA rejects unknown parameters.
+        self.assertEqual(session["type"], "realtime")
+        self.assertEqual(session["audio"]["output"]["voice"], "coral")
+        self.assertNotIn("temperature", session)
+        self.assertNotIn("voice", session)
+
+    async def test_session_update_translates_legacy_audio_keys(self):
+        rtmt = self._make_rtmt()
+        ws = _make_mock_ws()
+        order_state_singleton.sessions = {}
+        rtmt._sessions.create_session(ws)
+
+        msg = MagicMock()
+        msg.data = json.dumps({
+            "type": "session.update",
+            "session": {
+                "turn_detection": {"type": "server_vad", "threshold": 0.7},
+                "input_audio_transcription": {"model": "whisper-1"},
+                "input_audio_format": "pcm16",
+                "modalities": ["audio", "text"],
+            },
+        })
+        result = await rtmt._process_message_to_server(msg, ws)
+        session = json.loads(result)["session"]
+
+        self.assertEqual(session["audio"]["input"]["turn_detection"]["type"], "server_vad")
+        self.assertEqual(session["audio"]["input"]["transcription"]["model"], "whisper-1")
+        self.assertEqual(session["audio"]["input"]["format"], {"type": "audio/pcm", "rate": 24000})
+        self.assertEqual(session["output_modalities"], ["audio", "text"])
+        self.assertEqual(session["max_output_tokens"], rtmt.max_tokens)
+        # Legacy keys must not survive — GA errors on unknown parameters.
+        for legacy in ("turn_detection", "input_audio_transcription",
+                       "input_audio_format", "modalities",
+                       "max_response_output_tokens", "disable_audio"):
+            self.assertNotIn(legacy, session)
 
     async def test_passthrough_client_audio_not_parsed(self):
         rtmt = self._make_rtmt()
