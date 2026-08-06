@@ -1,7 +1,7 @@
 # ---------------------------------------------------------------------------
 # Stage 1: Build the Vite/React frontend
 # ---------------------------------------------------------------------------
-FROM node:20-slim AS build-stage
+FROM node:22-slim AS build-stage
 
 WORKDIR /frontend
 

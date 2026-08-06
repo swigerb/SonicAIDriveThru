@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useMemo, useCallback, lazy, Suspense, memo } from "react";
-import { Mic, MicOff, Menu, MessageSquare, LogOut, Github, ChevronDown } from "lucide-react";
+import { Mic, MicOff, Menu, MessageSquare, LogOut, ChevronDown } from "lucide-react";
+import { FaGithub } from "react-icons/fa";
 import { AnimatePresence, motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
@@ -349,7 +350,7 @@ function SonicApp() {
                         className="inline-flex items-center gap-1 rounded-full bg-white/80 px-3 py-1 text-primary transition hover:text-accent"
                         title="View Sonic Voice Ordering source"
                     >
-                        <Github className="h-4 w-4" />
+                        <FaGithub className="h-4 w-4" />
                         <span>Source on GitHub</span>
                     </a>
                     <div className="flex items-center gap-2">
