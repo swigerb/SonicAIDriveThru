@@ -213,6 +213,9 @@ module acaBackend 'core/host/container-app-upsert.bicep' = {
       AZURE_SEARCH_TITLE_FIELD: searchTitleField
       AZURE_SEARCH_EMBEDDING_FIELD: searchEmbeddingField
       AZURE_SEARCH_USE_VECTOR_QUERY: searchUseVectorQuery
+      // Free SKU has no semantic ranker; the app must not request one or every
+      // query returns HTTP 400.
+      AZURE_SEARCH_SEMANTIC_RANKER: actualSearchServiceSemanticRankerLevel
       AZURE_OPENAI_EASTUS2_ENDPOINT: reuseExistingOpenAi ? openAiEndpoint : openAi.outputs.endpoint
       AZURE_OPENAI_REALTIME_DEPLOYMENT: reuseExistingOpenAi ? openAiRealtimeDeployment : openAiDeployments[0].name
       AZURE_OPENAI_REALTIME_VOICE_CHOICE: openAiRealtimeVoiceChoice

@@ -228,8 +228,10 @@ async def create_app() -> web.Application:
         title_field=os.environ.get("AZURE_SEARCH_TITLE_FIELD") or "name",
         use_vector_query=_get_bool_env("AZURE_SEARCH_USE_VECTOR_QUERY", True),
         # The free search SKU has no semantic ranker; asking for one returns
-        # HTTP 400 on every query. main.bicep emits the effective level.
-        use_semantic_ranker=(os.environ.get("AZURE_SEARCH_SEMANTIC_RANKER") or "free").lower() != "disabled",
+        # HTTP 400 on every query. main.bicep emits the effective level. If the
+        # variable is absent we assume the ranker exists and rely on the
+        # runtime fallback in tools.search to recover.
+        use_semantic_ranker=(os.environ.get("AZURE_SEARCH_SEMANTIC_RANKER") or "standard").lower() != "disabled",
         prompt_loader=prompt_loader,
     )
 

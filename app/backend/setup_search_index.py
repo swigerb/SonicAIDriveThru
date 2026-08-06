@@ -21,8 +21,8 @@ from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 from azure.search.documents import SearchClient
 from azure.search.documents.indexes import SearchIndexClient
 from azure.search.documents.indexes.models import (
-    AzureOpenAIParameters,
     AzureOpenAIVectorizer,
+    AzureOpenAIVectorizerParameters,
     HnswAlgorithmConfiguration,
     HnswParameters,
     SearchField,
@@ -169,9 +169,9 @@ def create_or_update_index(
             vectorizers=[
                 AzureOpenAIVectorizer(
                     vectorizer_name="menuVectorizer",
-                    azure_open_ai_parameters=AzureOpenAIParameters(
-                        resource_uri=openai_endpoint,
-                        deployment_id=embedding_deployment,
+                    parameters=AzureOpenAIVectorizerParameters(
+                        resource_url=openai_endpoint,
+                        deployment_name=embedding_deployment,
                         model_name=EMBEDDING_MODEL,
                     ),
                 ),
