@@ -162,6 +162,7 @@ async def search(
     embedding_field: str,
     use_vector_query: bool,
     args: Any,
+    use_semantic_ranker: bool = True,
 ) -> ToolResult:
     """Execute a hybrid Azure AI Search query with caching and safe fallbacks."""
 
@@ -190,14 +191,25 @@ async def search(
 
     _top = _search_cfg.get("top_results", 3)
 
+    # The semantic ranker is a service-level capability and is unavailable on the
+    # free search SKU. Issuing query_type="semantic" against a service without it
+    # returns HTTP 400 rather than degrading, which would fail every menu lookup,
+    # so only ask for it when the deployment actually provides it.
+    def _query_kwargs(semantic: bool) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {"query_type": "semantic"} if semantic else {}
+        if semantic:
+            kwargs["semantic_configuration_name"] = semantic_configuration
+        return kwargs
+
+    semantic_enabled = bool(use_semantic_ranker and semantic_configuration)
+
     try:
         search_results = await asyncio.wait_for(search_client.search(
             search_text=query,
-            query_type="semantic",
-            semantic_configuration_name=semantic_configuration,
             top=_top,
             vector_queries=vector_queries or None,
             select=select_fields,
+            **_query_kwargs(semantic_enabled),
         ), timeout=_search_cfg.get("timeout_seconds", 10))
     except TimeoutError:
         logger.error("Azure AI Search timed out for query '%s'", query)
@@ -210,11 +222,21 @@ async def search(
             fallback_select = [identifier_field or "id", content_field or "description"]
             search_results = await asyncio.wait_for(search_client.search(
                 search_text=query,
-                query_type="semantic",
-                semantic_configuration_name=semantic_configuration,
                 top=_top,
                 vector_queries=vector_queries or None,
                 select=[f for f in fallback_select if f],
+                **_query_kwargs(semantic_enabled),
+            ), timeout=_search_cfg.get("timeout_seconds", 10))
+        elif semantic_enabled and "semantic" in str(exc).lower():
+            # Belt and braces: the service rejected the semantic query even though
+            # configuration said it was available (e.g. the SKU was changed after
+            # deployment). Retry without the ranker rather than failing the lookup.
+            logger.warning("Semantic ranker unavailable, retrying without it: %s", exc)
+            search_results = await asyncio.wait_for(search_client.search(
+                search_text=query,
+                top=_top,
+                vector_queries=vector_queries or None,
+                select=select_fields,
             ), timeout=_search_cfg.get("timeout_seconds", 10))
         else:
             logger.error("Azure AI Search request failed: %s", exc)
@@ -525,6 +547,7 @@ def attach_tools_rtmt(
     title_field: str,
     use_vector_query: bool,
     prompt_loader=None,
+    use_semantic_ranker: bool = True,
 ) -> None:
     """Attach search and order tools to the RTMiddleTier instance."""
     global _prompt_loader
@@ -541,7 +564,7 @@ def attach_tools_rtmt(
         credentials.get_token("https://search.azure.com/.default")  # warm up prior to first call
     search_client = SearchClient(search_endpoint, search_index, credentials, user_agent="RTMiddleTier")
 
-    rtmt.tools["search"] = Tool(schema=schema_map.get("search", search_tool_schema), target=lambda args: search(search_client, semantic_configuration, identifier_field, content_field, embedding_field, use_vector_query, args))
+    rtmt.tools["search"] = Tool(schema=schema_map.get("search", search_tool_schema), target=lambda args: search(search_client, semantic_configuration, identifier_field, content_field, embedding_field, use_vector_query, args, use_semantic_ranker))
     rtmt.tools["update_order"] = Tool(schema=schema_map.get("update_order", update_order_tool_schema), target=lambda args, session_id: update_order(args, session_id))
     rtmt.tools["get_order"] = Tool(schema=schema_map.get("get_order", get_order_tool_schema), target=lambda args, session_id: get_order(args, session_id))
     rtmt.tools["reset_order"] = Tool(schema=schema_map.get("reset_order", reset_order_tool_schema), target=lambda args, session_id: reset_order(args, session_id))

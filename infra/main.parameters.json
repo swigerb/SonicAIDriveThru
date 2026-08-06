@@ -39,19 +39,19 @@
       "value": "${AZURE_SEARCH_INDEX=sonic-menu-items}"
     },
     "searchSemanticConfiguration":{
-      "value": "${AZURE_SEARCH_SEMANTIC_CONFIGURATION=default}"
+      "value": "${AZURE_SEARCH_SEMANTIC_CONFIGURATION=menuSemanticConfig}"
     },
     "searchIdentifierField": {
-      "value": "${AZURE_SEARCH_IDENTIFIER_FIELD=chunk_id}"
+      "value": "${AZURE_SEARCH_IDENTIFIER_FIELD=id}"
     },
     "searchContentField": {
-      "value": "${AZURE_SEARCH_CONTENT_FIELD=chunk}"
+      "value": "${AZURE_SEARCH_CONTENT_FIELD=description}"
     },
     "searchTitleField": {
-      "value": "${AZURE_SEARCH_TITLE_FIELD=title}"
+      "value": "${AZURE_SEARCH_TITLE_FIELD=name}"
     },
     "searchEmbeddingField": {
-      "value": "${AZURE_SEARCH_EMBEDDING_FIELD=text_vector}"
+      "value": "${AZURE_SEARCH_EMBEDDING_FIELD=embedding}"
     },
     "searchUseVectorQuery": {
       "value": "${AZURE_SEARCH_USE_VECTOR_QUERY=true}"

@@ -138,5 +138,82 @@ class SearchToolTests(unittest.TestCase):
         self.assertIn("[5]", result.text)
 
 
+class SemanticRankerAvailabilityTests(unittest.TestCase):
+    """The free search SKU has no semantic ranker.
+
+    Sending query_type="semantic" to a service without it returns HTTP 400 for
+    every query rather than degrading, so the app must only request the ranker
+    when the deployment actually provides it.
+    """
+
+    def setUp(self):
+        _search_cache.clear()
+
+    def _capture_client(self, records):
+        captured = {}
+
+        async def _fake_search(**kwargs):
+            captured.update(kwargs)
+
+            async def _async_iter():
+                for r in records:
+                    yield r
+
+            return _async_iter()
+
+        client = AsyncMock()
+        client.search = _fake_search
+        return client, captured
+
+    def test_semantic_requested_when_ranker_available(self):
+        client, captured = self._capture_client([{"id": "1", "name": "Cherry Limeade"}])
+        asyncio.run(
+            search(client, "menuSemanticConfig", "id", "description", "embedding", False,
+                   {"query": "limeade"}, True)
+        )
+        self.assertEqual(captured.get("query_type"), "semantic")
+        self.assertEqual(captured.get("semantic_configuration_name"), "menuSemanticConfig")
+
+    def test_semantic_omitted_when_ranker_disabled(self):
+        client, captured = self._capture_client([{"id": "1", "name": "Cherry Limeade"}])
+        result = asyncio.run(
+            search(client, "menuSemanticConfig", "id", "description", "embedding", False,
+                   {"query": "limeade"}, False)
+        )
+        # Neither key may be sent, or the free-tier service rejects the request.
+        self.assertNotIn("query_type", captured)
+        self.assertNotIn("semantic_configuration_name", captured)
+        self.assertIn("[1]", result.text)
+
+    def test_semantic_rejection_falls_back_instead_of_failing(self):
+        from azure.core.exceptions import HttpResponseError
+
+        records = [{"id": "7", "name": "Tots", "description": "Crispy"}]
+        calls = []
+
+        async def _search(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise HttpResponseError(message="Semantic search is not enabled for this service")
+
+            async def _async_iter():
+                for r in records:
+                    yield r
+
+            return _async_iter()
+
+        client = AsyncMock()
+        client.search = _search
+
+        result = asyncio.run(
+            search(client, "menuSemanticConfig", "id", "description", "embedding", False,
+                   {"query": "tots"}, True)
+        )
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0].get("query_type"), "semantic")
+        self.assertNotIn("query_type", calls[1])
+        self.assertIn("[7]", result.text)
+
+
 if __name__ == "__main__":
     unittest.main()

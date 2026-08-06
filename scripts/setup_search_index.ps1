@@ -7,6 +7,6 @@ if (Test-Path -Path "/usr") {
 }
 
 # Define the path to the Python script
-$pythonScriptPath = "app/backend/setup_intvect.py"
+$pythonScriptPath = "app/backend/setup_search_index.py"
 
 Start-Process -FilePath $venvPythonPath -ArgumentList $pythonScriptPath -Wait -NoNewWindow

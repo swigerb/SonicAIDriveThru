@@ -420,6 +420,10 @@ output AZURE_SEARCH_CONTENT_FIELD string = searchContentField
 output AZURE_SEARCH_TITLE_FIELD string = searchTitleField
 output AZURE_SEARCH_EMBEDDING_FIELD string = searchEmbeddingField
 output AZURE_SEARCH_USE_VECTOR_QUERY bool = searchUseVectorQuery
+// Surfaces the *effective* ranker level so the app knows whether it may issue
+// semantic queries. On the free SKU this resolves to 'disabled', and sending
+// query_type="semantic" to a service without the ranker returns HTTP 400.
+output AZURE_SEARCH_SEMANTIC_RANKER string = actualSearchServiceSemanticRankerLevel
 
 output AZURE_STORAGE_ENDPOINT string = 'https://${storage.outputs.name}.blob.core.windows.net'
 output AZURE_STORAGE_ACCOUNT string = storage.outputs.name
