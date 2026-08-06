@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "teamRoot": "C:\\Users\\brswig\\source\\repos\\SonicAIDriveThru",
+  "teamRoot": ".",
   "agentModelOverrides": {
     "rick": "claude-opus-4.6",
     "morty": "claude-opus-4.6",
