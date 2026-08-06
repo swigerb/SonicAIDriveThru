@@ -20,15 +20,40 @@ export interface SwitchProps extends Omit<React.InputHTMLAttributes<HTMLInputEle
     onCheckedChange: (checked: boolean) => void;
 }
 
+const thumbConfig = {
+    sm: { size: "h-4 w-4", checked: "translate-x-4" },
+    default: { size: "h-5 w-5", checked: "translate-x-5" },
+    lg: { size: "h-6 w-6", checked: "translate-x-7" }
+} as const;
+
 const Switch = React.forwardRef<HTMLInputElement, SwitchProps>(({ id, checked, onCheckedChange, className, size, ...props }, ref) => {
+    const thumb = thumbConfig[size ?? "default"];
+
     return (
         <label className={cn(switchVariants({ size, className }))}>
-            <input type="checkbox" id={id} checked={checked} onChange={e => onCheckedChange(e.target.checked)} className="sr-only" ref={ref} {...props} />
-            <div className={`h-full w-full rounded-full ${checked ? "bg-purple-500" : "bg-gray-200 dark:bg-gray-400"} relative`}>
+            <input
+                type="checkbox"
+                id={id}
+                checked={checked}
+                onChange={e => onCheckedChange(e.target.checked)}
+                className="peer sr-only"
+                ref={ref}
+                {...props}
+            />
+            <div
+                className={cn(
+                    "h-full w-full rounded-full relative transition-colors duration-200 ease-in-out",
+                    checked ? "bg-primary" : "bg-input",
+                    "peer-focus-visible:ring-2 peer-focus-visible:ring-ring peer-focus-visible:ring-offset-2 peer-focus-visible:ring-offset-background"
+                )}
+            >
                 <div
-                    className={`absolute left-[2px] top-0.5 h-5 w-5 rounded-full border border-gray-300 bg-white ${checked ? "translate-x-full" : ""}`}
-                    style={{ transform: checked ? "translateX(calc(100% - 2px))" : "translateX(0)" }}
-                ></div>
+                    className={cn(
+                        "absolute left-[2px] top-[2px] rounded-full bg-white shadow-sm transition-transform duration-200 ease-in-out",
+                        thumb.size,
+                        checked && thumb.checked
+                    )}
+                />
             </div>
         </label>
     );

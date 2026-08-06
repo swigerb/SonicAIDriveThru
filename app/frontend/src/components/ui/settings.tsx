@@ -68,9 +68,9 @@ export default function Settings({ isMobile, showSessionTokens, onShowSessionTok
                     </Label>
                     <p className="text-sm text-gray-600 dark:text-gray-400">Toggle between light and dark theme</p>
                 </div>
-                <div className="ml-4 flex flex-col items-end">
+                <div className="ml-4 flex items-center gap-3 shrink-0">
+                    <span className="min-w-[5rem] text-right text-xs text-muted-foreground">{isDarkMode ? "Dark Mode" : "Light Mode"}</span>
                     <Switch id="dark-mode" checked={isDarkMode} onCheckedChange={handleDarkModeChange} aria-label="Toggle dark mode" />
-                    <span className="text-xs text-gray-500 dark:text-gray-400">{isDarkMode ? "Dark Mode" : "Light Mode"}</span>
                 </div>
             </div>
             <div className="flex items-start justify-between">
@@ -82,7 +82,8 @@ export default function Settings({ isMobile, showSessionTokens, onShowSessionTok
                         Toggle between Azure OpenAI real-time API and Azure Speech SDK (STT, LLM(GPT-4o), TTS)
                     </p>
                 </div>
-                <div className="ml-4 flex flex-col items-end">
+                <div className="ml-4 flex items-center gap-3 shrink-0">
+                    <span className="min-w-[5rem] text-right text-xs text-muted-foreground">{useAzureSpeechOn ? "STT->LLM->TTS" : "Realtime API"}</span>
                     <Tooltip content="Work in progress">
                         <div>
                             <Switch
@@ -94,7 +95,6 @@ export default function Settings({ isMobile, showSessionTokens, onShowSessionTok
                             />
                         </div>
                     </Tooltip>
-                    <span className="text-xs text-gray-500 dark:text-gray-400">{useAzureSpeechOn ? "STT->LLM->TTS" : "Realtime API"}</span>
                 </div>
             </div>
             <div className="flex items-start justify-between">
@@ -104,9 +104,9 @@ export default function Settings({ isMobile, showSessionTokens, onShowSessionTok
                     </Label>
                     <p className="text-sm text-gray-600 dark:text-gray-400">Toggle between real data and dummy data</p>
                 </div>
-                <div className="ml-4 flex flex-col items-end">
+                <div className="ml-4 flex items-center gap-3 shrink-0">
+                    <span className="min-w-[5rem] text-right text-xs text-muted-foreground">{useDummyData ? "Dummy Data" : "Real Data"}</span>
                     <Switch id="dummy-data" checked={useDummyData} onCheckedChange={handleDummyDataChange} aria-label="Toggle dummy data" />
-                    <span className="text-xs text-gray-500 dark:text-gray-400">{useDummyData ? "Dummy Data" : "Real Data"}</span>
                 </div>
             </div>
             <div className="flex items-start justify-between">
@@ -116,14 +116,14 @@ export default function Settings({ isMobile, showSessionTokens, onShowSessionTok
                     </Label>
                     <p className="text-sm text-gray-600 dark:text-gray-400">Toggle visibility of session token and round-trip IDs</p>
                 </div>
-                <div className="ml-4 flex flex-col items-end">
+                <div className="ml-4 flex items-center gap-3 shrink-0">
+                    <span className="min-w-[5rem] text-right text-xs text-muted-foreground">{showSessionTokens ? "Visible" : "Hidden"}</span>
                     <Switch
                         id="session-token-visibility"
                         checked={showSessionTokens}
                         onCheckedChange={handleSessionTokensChange}
                         aria-label="Toggle session token visibility"
                     />
-                    <span className="text-xs text-gray-500 dark:text-gray-400">{showSessionTokens ? "Visible" : "Hidden"}</span>
                 </div>
             </div>
             <div className="flex items-start justify-between">
@@ -135,14 +135,14 @@ export default function Settings({ isMobile, showSessionTokens, onShowSessionTok
                         Show detailed conversation traces, tool calls, and system messages in the terminal
                     </p>
                 </div>
-                <div className="ml-4 flex flex-col items-end">
+                <div className="ml-4 flex items-center gap-3 shrink-0">
+                    <span className="min-w-[5rem] text-right text-xs text-muted-foreground">{verboseLogging ? "Verbose" : "Normal"}</span>
                     <Switch
                         id="verbose-logging"
                         checked={verboseLogging}
                         onCheckedChange={handleVerboseLoggingChange}
                         aria-label="Toggle verbose logging"
                     />
-                    <span className="text-xs text-gray-500 dark:text-gray-400">{verboseLogging ? "Verbose" : "Normal"}</span>
                 </div>
             </div>
             {verboseLogging && (
@@ -155,14 +155,14 @@ export default function Settings({ isMobile, showSessionTokens, onShowSessionTok
                             Save verbose logs to a text file on the server for later review
                         </p>
                     </div>
-                    <div className="ml-4 flex flex-col items-end">
+                    <div className="ml-4 flex items-center gap-3 shrink-0">
+                        <span className="min-w-[5rem] text-right text-xs text-muted-foreground">{logToFile ? "File logging" : "Off"}</span>
                         <Switch
                             id="log-to-file"
                             checked={logToFile}
                             onCheckedChange={handleLogToFileChange}
                             aria-label="Toggle log to file"
                         />
-                        <span className="text-xs text-gray-500 dark:text-gray-400">{logToFile ? "File logging" : "Off"}</span>
                     </div>
                 </div>
             )}

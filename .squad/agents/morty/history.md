@@ -136,3 +136,24 @@ Fixed `useAzureSpeech.tsx`: (1) `onReceivedToolResponse` parameter was declared 
 - CSS size: 34.58 kB → 50.15 kB (gzip: 7.19 → 9.20 kB) — increase from expanded v4 preflight and compatibility layer; brand colours and animations verified present in output
 
 **Result:** `npm run build` succeeds (tsc + vite), `npm test` = 13/13 passing. No `@ts-ignore`, no `any` casts, no skipped tests.
+
+### 2026-08-06: Switch Component Brand Fix & Settings Layout Cleanup
+
+**Issue:** Settings dialog toggles used hardcoded `bg-purple-500` (off-brand) and state labels stacked vertically under switches causing crowded, inconsistent row heights. No transition animation or keyboard focus indicator.
+
+**Switch component (`switch.tsx`) fixes:**
+- Replaced `bg-purple-500` with `bg-primary` semantic token → resolves to Sonic Cherry Red `hsl(341,100%,45%)` in light mode, `hsl(341,100%,55%)` in dark mode
+- Replaced `bg-gray-200 dark:bg-gray-400` unchecked state with `bg-input` theme token for consistent light/dark theming
+- Removed conflicting inline `style={{ transform }}` and `translate-x-full` class — now uses size-aware Tailwind translate classes (`translate-x-4`/`translate-x-5`/`translate-x-7` for sm/default/lg)
+- Added `transition-colors duration-200 ease-in-out` on track and `transition-transform duration-200 ease-in-out` on thumb for smooth toggle animation
+- Added `peer` class on input + `peer-focus-visible:ring-2 peer-focus-visible:ring-ring peer-focus-visible:ring-offset-2 peer-focus-visible:ring-offset-background` on track for keyboard focus indicator
+- Removed `border border-gray-300` from thumb, added `shadow-sm` for cleaner modern look
+- Created `thumbConfig` lookup for size-dependent thumb dimensions and translations
+
+**Settings layout (`settings.tsx`) fixes:**
+- Changed right column from `flex flex-col items-end` (vertical stack) to `flex items-center gap-3 shrink-0` (horizontal inline)
+- State labels now sit to the LEFT of switches with `min-w-[5rem] text-right` for consistent column alignment
+- Replaced hardcoded `text-gray-500 dark:text-gray-400` with `text-muted-foreground` theme token
+- All rows now have consistent height with no crowding or overlapping
+
+**Verified:** Build green, 13/13 tests pass, no purple in CSS output, `bg-primary` resolves to `rgb(230,0,73)` (light) / `rgb(255,26,98)` (dark) — both Sonic brand red. Public API unchanged (checked, onCheckedChange, size variants, id, ref forwarding). Accessibility preserved (sr-only input, label association, aria-label). No new dependencies.
