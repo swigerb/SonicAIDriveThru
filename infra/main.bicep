@@ -114,6 +114,20 @@ param azureContainerAppsWorkloadProfile string
 param acaIdentityName string = '${environmentName}-aca-identity'
 param containerRegistryName string = '${replace(environmentName, '-', '')}acr'
 
+// --- EasyAuth (Entra ID) parameters ---
+@description('Enable Entra ID authentication on the Container App. Requires authClientId and a pre-provisioned aad-client-secret.')
+param enableAuth bool = false
+
+@description('Entra ID application (client) ID for EasyAuth. Leave empty to skip auth configuration.')
+param authClientId string = ''
+
+@description('Entra ID tenant ID used to build the OpenID issuer URL. Defaults to the deployment subscription tenant.')
+param authTenantId string = tenant().tenantId
+
+@secure()
+@description('Entra ID client secret. Stored as Container App secret "aad-client-secret". Provision via azd env or out-of-band — never commit to source.')
+param authClientSecret string = ''
+
 // Figure out if we're running as a user or service principal
 var principalType = empty(runningOnGh) && empty(runningOnAdo) ? 'User' : 'ServicePrincipal'
 
@@ -202,6 +216,7 @@ module acaBackend 'core/host/container-app-upsert.bicep' = {
     containerMaxReplicas: 5
     healthProbePath: '/health'
     enableWebSocket: true
+    secrets: enableAuth && !empty(authClientSecret) ? { 'aad-client-secret': authClientSecret } : {}
     env: {
       AZURE_SEARCH_ENDPOINT: reuseExistingSearch
         ? searchEndpoint
@@ -398,6 +413,24 @@ module openAiRoleSearchService 'core/security/role.bicep' = if (!reuseExistingSe
     principalId: !reuseExistingSearch ? searchService.outputs.systemAssignedMIPrincipalId : ''
     roleDefinitionId: '5e0bd9bd-7b93-4f28-af87-19fc36ad61bd'
     principalType: 'ServicePrincipal'
+  }
+}
+
+// --- EasyAuth: Entra ID authentication on the Container App ---
+// Only deployed when enableAuth is true and a client ID is provided.
+// The Container App secret 'aad-client-secret' must be provisioned before or
+// alongside this resource (handled above via the secrets param when authClientSecret is supplied,
+// or provisioned out-of-band via `az containerapp secret set`).
+module containerAppAuth 'core/security/container-app-auth.bicep' = if (enableAuth && !empty(authClientId)) {
+  name: 'container-app-auth'
+  scope: resourceGroup
+  dependsOn: [
+    acaBackend
+  ]
+  params: {
+    containerAppName: acaBackend.outputs.name
+    clientId: authClientId
+    tenantId: authTenantId
   }
 }
 

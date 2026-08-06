@@ -61,10 +61,18 @@ class CreateAppConfigTests(unittest.IsolatedAsyncioTestCase):
             await create_app()
             return mock_cls, mock_instance
 
-    async def test_default_voice_is_coral(self):
+    async def test_default_voice_matches_config(self):
+        """The configured default voice reaches RTMiddleTier.
+
+        Asserts against config.yaml rather than a hardcoded name so changing the
+        carhop voice is a one-line config edit, not a test edit too.
+        """
+        from config_loader import get_config
+        expected = get_config().get("model", {}).get("default_voice")
+        self.assertTrue(expected, "config.yaml must define model.default_voice")
         mock_cls, _ = await self._run_create_app()
         _, kwargs = mock_cls.call_args
-        self.assertEqual(kwargs["voice_choice"], "coral")
+        self.assertEqual(kwargs["voice_choice"], expected)
 
     async def test_system_prompt_contains_carhop_closing(self):
         _, mock_instance = await self._run_create_app()

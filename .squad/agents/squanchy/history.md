@@ -65,3 +65,12 @@
 - **Left alone**: Storage account in Bicep (still provisioned, may serve other purposes), `storageRoleSearchService` role assignment (harmless, removal is risky), `AZURE_STORAGE_*` pipeline variables. `README.md`/`DEPLOY.md` unchanged (they describe `scripts/deploy.sh`, not the azd postprovision flow).
 - **Validation**: `az bicep build` succeeds (warnings only), `py_compile` clean, 365 tests pass, `ruff check .` clean, all script paths verified on disk.
 
+### 2026-08-06: Declarative EasyAuth (Entra ID) for Container App
+- **Problem**: Entra ID auth was configured live via `az` CLI. Running `azd up` would silently overwrite the Container App without the auth config, exposing the metered Azure OpenAI Realtime WebSocket endpoint.
+- **New module** (`infra/core/security/container-app-auth.bicep`): Declares `Microsoft.App/containerApps/authConfigs@2024-03-01` named `current`. Configures `platform.enabled=true`, `unauthenticatedClientAction=RedirectToLoginPage`, `redirectToProvider=azureactivedirectory`, and the Entra ID identity provider with `openIdIssuer`, `clientId`, and `clientSecretSettingName`.
+- **Opt-in gating**: `enableAuth bool = false` + `authClientId string = ''`. The auth module only deploys when `enableAuth && !empty(authClientId)`. A plain `azd up` is unaffected.
+- **Secret handling**: `@secure() param authClientSecret` flows from `azd env` → Bicep → Container App secret `aad-client-secret`. No real value in source or parameter files. The auth config references the secret by name only (`clientSecretSettingName`). Alternatively, operators can provision the secret out-of-band via `az containerapp secret set`.
+- **Parameters wired**: `main.parameters.json` maps `AZURE_AUTH_ENABLED`, `AZURE_AUTH_CLIENT_ID`, `AZURE_AUTH_TENANT_ID`, `AZURE_AUTH_CLIENT_SECRET` with safe empty/false defaults.
+- **Documentation**: Added full "Enable Entra ID Authentication" section to `DEPLOY.md` covering app registration, service principal creation, `appRoleAssignmentRequired`, user assignment, client secret, `azd env set` commands, and verification steps.
+- **Validation**: `az bicep build` zero errors (warnings only — all pre-existing except expected `no-hardcoded-env-urls` for `login.microsoftonline.com`). `ruff check .` clean. 368 tests pass + 1 pre-existing failure (`test_default_voice_is_coral` — expects "coral", config defaults to "shimmer"; unrelated to infra changes).
+
