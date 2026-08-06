@@ -4,7 +4,7 @@ import { cn } from "@/lib/utils";
 const ImageDialog = ({ imageUrl, onClose }: { imageUrl: string; onClose: () => void }) => (
     <DialogPrimitive.Root>
         <DialogPrimitive.Portal>
-            <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm" />
+            <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs" />
             <div className="fixed inset-0 z-50 flex items-center justify-center">
                 <DialogPrimitive.Content className={cn("w-full max-w-lg rounded-lg bg-white p-6 shadow-lg dark:bg-gray-800")}>
                     <img src={imageUrl} alt="Drink" className="h-auto w-full" />

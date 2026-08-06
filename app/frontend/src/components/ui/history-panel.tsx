@@ -78,7 +78,7 @@ const HistoryPanel = ({ show, history, onClosed, onSelectedGroundingFile }: Prop
                                     return (
                                         <div key={index}>
                                             <div
-                                                className={`rounded-lg p-4 shadow ${item.sender === "user" ? "ml-auto bg-blue-100 pl-4" : "bg-gray-100"}`}
+                                                className={`rounded-lg p-4 shadow-sm ${item.sender === "user" ? "ml-auto bg-blue-100 pl-4" : "bg-gray-100"}`}
                                                 style={{ maxWidth: "75%" }}
                                             >
                                                 <p className="text-sm text-gray-700">{item.transcript}</p>

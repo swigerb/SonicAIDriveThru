@@ -12,7 +12,7 @@ type Parameters = {
 };
 
 export default function useAudioRecorder({ onAudioRecorded, onBargeIn }: Parameters) {
-    const audioRecorder = useRef<Recorder>();
+    const audioRecorder = useRef<Recorder | null>(null);
     // Use a pre-allocated ring buffer to avoid O(n²) array copies
     const bufferRef = useRef<Uint8Array>(new Uint8Array(BUFFER_SIZE * 4));
     const bufferLenRef = useRef(0);

@@ -39,7 +39,7 @@ export default function GroundingFileView({ groundingFile, onClosed }: Propertie
                                 <X className="h-5 w-5" />
                             </Button>
                         </div>
-                        <div className="flex-grow overflow-hidden">
+                        <div className="grow overflow-hidden">
                             <pre className="h-[40vh] overflow-auto text-wrap rounded-md bg-gray-100 p-4 text-sm">
                                 <code>{groundingFile.content}</code>
                             </pre>

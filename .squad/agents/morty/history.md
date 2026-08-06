@@ -111,3 +111,28 @@ Fixed `useAzureSpeech.tsx`: (1) `onReceivedToolResponse` parameter was declared 
 - **Vite 6 → 8**: Would require @vitejs/plugin-react 6 (which requires Vite 8). Multiple major jumps. Current Vite 6 is stable. **Migration steps:** upgrade vite to 8 + @vitejs/plugin-react to 6 together, review config for breaking changes.
 - **Vitest 2 → 4**: Would require @vitest/coverage-v8 4. Current v2 is stable and working. **Migration steps:** upgrade both together, review config for API changes.
 - **framer-motion 11 → 13**: v13 is alpha only. Package being renamed to `motion`. **Migration steps:** wait for stable 12.x/13.x release, rename import from `framer-motion` to `motion`, update vite.config.ts manualChunks.
+
+### 2026-08-06: React 19 + Tailwind CSS 4 Migration
+
+**React 18.3.1 → 19.2.8 (landed):**
+- Upgraded `react`, `react-dom` to ^19.2.8
+- Upgraded `@types/react` to ^19.2.17, `@types/react-dom` to ^19.2.3
+- Upgraded `@testing-library/react` 14 → 16.3.2 (v14 did not support React 19)
+- Removed `react-draggable` — was in package.json but **never imported or used** in any source file (stale dependency). No draggable UI element exists; the "drag" content in the codebase is menu items like "dragon fruit".
+- Fixed `useRef<Recorder>()` → `useRef<Recorder | null>(null)` in `useAudioRecorder.tsx` — React 19 types require an explicit initial value argument.
+- `forwardRef` usage in shadcn/ui components (button, card, dialog, label, sheet, switch) left as-is — still valid in React 19, just no longer required for new components.
+- Peer dep verification: framer-motion 11.18.2, all @radix-ui/*, react-i18next 17, react-use-websocket 4.8.1, react-icons 5 — all support React 19.
+
+**Tailwind CSS 3.4 → 4.3.3 (landed):**
+- Ran official `npx @tailwindcss/upgrade --force` codemod
+- `tailwind.config.js` removed — theme migrated to `@theme` block in `src/index.css`
+- `postcss.config.js` updated: `tailwindcss` + `autoprefixer` → `@tailwindcss/postcss`
+- `autoprefixer` removed (handled internally by `@tailwindcss/postcss`)
+- `tailwindcss-animate` kept at 1.0.7 — works via `@plugin 'tailwindcss-animate'` directive in v4
+- CSS entrypoint: `@tailwind base/components/utilities` → `@import 'tailwindcss'`
+- Dark mode: `@custom-variant dark (&:is(.dark *))` replaces `darkMode: ["class"]` config
+- Utility class renames (codemod-applied): `bg-gradient-to-*` → `bg-linear-to-*`, `shadow-sm` → `shadow-xs`, `shadow` → `shadow-sm`, `backdrop-blur-sm` → `backdrop-blur-xs`, `drop-shadow-sm` → `drop-shadow-xs`, `focus-visible:outline-none` → `focus-visible:outline-hidden`, `flex-grow` → `grow`
+- Brand colour variables (--brand-red, --brand-blue, --brand-light, --brand-dark) preserved in `@layer base` with full light/dark variants
+- CSS size: 34.58 kB → 50.15 kB (gzip: 7.19 → 9.20 kB) — increase from expanded v4 preflight and compatibility layer; brand colours and animations verified present in output
+
+**Result:** `npm run build` succeeds (tsc + vite), `npm test` = 13/13 passing. No `@ts-ignore`, no `any` casts, no skipped tests.

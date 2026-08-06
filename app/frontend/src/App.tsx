@@ -487,7 +487,7 @@ const BrandHero = memo(function BrandHero() {
             <div className="flex flex-col gap-8 lg:flex-row lg:items-center">
                 <div className="flex-1 space-y-5">
                     <div className="flex flex-wrap items-center gap-3">
-                        <img src={sonicLogo} alt="Sonic Drive-In logo" className="h-20 w-auto drop-shadow-sm" loading="lazy" />
+                        <img src={sonicLogo} alt="Sonic Drive-In logo" className="h-20 w-auto drop-shadow-xs" loading="lazy" />
                         <span className="rounded-full bg-[#E40046]/10 px-3 py-1 text-xs font-black uppercase tracking-[0.3em] text-[#E40046]">
                             Voice Ordering Demo
                         </span>
@@ -508,7 +508,7 @@ const BrandHero = memo(function BrandHero() {
                     </div>
                 </div>
                 <div className="relative flex flex-1 items-center justify-center">
-                    <div className="absolute inset-0 -z-10 rounded-[32px] bg-gradient-to-br from-[#E40046]/10 via-[#F2F8FA] to-[#FEDD00]/15 opacity-80 blur-3xl"></div>
+                    <div className="absolute inset-0 -z-10 rounded-[32px] bg-linear-to-br from-[#E40046]/10 via-[#F2F8FA] to-[#FEDD00]/15 opacity-80 blur-3xl"></div>
                     <div className="grid w-full gap-4 sm:grid-cols-2">
                         <div className="rounded-3xl border border-[#E40046]/20 bg-white/90 p-4 shadow-[0_25px_45px_rgba(228,0,70,0.12)]">
                             <div className="mb-3 flex items-center gap-3">
@@ -529,7 +529,7 @@ const BrandHero = memo(function BrandHero() {
                                 ))}
                             </ul>
                         </div>
-                        <div className="rounded-3xl border border-[#285780]/25 bg-gradient-to-br from-[#285780]/10 to-[#FEDD00]/10 p-4 shadow-[0_25px_45px_rgba(40,87,128,0.15)]">
+                        <div className="rounded-3xl border border-[#285780]/25 bg-linear-to-br from-[#285780]/10 to-[#FEDD00]/10 p-4 shadow-[0_25px_45px_rgba(40,87,128,0.15)]">
                             <div className="mb-3 flex items-center gap-3">
                                 <div className="rounded-2xl bg-white/60 p-3">
                                     <BurgerArt />
@@ -559,7 +559,7 @@ function HeroHighlightCard({ title, detail, tone }: { title: string; detail: str
     };
 
     return (
-        <div className={`rounded-2xl bg-gradient-to-br ${gradientMap[tone]} p-3 text-white shadow-[0_10px_25px_rgba(0,0,0,0.08)]`}>
+        <div className={`rounded-2xl bg-linear-to-br ${gradientMap[tone]} p-3 text-white shadow-[0_10px_25px_rgba(0,0,0,0.08)]`}>
             <p className="text-xs uppercase tracking-[0.25em] text-white/80">{title}</p>
             <p className="text-sm font-semibold leading-tight">{detail}</p>
         </div>
@@ -576,7 +576,7 @@ const SessionTokenPanel = memo(function SessionTokenPanel({
     const [expanded, setExpanded] = useState(false);
 
     return (
-        <div className="rounded-xl border border-white/30 bg-white/90 font-mono text-xs shadow-sm dark:border-white/10 dark:bg-[#18344D]/90">
+        <div className="rounded-xl border border-white/30 bg-white/90 font-mono text-xs shadow-xs dark:border-white/10 dark:bg-[#18344D]/90">
             <button
                 type="button"
                 onClick={() => setExpanded(prev => !prev)}
