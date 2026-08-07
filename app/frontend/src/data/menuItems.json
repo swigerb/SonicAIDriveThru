@@ -877,6 +877,151 @@
             ]
         },
         {
+            "category": "Combos",
+            "items": [
+                {
+                    "name": "SONIC® Cheeseburger Combo",
+                    "sizes": [
+                        {
+                            "size": "Standard",
+                            "price": 8.49
+                        }
+                    ],
+                    "description": "SONIC® Cheeseburger bundled with your choice of a side (Tots or Fries) and a drink. Includes medium side and medium drink.",
+                    "longDescription": "SONIC® Cheeseburger bundled with your choice of a side (Tots or Fries) and a drink. Includes medium side and medium drink. Side and drink are included in the combo price.",
+                    "origin": "Sonic Drive-In Menu",
+                    "popularity": "",
+                    "image": ""
+                },
+                {
+                    "name": "SuperSONIC® Double Cheeseburger Combo",
+                    "sizes": [
+                        {
+                            "size": "Standard",
+                            "price": 10.19
+                        }
+                    ],
+                    "description": "SuperSONIC® Double Cheeseburger bundled with your choice of a side (Tots or Fries) and a drink. Includes medium side and medium drink.",
+                    "longDescription": "SuperSONIC® Double Cheeseburger bundled with your choice of a side (Tots or Fries) and a drink. Includes medium side and medium drink. Side and drink are included in the combo price.",
+                    "origin": "Sonic Drive-In Menu",
+                    "popularity": "",
+                    "image": ""
+                },
+                {
+                    "name": "SuperSONIC® Bacon Double Cheeseburger Combo",
+                    "sizes": [
+                        {
+                            "size": "Standard",
+                            "price": 10.99
+                        }
+                    ],
+                    "description": "SuperSONIC® Bacon Double Cheeseburger bundled with your choice of a side (Tots or Fries) and a drink. Includes medium side and medium drink.",
+                    "longDescription": "SuperSONIC® Bacon Double Cheeseburger bundled with your choice of a side (Tots or Fries) and a drink. Includes medium side and medium drink. Side and drink are included in the combo price.",
+                    "origin": "Sonic Drive-In Menu",
+                    "popularity": "",
+                    "image": ""
+                },
+                {
+                    "name": "All-American SONIC Smasher™ Combo",
+                    "sizes": [
+                        {
+                            "size": "Standard",
+                            "price": 9.49
+                        }
+                    ],
+                    "description": "All-American SONIC Smasher™ bundled with your choice of a side (Tots or Fries) and a drink. Includes medium side and medium drink.",
+                    "longDescription": "All-American SONIC Smasher™ bundled with your choice of a side (Tots or Fries) and a drink. Includes medium side and medium drink. Side and drink are included in the combo price.",
+                    "origin": "Sonic Drive-In Menu",
+                    "popularity": "",
+                    "image": ""
+                },
+                {
+                    "name": "All-American Bacon SONIC Smasher™ Combo",
+                    "sizes": [
+                        {
+                            "size": "Standard",
+                            "price": 10.49
+                        }
+                    ],
+                    "description": "All-American Bacon SONIC Smasher™ bundled with your choice of a side (Tots or Fries) and a drink. Includes medium side and medium drink.",
+                    "longDescription": "All-American Bacon SONIC Smasher™ bundled with your choice of a side (Tots or Fries) and a drink. Includes medium side and medium drink. Side and drink are included in the combo price.",
+                    "origin": "Sonic Drive-In Menu",
+                    "popularity": "",
+                    "image": ""
+                },
+                {
+                    "name": "Crispy Chicken Sandwich Combo",
+                    "sizes": [
+                        {
+                            "size": "Standard",
+                            "price": 9.29
+                        }
+                    ],
+                    "description": "Crispy Chicken Sandwich bundled with your choice of a side (Tots or Fries) and a drink. Includes medium side and medium drink.",
+                    "longDescription": "Crispy Chicken Sandwich bundled with your choice of a side (Tots or Fries) and a drink. Includes medium side and medium drink. Side and drink are included in the combo price.",
+                    "origin": "Sonic Drive-In Menu",
+                    "popularity": "",
+                    "image": ""
+                },
+                {
+                    "name": "Double SONIC Smasher™ Combo",
+                    "sizes": [
+                        {
+                            "size": "Standard",
+                            "price": 10.19
+                        }
+                    ],
+                    "description": "Double SONIC Smasher™ bundled with your choice of a side (Tots or Fries) and a drink. Includes medium side and medium drink.",
+                    "longDescription": "Double SONIC Smasher™ bundled with your choice of a side (Tots or Fries) and a drink. Includes medium side and medium drink. Side and drink are included in the combo price.",
+                    "origin": "Sonic Drive-In Menu",
+                    "popularity": "",
+                    "image": ""
+                },
+                {
+                    "name": "Fish Sandwich Combo",
+                    "sizes": [
+                        {
+                            "size": "Standard",
+                            "price": 8.49
+                        }
+                    ],
+                    "description": "Fish Sandwich bundled with your choice of a side (Tots or Fries) and a drink. Includes medium side and medium drink.",
+                    "longDescription": "Fish Sandwich bundled with your choice of a side (Tots or Fries) and a drink. Includes medium side and medium drink. Side and drink are included in the combo price.",
+                    "origin": "Sonic Drive-In Menu",
+                    "popularity": "",
+                    "image": ""
+                },
+                {
+                    "name": "Jr Double Cheeseburger Combo",
+                    "sizes": [
+                        {
+                            "size": "Standard",
+                            "price": 6.99
+                        }
+                    ],
+                    "description": "Jr Double Cheeseburger bundled with your choice of a side (Tots or Fries) and a drink. Includes medium side and medium drink.",
+                    "longDescription": "Jr Double Cheeseburger bundled with your choice of a side (Tots or Fries) and a drink. Includes medium side and medium drink. Side and drink are included in the combo price.",
+                    "origin": "Sonic Drive-In Menu",
+                    "popularity": "",
+                    "image": ""
+                },
+                {
+                    "name": "Triple SONIC Smasher™ Combo",
+                    "sizes": [
+                        {
+                            "size": "Standard",
+                            "price": 11.29
+                        }
+                    ],
+                    "description": "Triple SONIC Smasher™ bundled with your choice of a side (Tots or Fries) and a drink. Includes medium side and medium drink.",
+                    "longDescription": "Triple SONIC Smasher™ bundled with your choice of a side (Tots or Fries) and a drink. Includes medium side and medium drink. Side and drink are included in the combo price.",
+                    "origin": "Sonic Drive-In Menu",
+                    "popularity": "",
+                    "image": ""
+                }
+            ]
+        },
+        {
             "category": "Extras & Sides",
             "items": [
                 {

@@ -88,6 +88,8 @@ sections:
     priority: 9
     content: |
       COMBO LOGIC — DETERMINISTIC:
+      - Combos ARE real menu items — search for them by name (e.g., 'SONIC Cheeseburger Combo'). They have a bundled price that includes the entree, a side, and a drink
+      - To add a combo: search for the combo name, then call update_order with the combo name and its price from search results
       - Combo added → system returns [SYSTEM HINT] if side or drink is missing
       - DO NOT move to suggestive selling UNTIL combo Side & Drink are filled
       - Priority: Item Selection → Combo Completion → Upsell → Shake/Treat
@@ -131,10 +133,10 @@ sections:
     content: |
       SUGGESTIVE SELLING:
       - COMBO: Burger/sandwich alone → 'Want to make that a combo with Tots and a drink?'
+      - Guest says 'Yes' to combo → search for the combo version (e.g., 'SONIC Cheeseburger Combo') to get the price, then call update_order to add the combo. The backend automatically removes the standalone burger. Then ask what SIZE side and what SIZE drink they want.
       - UPSIZE: Small/Medium → occasionally suggest Large
       - TREAT: No dessert near end → 'How about a Sonic Shake or Blast?'
       - ONE suggestion at a time, NEVER pushy
-      - Guest says 'Yes' to combo → ask what SIZE side and what SIZE drink they want. Example: 'Great! What size tots — small, medium, or large? And what drink would you like?'
 
   - name: "ORDER_CHANGE_AFTER_CLOSING"
     priority: 13
