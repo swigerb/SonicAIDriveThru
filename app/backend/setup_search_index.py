@@ -263,10 +263,14 @@ def main() -> None:
     load_azd_env()
 
     logger.info("Checking if we need to set up Azure AI Search index...")
-    if os.environ.get("AZURE_SEARCH_REUSE_EXISTING") == "true":
+    # AZURE_SEARCH_REUSE_EXISTING is an *infrastructure* flag — it tells Bicep not
+    # to provision a new search service. It must NOT skip index setup: the free
+    # SKU allows one service but three indexes per subscription, so sibling demos
+    # share one service while each owning its own index. Conflating the two left
+    # a demo pointing at an index that was never created.
+    if os.environ.get("AZURE_SEARCH_SKIP_INDEX_SETUP") == "true":
         logger.info(
-            "Since an existing Azure AI Search index is being used, "
-            "no changes will be made to the index."
+            "AZURE_SEARCH_SKIP_INDEX_SETUP is set — leaving the index untouched."
         )
         return
 
