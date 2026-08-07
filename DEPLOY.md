@@ -68,11 +68,29 @@ APP_ID="<your-app-id>"
 # Create the service principal
 az ad sp create --id $APP_ID
 
-# Restrict sign-in to explicitly assigned users/groups only
+# OPTIONAL — restrict sign-in to explicitly assigned users/groups only.
+# Read the warning below before enabling this.
 az ad sp update --id $APP_ID --set appRoleAssignmentRequired=true
 ```
 
-> **`appRoleAssignmentRequired=true`** means only users explicitly assigned to
+> ⚠️ **`appRoleAssignmentRequired=true` requires an administrator to grant
+> consent, and will lock you out if you are not one.**
+>
+> When an enterprise application requires assignment, Entra ID disables
+> *user* self-consent for that app. The first sign-in then fails with
+> "Need admin approval — <app> needs permission to access resources in your
+> organization that only an admin can grant", even for a user who has been
+> assigned. Someone holding Application Administrator, Cloud Application
+> Administrator or Global Administrator must run
+> `az ad app permission admin-consent --id $APP_ID` first. Global *Reader*
+> is not sufficient — it is read-only.
+>
+> If you do not have an admin account to hand, leave this setting off. The
+> app is registered single-tenant (`AzureADMyOrg`), so sign-in is still
+> limited to members of your own tenant; you simply cannot narrow it
+> further to named individuals.
+
+> With `appRoleAssignmentRequired=true`, only users explicitly assigned to
 > this enterprise application can sign in. Without it, *any* member of the
 > tenant can authenticate. Assign users in the Azure Portal under
 > Enterprise Applications → Sonic AI Drive-Thru Demo → Users and groups,
