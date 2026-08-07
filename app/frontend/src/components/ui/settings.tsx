@@ -17,9 +17,11 @@ interface SettingsProps {
     onVerboseLoggingChange: (checked: boolean) => void;
     logToFile: boolean;
     onLogToFileChange: (checked: boolean) => void;
+    voiceChoice: string;
+    onVoiceChoiceChange: (voice: string) => void;
 }
 
-export default function Settings({ isMobile, showSessionTokens, onShowSessionTokensChange, verboseLogging, onVerboseLoggingChange, logToFile, onLogToFileChange }: SettingsProps) {
+export default function Settings({ isMobile, showSessionTokens, onShowSessionTokensChange, verboseLogging, onVerboseLoggingChange, logToFile, onLogToFileChange, voiceChoice, onVoiceChoiceChange }: SettingsProps) {
     const [isDarkMode, setIsDarkMode] = useState(() => {
         return localStorage.getItem("isDarkMode") === "true";
     });
@@ -71,6 +73,34 @@ export default function Settings({ isMobile, showSessionTokens, onShowSessionTok
                 <div className="ml-4 flex items-center gap-3 shrink-0">
                     <span className="min-w-[5rem] text-right text-xs text-muted-foreground">{isDarkMode ? "Dark Mode" : "Light Mode"}</span>
                     <Switch id="dark-mode" checked={isDarkMode} onCheckedChange={handleDarkModeChange} aria-label="Toggle dark mode" />
+                </div>
+            </div>
+            <div className="flex items-start justify-between">
+                <div className="flex-1 space-y-0.5">
+                    <Label htmlFor="voice-choice" className="text-gray-900 dark:text-gray-100">
+                        Carhop Voice
+                    </Label>
+                    <p className="text-sm text-gray-600 dark:text-gray-400">Choose the drive-thru assistant voice</p>
+                </div>
+                <div className="ml-4 flex flex-col items-end shrink-0">
+                    <select
+                        id="voice-choice"
+                        value={voiceChoice}
+                        onChange={(e) => onVoiceChoiceChange(e.target.value)}
+                        className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-primary dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100"
+                        aria-label="Select carhop voice"
+                    >
+                        <option value="shimmer">Shimmer — Cheerful &amp; Bright</option>
+                        <option value="sage">Sage — Calm &amp; Soothing</option>
+                        <option value="coral">Coral — Warm &amp; Confident</option>
+                        <option value="marin">Marin — Soft &amp; Hi-Fi (new)</option>
+                        <option value="cedar">Cedar — Gentle &amp; Hi-Fi (new)</option>
+                        <option value="ballad">Ballad — Caring &amp; Melodic</option>
+                        <option value="ash">Ash — Friendly &amp; Upbeat</option>
+                        <option value="verse">Verse — Natural &amp; Adaptable</option>
+                        <option value="alloy">Alloy — Neutral &amp; Crisp</option>
+                        <option value="echo">Echo — Deep &amp; Resonant</option>
+                    </select>
                 </div>
             </div>
             <div className="flex items-start justify-between">

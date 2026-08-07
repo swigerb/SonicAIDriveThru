@@ -140,6 +140,7 @@ MARKER_SESSION_UPDATED = '"session.updated"'
 MARKER_RESPONSE_CANCEL = '"response.cancel"'
 MARKER_VERBOSE_LOGGING = '"extension.set_verbose_logging"'
 MARKER_LOG_TO_FILE = '"extension.set_log_to_file"'
+MARKER_SET_VOICE = '"extension.set_voice"'
 # Legacy markers for backward compatibility
 MARKER_AUDIO_DELTA_LEGACY = '"response.audio.delta"'
 MARKER_AUDIO_DONE_LEGACY = '"response.audio.done"'

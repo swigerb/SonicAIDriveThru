@@ -30,6 +30,7 @@ from audio_pipeline import (
     MARKER_RESPONSE_CANCEL as _MARKER_RESPONSE_CANCEL,
     MARKER_SESSION_UPDATE as _MARKER_SESSION_UPDATE,
     MARKER_SESSION_UPDATED as _MARKER_SESSION_UPDATED,
+    MARKER_SET_VOICE as _MARKER_SET_VOICE,
     MARKER_SPEECH_STARTED as _MARKER_SPEECH_STARTED,
     MARKER_VERBOSE_LOGGING as _MARKER_VERBOSE_LOGGING,
     RESPONSE_CREATE_MSG as _RESPONSE_CREATE_MSG,
@@ -239,6 +240,17 @@ class RTMiddleTier:
         else:
             self._token_provider = get_bearer_token_provider(credentials, "https://cognitiveservices.azure.com/.default")
             self._token_provider() # Warm up during startup so we have a token cached when the first request arrives
+
+    def build_voice_update(self, voice: str) -> str:
+        """Serialise a session.update that switches the assistant voice.
+
+        The voice is expressed in the legacy shape and then translated, so it
+        lands at `audio.output.voice` where the GA endpoint expects it. Sending
+        the legacy top-level `voice` key instead gets the whole session.update
+        rejected and the voice silently never changes.
+        """
+        ga_session = _to_ga_session({"voice": voice})
+        return json.dumps({"type": "session.update", "session": ga_session})
 
     def _get_auth_token(self) -> str:
         """Return the cached token, falling back to a synchronous call if needed."""
@@ -645,6 +657,19 @@ class RTMiddleTier:
                                               "║  LOG TO FILE: %-8s              ║\n"
                                               "╚══════════════════════════════════════╝",
                                               "ENABLED" if enabled else "DISABLED")
+                                        continue
+                                except (json.JSONDecodeError, KeyError):
+                                    pass
+
+                            if _MARKER_SET_VOICE in msg.data:
+                                try:
+                                    ext_msg = json.loads(msg.data)
+                                    if ext_msg.get("type") == "extension.set_voice":
+                                        new_voice = ext_msg.get("voice", "")
+                                        if new_voice:
+                                            self.voice_choice = new_voice
+                                            logger.info("Voice changed to %s for session %s", new_voice, session_id)
+                                            await target_ws.send_str(self.build_voice_update(new_voice))
                                         continue
                                 except (json.JSONDecodeError, KeyError):
                                     pass

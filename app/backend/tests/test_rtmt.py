@@ -34,6 +34,7 @@ from rtmt import (
     Tool,
     ToolResult,
     ToolResultDirection,
+    _to_ga_session,
     create_hmac_token,
     validate_hmac_token,
 )
@@ -907,6 +908,40 @@ class WebSocketHandlerTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict("rtmt._security_cfg", {"require_session_token": True, "allowed_origins": []}):
             result = await rtmt._websocket_handler(request)
         self.assertEqual(result.status, 401)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# EXTENSION SET VOICE TESTS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class ExtensionSetVoiceTests(unittest.TestCase):
+    """The voice picker must reach the GA endpoint in the GA shape.
+
+    These exercise RTMiddleTier.build_voice_update directly rather than
+    re-deriving the translation, so removing the _to_ga_session call from the
+    production path actually fails the suite.
+    """
+
+    def _make_rtmt(self):
+        cred = MagicMock()
+        cred.get_token.return_value = MagicMock(token="tok", expires_on=9999999999)
+        return RTMiddleTier("https://fake.openai.azure.com", "gpt-realtime-1.5", cred)
+
+    def test_build_voice_update_is_ga_shaped(self):
+        rtmt = self._make_rtmt()
+        session = json.loads(rtmt.build_voice_update("marin"))["session"]
+        self.assertEqual(session["type"], "realtime")
+        self.assertEqual(session["audio"]["output"]["voice"], "marin")
+        # The legacy top-level key gets the whole session.update rejected.
+        self.assertNotIn("voice", session)
+
+    def test_build_voice_update_all_supported_voices(self):
+        rtmt = self._make_rtmt()
+        for v in ["alloy", "ash", "ballad", "coral", "echo",
+                  "sage", "shimmer", "verse", "marin", "cedar"]:
+            session = json.loads(rtmt.build_voice_update(v))["session"]
+            self.assertEqual(session["audio"]["output"]["voice"], v)
+            self.assertNotIn("voice", session)
 
 
 if __name__ == "__main__":

@@ -240,5 +240,9 @@ export default function useRealTime({
         sendJsonMessage({ type: "extension.set_log_to_file", enabled });
     };
 
-    return { startSession, addUserAudio, inputAudioBufferClear, cancelResponse, sendVerboseLogging, sendLogToFile };
+    const sendVoiceChoice = (voice: string) => {
+        sendJsonMessage({ type: "extension.set_voice", voice });
+    };
+
+    return { startSession, addUserAudio, inputAudioBufferClear, cancelResponse, sendVerboseLogging, sendLogToFile, sendVoiceChoice };
 }
