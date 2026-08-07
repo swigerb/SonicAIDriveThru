@@ -193,6 +193,7 @@ The entire round trip — guest speech → AI understanding → tool execution �
 
 > **Note:** This demo uses sample Sonic Drive-In menu data (172 items) for demonstration purposes. All prices, promotions, and machine statuses are simulated to showcase the agentic architecture capabilities.
 
+- **Voice picker**: The settings dialog exposes ten GA realtime voices (alloy, ash, ballad, coral, echo, sage, shimmer, verse, marin, cedar) with short descriptors. Changing it takes effect on the live conversation without a redeploy — the choice is persisted in the browser and sent to the middle tier, which reissues a `session.update` with the voice at `audio.output.voice`. The initial default comes from `model.default_voice` in `app/backend/config.yaml`.
 ### Architecture Diagram
 
 The `RTClient` in the frontend receives the audio input, sends that to the Python backend which uses an `RTMiddleTier` object to interface with the Azure OpenAI Realtime API, and includes a tool for searching Azure AI Search.
@@ -234,6 +235,25 @@ This repository includes infrastructure as code and a `Dockerfile` to deploy the
 
 ## Getting Started
 
+> [!IMPORTANT]
+> **A default deployment is publicly reachable.** `azd up` provisions the app
+> with authentication disabled, so anyone who learns the Container App URL can
+> open the demo — and, more importantly, connect to the `/realtime` websocket,
+> which consumes metered Azure OpenAI realtime tokens on your subscription.
+>
+> Authentication is opt-in. To require a Microsoft Entra ID sign-in, follow the
+> Entra ID authentication section in [DEPLOY.md](DEPLOY.md), then set:
+>
+> ```bash
+> azd env set AZURE_AUTH_ENABLED true
+> azd env set AZURE_AUTH_CLIENT_ID "<your-app-id>"
+> azd env set AZURE_AUTH_TENANT_ID "<your-tenant-id>"
+> azd env set AZURE_AUTH_CLIENT_SECRET "<your-client-secret>"
+> azd up
+> ```
+>
+> Leaving it off is fine for a throwaway sandbox. Do not leave a long-lived
+> demo unauthenticated.
 You have a few options for getting started with this template. The quickest way to get started is [GitHub Codespaces](#github-codespaces), since it will setup all the tools for you, but you can also [set it up locally](#local-environment). You can also use a [VS Code dev container](#vs-code-dev-containers)
 
 ### GitHub Codespaces
