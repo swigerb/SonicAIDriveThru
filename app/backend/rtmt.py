@@ -57,7 +57,7 @@ _conn_cfg = _config.get("connection", {})
 _security_cfg = _config.get("security", {})
 
 __all__ = ["RTMiddleTier", "RTToolCall", "Tool", "ToolResult", "ToolResultDirection", "configure_realtime_model",
-           "deployment_supports_reasoning", "normalize_reasoning_effort"]
+           "deployment_supports_reasoning", "normalize_reasoning_effort", "parse_reasoning_model"]
 
 # Connection tuning constants
 _WS_HEARTBEAT_SEC = _conn_cfg.get("ws_heartbeat_seconds", 15.0)
@@ -136,7 +136,7 @@ class RTToolCall:
 # `reasoning` ({effort}) and `parallel_tool_calls` exist only for reasoning
 # realtime models (gpt-realtime-2 / 2.1). gpt-realtime-1.5 rejects the whole
 # session.update if they are present, so RTMiddleTier only sets them when the
-# deployment supports them (see `deployment_supports_reasoning`).
+# deployment is a reasoning model (see `RTMiddleTier._reasoning_model`).
 _GA_SESSION_TOP_LEVEL = frozenset({
     "type", "model", "instructions", "tools", "tool_choice",
     "max_output_tokens", "output_modalities", "audio", "tracing",
@@ -266,14 +266,31 @@ _NON_REASONING_DEPLOYMENT_RE = re.compile(
 
 
 def deployment_supports_reasoning(deployment: str | None) -> bool:
-    """Best-effort check from the deployment name. azd names deployments after
-    the model, so a rollback to `gpt-realtime-1.5` is recognised. Unrecognised
-    custom names are assumed to support reasoning; if they don't, the rejected
-    session.update is caught by the fallback in RTMiddleTier and reasoning is
-    switched off for the rest of the process."""
+    """Best-effort check from the deployment name, used only when
+    `model.reasoning_model` is "auto". azd names deployments after the model, so
+    a rollback to `gpt-realtime-1.5` is recognised. Unrecognised custom names
+    are assumed to support reasoning; if they don't, the rejected session.update
+    is caught by the fallback in RTMiddleTier and reasoning is switched off for
+    the rest of the process."""
     if not isinstance(deployment, str) or not deployment.strip():
         return True
     return _NON_REASONING_DEPLOYMENT_RE.match(deployment.strip()) is None
+
+
+def parse_reasoning_model(value: Any) -> bool | None:
+    """`model.reasoning_model` / AZURE_OPENAI_REALTIME_REASONING_MODEL:
+    True / False force it; None ("auto", empty, unknown) infers it from the
+    deployment name."""
+    if isinstance(value, bool):
+        return value
+    text = "" if value is None else str(value).strip().lower()
+    if text in ("true", "yes", "on", "1"):
+        return True
+    if text in ("false", "no", "off", "0"):
+        return False
+    if text not in ("", "auto", "null", "none"):
+        logger.warning("Ignoring unknown reasoning_model %r (expected auto|true|false)", value)
+    return None
 
 
 def normalize_reasoning_effort(value: Any) -> str | None:
@@ -403,6 +420,9 @@ class RTMiddleTier:
     # reasoning.effort for reasoning realtime models; None omits the field.
     reasoning_effort: str | None = None
     parallel_tool_calls: bool | None = None
+    # Whether the deployment is a reasoning model (accepts `reasoning` and
+    # `parallel_tool_calls`). None = infer from the deployment name.
+    reasoning_model: bool | None = None
     _reasoning_rejected: bool = False
 
     def __init__(self, endpoint: str, deployment: str, credentials: AzureKeyCredential | DefaultAzureCredential, voice_choice: str | None = None, prompt_loader=None):
@@ -440,8 +460,15 @@ class RTMiddleTier:
                            "session": ga_session})
 
     def _reasoning_model(self) -> bool:
-        """Whether reasoning-model-only fields may be sent upstream at all."""
-        return not self._reasoning_rejected and deployment_supports_reasoning(getattr(self, "deployment", None))
+        """Whether reasoning-model-only fields may be sent upstream at all.
+
+        A runtime rejection always wins; then the explicit `reasoning_model`
+        switch; the deployment-name check is only the default."""
+        if self._reasoning_rejected:
+            return False
+        if self.reasoning_model is not None:
+            return self.reasoning_model
+        return deployment_supports_reasoning(getattr(self, "deployment", None))
 
     def reasoning_enabled(self) -> bool:
         """Whether `reasoning` will be sent upstream."""
@@ -1150,7 +1177,10 @@ def configure_realtime_model(rtmt: RTMiddleTier, model_cfg: dict, environ: Any =
     rtmt.reasoning_effort = normalize_reasoning_effort(effort if effort else model_cfg.get("reasoning_effort"))
     parallel = model_cfg.get("parallel_tool_calls")
     rtmt.parallel_tool_calls = None if parallel is None else bool(parallel)
-    if rtmt.reasoning_effort is not None and not deployment_supports_reasoning(rtmt.deployment):
-        logger.info("Deployment %s is not a reasoning model; `reasoning` (effort=%s) will not be sent",
-                    rtmt.deployment, rtmt.reasoning_effort)
+    switch = env.get("AZURE_OPENAI_REALTIME_REASONING_MODEL")
+    rtmt.reasoning_model = parse_reasoning_model(switch if switch else model_cfg.get("reasoning_model"))
+    if rtmt.reasoning_effort is not None and not rtmt._reasoning_model():
+        logger.info("Deployment %s is not treated as a reasoning model (reasoning_model=%s); `reasoning` "
+                    "(effort=%s) will not be sent", rtmt.deployment,
+                    "auto" if rtmt.reasoning_model is None else rtmt.reasoning_model, rtmt.reasoning_effort)
     return rtmt

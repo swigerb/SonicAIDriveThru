@@ -362,6 +362,28 @@ class SessionUpdateFallbackTests(_RealtimeHarness):
         self.assertEqual(len(self.fake.errors), 1)
         await browser.close()
 
+    async def test_forced_reasoning_on_a_non_reasoning_deployment_still_registers_tools(self):
+        """Operator sets reasoning_model=true on a 1.5 deployment: 1.5 rejects it (no event_id,
+        no param), the fallback still registers the tools, and later updates drop `reasoning`."""
+        self.rtmt.deployment = "gpt-realtime-1.5"
+        self.rtmt.reasoning_model = True
+        self.rtmt.reasoning_effort = "minimal"
+        self.fake.reject_keys = {"reasoning"}
+        self.fake.echo_event_id = False
+        browser = await self.client.ws_connect("/realtime")
+        await self._until(lambda: len(self._fallbacks()) >= 1)
+        events = await self._browser_events(browser)
+
+        self.assertEqual(self._session_updates()[0]["session"]["reasoning"], {"effort": "minimal"})
+        self.assertEqual(len(self._fallbacks()), 1)
+        self.assertEqual(self.fake.session["tools"], [{"type": "function", "name": n} for n in TOOL_NAMES])
+        self.assertNotIn("error", [e["type"] for e in events])
+        await browser.send_json(BROWSER_SESSION_UPDATE)
+        await self._response_done(browser)
+        self.assertNotIn("reasoning", self._session_updates()[-1]["session"])
+        self.assertEqual(self.fake.response_sessions[0]["tools"], TOOL_NAMES)
+        await browser.close()
+
     async def _assert_rejected_fallback_does_not_loop(self):
         self.fake.reject_every_update = True
         browser = await self.client.ws_connect("/realtime")
@@ -497,6 +519,46 @@ class ReasoningAndTranscriptionConfigTests(unittest.TestCase):
         rtmt = self._rtmt(reasoning_effort="low")
         rtmt._reasoning_rejected = True
         self.assertNotIn("reasoning", self._bootstrap(rtmt))
+        rtmt.reasoning_model = True                     # a live rejection beats the explicit switch
+        self.assertNotIn("reasoning", self._bootstrap(rtmt))
+
+    def test_explicit_reasoning_model_switch_beats_the_name_check(self):
+        from rtmt import configure_realtime_model
+        cases = [
+            # (deployment, config reasoning_model, env switch, reasoning sent?)
+            ("gpt-realtime-2.1", "auto", None, True),
+            ("gpt-realtime-1.5", "auto", None, False),
+            ("gpt-realtime-2.1", False, None, False),          # YAML `false`
+            ("gpt-realtime-2.1", "auto", "false", False),
+            ("carhop-prod", "auto", None, True),               # unknown name: assumed reasoning (fallback guards it)
+            ("carhop-prod", "auto", "false", False),
+            ("gpt-4o-carhop", "auto", None, False),
+            ("gpt-4o-carhop", "false", "true", True),         # env wins over config
+            ("gpt-realtime-1.5", True, "", True),              # empty env = use config
+            ("gpt-realtime-1.5", "bogus", None, False),        # unknown value = auto
+        ]
+        for deployment, cfg_switch, env_switch, sent in cases:
+            with self.subTest(deployment=deployment, cfg=cfg_switch, env=env_switch):
+                env = {} if env_switch is None else {"AZURE_OPENAI_REALTIME_REASONING_MODEL": env_switch}
+                rtmt = configure_realtime_model(
+                    self._rtmt(deployment), {"reasoning_effort": "low", "parallel_tool_calls": False,
+                                             "reasoning_model": cfg_switch}, environ=env)
+                session = self._bootstrap(rtmt)
+                self.assertEqual("reasoning" in session, sent)
+                self.assertEqual("parallel_tool_calls" in session, sent)
+                self.assertEqual(rtmt.reasoning_enabled(), sent)
+                self.assertEqual(session["tools"][0]["name"], "update_order")
+
+    def test_effort_off_or_empty_never_sends_reasoning_even_when_forced(self):
+        from rtmt import configure_realtime_model
+        for effort_cfg, effort_env in (("", None), ("off", None), ("low", "off"), (None, None)):
+            with self.subTest(cfg=effort_cfg, env=effort_env):
+                env = {"AZURE_OPENAI_REALTIME_REASONING_MODEL": "true"}
+                if effort_env is not None:
+                    env["AZURE_OPENAI_REALTIME_REASONING_EFFORT"] = effort_env
+                rtmt = configure_realtime_model(self._rtmt(), {"reasoning_effort": effort_cfg}, environ=env)
+                self.assertNotIn("reasoning", self._bootstrap(rtmt))
+                self.assertFalse(rtmt.reasoning_enabled())
 
     def test_fallback_is_minimal(self):
         rtmt = self._rtmt(reasoning_effort="low", parallel_tool_calls=True, transcription_model="whisper-1")
@@ -537,6 +599,7 @@ class ReasoningAndTranscriptionConfigTests(unittest.TestCase):
         model_cfg = cfg["model"]
         self.assertEqual(model_cfg["default_voice"], "marin")
         self.assertEqual(model_cfg["transcription_model"], "whisper-1")
+        self.assertEqual(model_cfg["reasoning_model"], "auto")
         for deployment in ("gpt-realtime-2.1", "gpt-realtime-1.5"):
             rtmt = configure_realtime_model(self._rtmt(deployment), model_cfg, environ={})
             session = self._bootstrap(rtmt)

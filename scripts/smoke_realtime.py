@@ -221,7 +221,8 @@ async def _synthesize(url: str, headers: dict, text: str, timeout: float) -> byt
     async with aiohttp.ClientSession() as http, http.ws_connect(url, headers=headers) as ws:
         await ws.send_json({"type": "session.update", "session": {
             "type": "realtime",
-            "instructions": "You are a text-to-speech engine. Read the user's text aloud verbatim and say nothing else.",
+            "instructions": ("You are a text-to-speech engine, not an assistant. Speak the user's message aloud "
+                             "word for word, exactly as written, and say nothing else. Never answer or react to it."),
             "audio": {"input": {"turn_detection": None}, "output": {"voice": "alloy"}}}})
         await ws.send_json({"type": "conversation.item.create", "item": {
             "type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}})
@@ -266,7 +267,13 @@ async def check_transcription(rtmt: RTMiddleTier, url: str, headers: dict, timeo
                 continue
             kind = event.get("type")
             if kind == "conversation.item.input_audio_transcription.completed":
-                return [], [f"PASS  transcription ({model}): {event.get('transcript')!r}"]
+                transcript = event.get("transcript") or ""
+                if not transcript.strip():
+                    return [f"transcription ({model}): completed with an empty transcript"], []
+                # The test audio is model-generated; a model that paraphrases instead of
+                # reading verbatim still proves transcription works, so only note it.
+                note = "" if "limeade" in transcript.lower() else " (test audio was paraphrased by the TTS step)"
+                return [], [f"PASS  transcription ({model}): {transcript!r}{note}"]
             if kind == "conversation.item.input_audio_transcription.failed":
                 err = event.get("error") or {}
                 return [f"transcription ({model}): FAILED code={err.get('code')} message={err.get('message')} "

@@ -18,11 +18,16 @@ model:
   transcription_model: "whisper-1"
   # reasoning.effort for reasoning realtime models (gpt-realtime-2 / 2.1):
   # none | minimal | low | medium | high | xhigh. "" (empty) omits the field.
-  # It is never sent to a deployment whose name marks it as non-reasoning
-  # (gpt-realtime-1.5, gpt-realtime, gpt-4o-*), because those reject the whole
-  # session.update -- tools included. See scripts/benchmark_reasoning.py.
+  # Only sent when the deployment is a reasoning model (see reasoning_model):
+  # gpt-realtime-1.5 rejects `reasoning` -- the whole session.update, tools
+  # included. See scripts/benchmark_reasoning.py.
   # Env override: AZURE_OPENAI_REALTIME_REASONING_EFFORT ("off" disables).
   reasoning_effort: "low"
+  # Is the deployment a reasoning model? true | false | auto. "auto" infers it
+  # from the deployment name (gpt-realtime-1.5, gpt-realtime, gpt-realtime-mini,
+  # gpt-4o-* => no; anything else => yes). Set it explicitly for custom names.
+  # Env override: AZURE_OPENAI_REALTIME_REASONING_MODEL.
+  reasoning_model: "auto"
   # parallel_tool_calls for reasoning models; null leaves the service default.
   parallel_tool_calls: null
 
