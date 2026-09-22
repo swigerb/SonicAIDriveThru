@@ -179,7 +179,7 @@ The **Stateful Order Manager** (`order_state.py`) is where deterministic busines
 
 The response takes three parallel paths back to the guest:
 
-- **Audio** → streams through the WebSocket back to the frontend → plays through the guest's speakers (with echo suppression engaged to prevent feedback loops). The AI's **Coral voice** — warm, friendly, unmistakably Sonic — delivers the response.
+- **Audio** → streams through the WebSocket back to the frontend → plays through the guest's speakers (with echo suppression engaged to prevent feedback loops). The AI's **Marin voice** — warm, friendly, unmistakably Sonic — delivers the response.
 - **Tool results** → the frontend parses JSON payloads and updates the **Carhop Ticket** in real-time: line items, customizations, combo groupings, subtotals, tax, and the running total. The POS Ticket view shows exactly what would print at the stall.
 - **Transcript** → the guest's words and the AI's response appear in the **Guest Conversation** panel with real-time transcription (and translation, if the guest is speaking Spanish, Mandarin, or another supported language).
 
@@ -193,7 +193,8 @@ The entire round trip — guest speech → AI understanding → tool execution �
 
 > **Note:** This demo uses sample Sonic Drive-In menu data (172 items) for demonstration purposes. All prices, promotions, and machine statuses are simulated to showcase the agentic architecture capabilities.
 
-- **Voice picker**: The settings dialog exposes ten GA realtime voices (alloy, ash, ballad, coral, echo, sage, shimmer, verse, marin, cedar) with short descriptors. Changing it takes effect on the live conversation without a redeploy — the choice is persisted in the browser and sent to the middle tier, which reissues a `session.update` with the voice at `audio.output.voice`. The initial default comes from `model.default_voice` in `app/backend/config.yaml`.
+- **Voice picker**: The settings dialog exposes every built-in voice `gpt-realtime-2.1` accepts — marin and cedar (marked *recommended*, OpenAI's highest-quality voices), shimmer, sage, coral, ballad, ash, verse, alloy, echo — with short descriptors (the list lives in `app/frontend/src/lib/voices.ts`; other names such as fable/onyx/nova are rejected by the service). Changing it takes effect on the live conversation without a redeploy — the choice is persisted in the browser and sent to the middle tier, which reissues a `session.update` with the voice at `audio.output.voice`. The default is **marin**, from `model.default_voice` in `app/backend/config.yaml` (deployed default: `AZURE_OPENAI_REALTIME_VOICE_CHOICE`, see [customizing the deployment](docs/customizing_deploy.md)).
+- **Session config can't silently fail**: GA rejects a `session.update` wholesale if any one field is unsupported — tools included. Every `session.update` the middle tier sends carries an `event_id`; if the service rejects one, the middle tier logs it at ERROR and immediately resends a minimal update (instructions + tools only) so the carhop keeps its tools. `azd deploy` runs a non-fatal smoke check (`scripts/smoke_realtime.py`) that verifies the live deployment accepts the exact session config. See [docs/customizing_deploy.md](docs/customizing_deploy.md#post-deploy-realtime-smoke-check).
 ### Architecture Diagram
 
 The `RTClient` in the frontend receives the audio input, sends that to the Python backend which uses an `RTMiddleTier` object to interface with the Azure OpenAI Realtime API, and includes a tool for searching Azure AI Search.

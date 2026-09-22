@@ -8,6 +8,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, Di
 import { useDummyDataContext } from "@/context/dummy-data-context";
 import { useAzureSpeechOnContext } from "@/context/azure-speech-context";
 import { Tooltip } from "@/components/ui/tooltip";
+import { VOICE_OPTIONS } from "@/lib/voices";
 
 interface SettingsProps {
     isMobile: boolean;
@@ -90,16 +91,11 @@ export default function Settings({ isMobile, showSessionTokens, onShowSessionTok
                         className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-primary dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100"
                         aria-label="Select carhop voice"
                     >
-                        <option value="shimmer">Shimmer — Cheerful &amp; Bright</option>
-                        <option value="sage">Sage — Calm &amp; Soothing</option>
-                        <option value="coral">Coral — Warm &amp; Confident</option>
-                        <option value="marin">Marin — Soft &amp; Hi-Fi (new)</option>
-                        <option value="cedar">Cedar — Gentle &amp; Hi-Fi (new)</option>
-                        <option value="ballad">Ballad — Caring &amp; Melodic</option>
-                        <option value="ash">Ash — Friendly &amp; Upbeat</option>
-                        <option value="verse">Verse — Natural &amp; Adaptable</option>
-                        <option value="alloy">Alloy — Neutral &amp; Crisp</option>
-                        <option value="echo">Echo — Deep &amp; Resonant</option>
+                        {VOICE_OPTIONS.map(voice => (
+                            <option key={voice.value} value={voice.value}>
+                                {voice.label}
+                            </option>
+                        ))}
                     </select>
                 </div>
             </div>

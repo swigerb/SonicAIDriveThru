@@ -43,3 +43,27 @@
     - an unconditional picker send fails 1.
   - Also added `GARealtime21SurfaceTests`: reasoning fields pass through but are never sent by default, and the picker offers exactly the 10 documented GA voices (allow-list mutation fails 1).
   - Watch-out: `test_rebrand_verification` flags the sibling brand's name in source comments, so refer to that repo generically.
+
+### 2026-09-22 — session.update self-healing tests + mutation check
+- `tests/test_session_bootstrap.py`: `FakeGARealtime` can now reject updates in configurable ways:
+  - `reject_keys`: reject any update carrying the given GA session keys;
+  - `reject_every_update`;
+  - `echo_event_id=False`, which mimics gpt-realtime-1.5 rejecting `reasoning` with `event_id=None` and `param=None`;
+  - it also rejects two unrelated client events: `conversation.item.delete` (echoes the event_id, `param=item_id`) and `input_audio_buffer.commit` (no event_id).
+- New `SessionUpdateFallbackTests`, run end to end through the real middle tier:
+  - every session.update carries a unique event_id;
+  - (a) a rejected bootstrap gets exactly ONE fallback whose session keys are exactly {type, instructions, tools, tool_choice}. Tools are registered, the browser never sees the error, and the next VAD response has the tools;
+  - the no-event_id variant of (a) also sets `_reasoning_rejected`, so later updates omit `reasoning`;
+  - (b) the fallback being rejected too causes no loop, with and without an echoed event_id. There are exactly 2 updates, and the fallback's error reaches the browser once. A new original gets its own single fallback;
+  - (c) the unrelated errors trigger no fallback and are forwarded.
+- New `SessionUpdateGuardTests` cover the correlation rules and one-fallback-per-original.
+- New `ReasoningAndTranscriptionConfigTests` cover:
+  - reasoning is sent only when configured and only on reasoning deployments, and never on 1.5, gpt-realtime, the dated snapshot, mini, or 4o;
+  - a client cannot inject `reasoning`;
+  - the env/config precedence matrix;
+  - the shipped `config.yaml` is rollback-safe.
+- **Mutation check:**
+  - `_recover_rejected_session_update` returning False fails 4 tests. They are (a) ×2 and (b) ×2, and all time out waiting for a fallback.
+  - Removing the one-fallback loop guard fails both (b) tests with `187 != 2` / `180 != 2` updates, i.e. a runaway loop.
+  - (c) is the negative control and correctly still passes.
+- Backend: 431 passed (baseline 412).

@@ -157,3 +157,20 @@ Fixed `useAzureSpeech.tsx`: (1) `onReceivedToolResponse` parameter was declared 
 - All rows now have consistent height with no crowding or overlapping
 
 **Verified:** Build green, 13/13 tests pass, no purple in CSS output, `bg-primary` resolves to `rgb(230,0,73)` (light) / `rgb(255,26,98)` (dark) — both Sonic brand red. Public API unchanged (checked, onCheckedChange, size variants, id, ref forwarding). Accessibility preserved (sr-only input, label association, aria-label). No new dependencies.
+
+### 2026-09-22 — Voice picker: single source of truth, marin default
+- New `app/frontend/src/lib/voices.ts` holds the picker's voice data:
+  - `VOICE_OPTIONS`: the ten voices `gpt-realtime-2.1` accepts (verified live by Unity).
+  - `DEFAULT_VOICE = "marin"`.
+  - `resolveVoice()`.
+- `settings.tsx` renders its `<option>`s from `VOICE_OPTIONS` instead of hard-coding them.
+- marin and cedar are listed first, with "(recommended)" in the label. That needed no layout change: it is the same `<select>`.
+- `App.tsx` initialises `voiceChoice` via `resolveVoice(localStorage.voiceChoice)`:
+  - a returning guest keeps a valid stored voice;
+  - a missing or unknown value, e.g. a retired `nova`, falls back to marin instead of being sent upstream and rejected.
+- New test `src/components/ui/__tests__/voice-picker.test.tsx`, 3 tests:
+  - it renders the real Settings dialog inside `AzureSpeechProvider` and `DummyDataProvider`, then opens it;
+  - it asserts all 10 voices with no duplicates, the marin default, the recommended markers, and `resolveVoice` fallbacks.
+- The backend test `test_voice_picker_offers_exactly_the_ga_voices` now parses `voices.ts`. A new `test_frontend_and_backend_default_voice_agree` checks it against `config.yaml`.
+- Websocket and reconnect code was not touched; a concurrent transport branch owns it.
+- **Verified:** `npm run build` green; `npm test` 16/16 (was 13). No `npm install`, so the lockfile is unchanged.

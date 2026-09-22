@@ -5,8 +5,11 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import re
 import time
+import uuid
+from collections import OrderedDict, deque
 from enum import Enum
 from typing import Any
 
@@ -53,7 +56,8 @@ _config = get_config()
 _conn_cfg = _config.get("connection", {})
 _security_cfg = _config.get("security", {})
 
-__all__ = ["RTMiddleTier", "RTToolCall", "Tool", "ToolResult", "ToolResultDirection"]
+__all__ = ["RTMiddleTier", "RTToolCall", "Tool", "ToolResult", "ToolResultDirection", "configure_realtime_model",
+           "deployment_supports_reasoning", "normalize_reasoning_effort"]
 
 # Connection tuning constants
 _WS_HEARTBEAT_SEC = _conn_cfg.get("ws_heartbeat_seconds", 15.0)
@@ -130,9 +134,9 @@ class RTToolCall:
 # the legacy (2024-10-01-preview) clients send is dropped, because GA rejects
 # unknown parameters outright instead of ignoring them.
 # `reasoning` ({effort}) and `parallel_tool_calls` exist only for reasoning
-# realtime models (gpt-realtime-2 / 2.1). They are allowed through so they can be
-# configured, but nothing sets them by default: the same payload must stay valid
-# on non-reasoning models like gpt-realtime-1.5.
+# realtime models (gpt-realtime-2 / 2.1). gpt-realtime-1.5 rejects the whole
+# session.update if they are present, so RTMiddleTier only sets them when the
+# deployment supports them (see `deployment_supports_reasoning`).
 _GA_SESSION_TOP_LEVEL = frozenset({
     "type", "model", "instructions", "tools", "tool_choice",
     "max_output_tokens", "output_modalities", "audio", "tracing",
@@ -244,6 +248,137 @@ def _strip_output_voice(ga_session: dict) -> bool:
         ga_session.pop("audio")
     return True
 
+
+# Values accepted by gpt-realtime-2.1 for `reasoning.effort` (probed live 2026-09-22).
+REASONING_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh"})
+# Config values that mean "do not send `reasoning` at all".
+_REASONING_DISABLED_VALUES = frozenset({"", "off", "disabled", "false", "null"})
+
+# Realtime model families that are NOT reasoning models. gpt-realtime-1.5 answers
+# `reasoning` (any effort, even "none") and `parallel_tool_calls: true` with
+# `invalid_value` "Unsupported option for this model" -- and drops the whole
+# session.update, tools included. The dated `gpt-realtime-2025-08-28` snapshot is
+# the original non-reasoning gpt-realtime, not gpt-realtime-2.
+_NON_REASONING_DEPLOYMENT_RE = re.compile(
+    r"^(gpt-4o.*|gpt-realtime(-mini.*|-1(\.\d+)?(-.*)?|-\d{4}-\d{2}-\d{2})?)$",
+    re.IGNORECASE,
+)
+
+
+def deployment_supports_reasoning(deployment: str | None) -> bool:
+    """Best-effort check from the deployment name. azd names deployments after
+    the model, so a rollback to `gpt-realtime-1.5` is recognised. Unrecognised
+    custom names are assumed to support reasoning; if they don't, the rejected
+    session.update is caught by the fallback in RTMiddleTier and reasoning is
+    switched off for the rest of the process."""
+    if not isinstance(deployment, str) or not deployment.strip():
+        return True
+    return _NON_REASONING_DEPLOYMENT_RE.match(deployment.strip()) is None
+
+
+def normalize_reasoning_effort(value: Any) -> str | None:
+    """Map a configured effort to the wire value, or None to omit `reasoning`.
+
+    Empty / "off" / "disabled" omit the field. "none" is a real effort level on
+    gpt-realtime-2.1 (no reasoning tokens) and is sent as-is.
+    """
+    if value is None:
+        return None
+    effort = str(value).strip().lower()
+    if effort in _REASONING_DISABLED_VALUES:
+        return None
+    if effort not in REASONING_EFFORTS:
+        logger.warning("Ignoring unknown reasoning effort %r (expected one of %s)", value, sorted(REASONING_EFFORTS))
+        return None
+    return effort
+
+
+def _new_event_id(prefix: str) -> str:
+    return f"{prefix}_{uuid.uuid4().hex[:20]}"
+
+
+# The fallback carries only what the conversation cannot work without. No voice
+# (cannot_update_voice), no audio config, no reasoning -- the usual suspects when
+# GA rejects an update.
+_FALLBACK_SESSION_KEYS = ("type", "instructions", "tools", "tool_choice")
+
+
+class _SessionUpdateGuard:
+    """Tracks the session.updates sent on ONE upstream socket so a rejection can
+    be correlated back to them.
+
+    GA rejects an invalid session.update wholesale and reports it only as an
+    `error` event. Most rejections echo our `event_id` in `error.event_id`, but
+    some do not (gpt-realtime-1.5 rejecting `reasoning` returns no event_id and
+    no param), so an uncorrelated invalid_request_error that arrives while one
+    of our updates is still unacknowledged is attributed to the oldest one --
+    the service processes client events in order.
+    """
+
+    _MAX_TRACKED = 64
+
+    def __init__(self) -> None:
+        # event_id -> event_id of the original if this is a fallback, else None
+        self._sent: OrderedDict[str, str | None] = OrderedDict()
+        self._payloads: dict[str, dict] = {}
+        self._in_flight: deque[str] = deque()
+        self._fallback_sent_for: set[str] = set()
+
+    def stamp(self, message: dict, fallback_of: str | None = None) -> dict:
+        """Ensure `message` carries an event_id and start tracking it."""
+        event_id = message.get("event_id") or _new_event_id("sonic_fallback" if fallback_of else "sonic_su")
+        message["event_id"] = event_id
+        self._sent[event_id] = fallback_of
+        self._payloads[event_id] = message.get("session") or {}
+        self._in_flight.append(event_id)
+        while len(self._sent) > self._MAX_TRACKED:
+            old, _ = self._sent.popitem(last=False)
+            self._payloads.pop(old, None)
+        return message
+
+    def track(self, payload: str, fallback_of: str | None = None) -> str:
+        """`stamp` for an already-serialised session.update."""
+        message = json.loads(payload)
+        had_id = bool(message.get("event_id"))
+        self.stamp(message, fallback_of)
+        return payload if had_id else json.dumps(message)
+
+    def on_session_updated(self) -> None:
+        if self._in_flight:
+            self._in_flight.popleft()
+
+    def correlate(self, error_event: dict) -> str | None:
+        """Return the event_id of our session.update this error rejects, or None."""
+        err = error_event.get("error") or {}
+        event_id = err.get("event_id")
+        if event_id:
+            if event_id not in self._sent:
+                return None
+            try:
+                self._in_flight.remove(event_id)
+            except ValueError:
+                pass
+            return event_id
+        param = err.get("param") or ""
+        if (self._in_flight and err.get("type") == "invalid_request_error"
+                and (not param or param.startswith("session"))):
+            return self._in_flight.popleft()
+        return None
+
+    def original_of(self, event_id: str) -> str | None:
+        return self._sent.get(event_id)
+
+    def payload_of(self, event_id: str) -> dict:
+        return self._payloads.get(event_id, {})
+
+    def claim_fallback(self, event_id: str) -> bool:
+        """True exactly once per original session.update."""
+        if event_id in self._fallback_sent_for:
+            return False
+        self._fallback_sent_for.add(event_id)
+        return True
+
+
 class RTMiddleTier:
     endpoint: str
     deployment: str
@@ -261,6 +396,14 @@ class RTMiddleTier:
     max_tokens: int | None = None
     disable_audio: bool | None = None
     voice_choice: str | None = None
+    # audio.input.transcription.model. whisper-1 works on Azure without its own
+    # deployment; gpt-4o(-mini)-transcribe are ACCEPTED by session.update but
+    # then fail every turn with DeploymentNotFound unless deployed separately.
+    transcription_model: str | None = None
+    # reasoning.effort for reasoning realtime models; None omits the field.
+    reasoning_effort: str | None = None
+    parallel_tool_calls: bool | None = None
+    _reasoning_rejected: bool = False
 
     def __init__(self, endpoint: str, deployment: str, credentials: AzureKeyCredential | DefaultAzureCredential, voice_choice: str | None = None, prompt_loader=None):
         self.endpoint = endpoint
@@ -273,6 +416,9 @@ class RTMiddleTier:
         self._prompt_loader = prompt_loader
         self._sessions = SessionManager(prompt_loader=prompt_loader)
         self.app_secret: bytes = b""  # set by app.py at startup
+        # Flipped if the deployment rejects `reasoning` at runtime despite the
+        # name check, so later sessions stop sending it.
+        self._reasoning_rejected = False
         if voice_choice is not None:
             logger.info("Realtime voice choice set to %s", voice_choice)
         if isinstance(credentials, AzureKeyCredential):
@@ -281,7 +427,7 @@ class RTMiddleTier:
             self._token_provider = get_bearer_token_provider(credentials, "https://cognitiveservices.azure.com/.default")
             self._token_provider() # Warm up during startup so we have a token cached when the first request arrives
 
-    def build_voice_update(self, voice: str) -> str:
+    def build_voice_update(self, voice: str, event_id: str | None = None) -> str:
         """Serialise a session.update that switches the assistant voice.
 
         The voice is expressed in the legacy shape and then translated, so it
@@ -290,7 +436,16 @@ class RTMiddleTier:
         rejected and the voice silently never changes.
         """
         ga_session = _to_ga_session({"voice": voice})
-        return json.dumps({"type": "session.update", "session": ga_session})
+        return json.dumps({"type": "session.update", "event_id": event_id or _new_event_id("sonic_voice"),
+                           "session": ga_session})
+
+    def _reasoning_model(self) -> bool:
+        """Whether reasoning-model-only fields may be sent upstream at all."""
+        return not self._reasoning_rejected and deployment_supports_reasoning(getattr(self, "deployment", None))
+
+    def reasoning_enabled(self) -> bool:
+        """Whether `reasoning` will be sent upstream."""
+        return normalize_reasoning_effort(self.reasoning_effort) is not None and self._reasoning_model()
 
     def _build_session(self, session: dict, voice_locked: bool = False) -> dict:
         """Overlay the server-owned configuration onto a legacy-shaped session
@@ -314,6 +469,21 @@ class RTMiddleTier:
             session["voice"] = self.voice_choice
         session["tool_choice"] = "auto" if len(self.tools) > 0 else "none"
         session["tools"] = [tool.schema for tool in self.tools.values()]
+        if self.transcription_model:
+            transcription = session.get("input_audio_transcription")
+            session["input_audio_transcription"] = {
+                **(transcription if isinstance(transcription, dict) else {}),
+                "model": self.transcription_model,
+            }
+        # Server-owned: never trust a client-supplied value for these, since
+        # an unsupported one takes the tools down with it.
+        session.pop("reasoning", None)
+        session.pop("parallel_tool_calls", None)
+        if self._reasoning_model():
+            if (effort := normalize_reasoning_effort(self.reasoning_effort)) is not None:
+                session["reasoning"] = {"effort": effort}
+            if self.parallel_tool_calls is not None:
+                session["parallel_tool_calls"] = bool(self.parallel_tool_calls)
         # Clients speak the legacy (2024-10-01-preview) session shape.
         # Translate to the GA shape here so the browser contract is
         # unchanged, and so unsupported legacy keys are dropped rather
@@ -323,7 +493,7 @@ class RTMiddleTier:
             logger.info("session.update: assistant audio already present — omitting voice so the update is not rejected")
         return ga_session
 
-    def build_bootstrap_session_update(self) -> str:
+    def build_bootstrap_session_update(self, event_id: str | None = None) -> str:
         """Serialise the session.update the middle tier sends as the very first
         frame on every upstream socket, before any browser traffic is relayed.
 
@@ -334,7 +504,55 @@ class RTMiddleTier:
         rejected, so tools are never registered for that conversation.
         """
         session = self._build_session(copy.deepcopy(_BOOTSTRAP_CLIENT_SESSION))
-        return json.dumps({"type": "session.update", "session": session})
+        return json.dumps({"type": "session.update", "event_id": event_id or _new_event_id("sonic_bootstrap"),
+                           "session": session})
+
+    def build_fallback_session_update(self, event_id: str | None = None) -> str:
+        """Serialise the minimal session.update sent when GA rejects one of ours.
+
+        Only `type`, `instructions`, `tools` and `tool_choice` -- whatever field
+        got the original rejected, the carhop keeps its tools and persona.
+        """
+        full = self._build_session({}, voice_locked=True)
+        session = {key: full[key] for key in _FALLBACK_SESSION_KEYS if key in full}
+        return json.dumps({"type": "session.update", "event_id": event_id or _new_event_id("sonic_fallback"),
+                           "session": session})
+
+    async def _recover_rejected_session_update(self, message: dict, server_ws, guard: "_SessionUpdateGuard | None",
+                                               session_id: str | None) -> bool:
+        """Handle an upstream `error` that rejects one of our session.updates.
+
+        Returns True if the error was consumed (a fallback was sent), False if
+        it should reach the browser: unrelated errors, and a rejected fallback.
+        """
+        if guard is None:
+            return False
+        event_id = guard.correlate(message)
+        if event_id is None:
+            return False
+        err = message.get("error") or {}
+        code, param, text = err.get("code"), err.get("param"), err.get("message")
+        original = guard.original_of(event_id)
+        if original is not None or not guard.claim_fallback(event_id):
+            logger.error(
+                "Fallback session.update %s (for %s) was ALSO rejected: code=%s param=%s message=%s -- "
+                "tools may NOT be registered for this conversation (session=%s)",
+                event_id, original, code, param, text, session_id)
+            return False
+        logger.error(
+            "Upstream REJECTED session.update %s: code=%s param=%s message=%s -- resending a minimal "
+            "session.update (instructions + tools only) so the tools survive (session=%s)",
+            event_id, code, param, text, session_id)
+        rejected = guard.payload_of(event_id)
+        if (("reasoning" in rejected or "parallel_tool_calls" in rejected)
+                and (not param or param.startswith(("session.reasoning", "session.parallel_tool_calls")))):
+            self._reasoning_rejected = True
+            logger.error("Deployment %s rejected reasoning-model options; no longer sending `reasoning` / "
+                         "`parallel_tool_calls` from this process. Set model.reasoning_effort to \"\" for this "
+                         "deployment.", getattr(self, "deployment", "?"))
+        fallback = guard.track(self.build_fallback_session_update(), fallback_of=event_id)
+        await server_ws.send_str(fallback)
+        return True
 
     def _get_auth_token(self) -> str:
         """Return the cached token, falling back to a synchronous call if needed."""
@@ -368,7 +586,7 @@ class RTMiddleTier:
             self._token_refresh_task.cancel()
         self._sessions.stop_idle_checker()
 
-    async def _process_message_to_client(self, msg: str, client_ws: web.WebSocketResponse, server_ws: web.WebSocketResponse, tools_pending: dict[str, RTToolCall], verbose: bool = False) -> str | None:
+    async def _process_message_to_client(self, msg: str, client_ws: web.WebSocketResponse, server_ws: web.WebSocketResponse, tools_pending: dict[str, RTToolCall], verbose: bool = False, guard: "_SessionUpdateGuard | None" = None) -> str | None:
         data = msg.data
 
         # FAST PATH: extract type via regex without full JSON parse.
@@ -411,10 +629,22 @@ class RTMiddleTier:
             _vlog(verbose, "─── [Server → Client] %s ───", msg_type)
             match msg_type:
                 case "error":
+                    # A rejected session.update of ours is recovered here (minimal
+                    # fallback) instead of surfacing as a user-facing failure.
+                    if await self._recover_rejected_session_update(message, server_ws, guard, session_id):
+                        _vlog(verbose, "  ⚠ session.update rejected — fallback sent: %s", json.dumps(message, default=str)[:500])
+                        return None
                     # Surface OpenAI errors (e.g. rejected session.update, malformed tool schemas)
                     # so they don't silently vanish into the client.
                     logger.error("OpenAI Realtime API error: %s", json.dumps(message, default=str)[:1000])
                     _vlog(verbose, "  ⚠ ERROR: %s", json.dumps(message, default=str)[:500])
+
+                case "conversation.item.input_audio_transcription.failed":
+                    # e.g. DeploymentNotFound when the configured transcription
+                    # model has no Azure deployment: the session.update was
+                    # accepted, but no guest speech is ever transcribed.
+                    logger.error("Input audio transcription failed (model=%s): %s", self.transcription_model,
+                                 json.dumps(message.get("error"), default=str)[:500])
 
                 case "session.created":
                     session = message["session"]
@@ -576,7 +806,7 @@ class RTMiddleTier:
 
         return updated_message
 
-    async def _process_message_to_server(self, msg: str, ws: web.WebSocketResponse, verbose: bool = False, voice_locked: bool = False) -> str | None:
+    async def _process_message_to_server(self, msg: str, ws: web.WebSocketResponse, verbose: bool = False, voice_locked: bool = False, guard: "_SessionUpdateGuard | None" = None) -> str | None:
         data = msg.data
 
         # FAST PATH: input_audio_buffer.append is the most frequent client message
@@ -595,10 +825,16 @@ class RTMiddleTier:
                     session = self._build_session(message["session"], voice_locked=voice_locked)
                     tool_names = [t.get("name", "?") for t in session["tools"]]
                     message["session"] = session
+                    # Every session.update carries an event_id so a rejection can
+                    # be correlated and recovered (see _recover_rejected_session_update).
+                    if guard is not None:
+                        guard.stamp(message)
+                    else:
+                        message.setdefault("event_id", _new_event_id("sonic_su"))
                     logger.info(
-                        "session.update: injected %d tools %s, tool_choice=%s, max_tokens=%s",
+                        "session.update: injected %d tools %s, tool_choice=%s, max_tokens=%s, reasoning=%s",
                         len(session["tools"]), tool_names, session["tool_choice"],
-                        session.get("max_output_tokens"),
+                        session.get("max_output_tokens"), session.get("reasoning"),
                     )
                     _vlog(verbose, "  Injected %d tools: %s, tool_choice=%s",
                           len(session["tools"]), tool_names, session["tool_choice"])
@@ -651,6 +887,7 @@ class RTMiddleTier:
                 # from then on GA refuses voice changes (see _build_session).
                 assistant_audio_seen = False
                 session_configured = asyncio.Event()
+                guard = _SessionUpdateGuard()
 
                 _vlog(verbose, "\n═══ [SESSION] Connected ═══\n"
                                "Session ID: %s\n"
@@ -659,9 +896,11 @@ class RTMiddleTier:
                 # Configure the upstream session BEFORE relaying a single browser
                 # frame. Events are processed in order, so nothing the browser
                 # sends (mic audio included) can reach an unconfigured session.
-                await target_ws.send_str(self.build_bootstrap_session_update())
-                logger.info("Upstream session bootstrapped with %d tools before relaying client traffic (session=%s)",
-                            len(self.tools), session_id)
+                await target_ws.send_str(guard.track(self.build_bootstrap_session_update()))
+                logger.info("Upstream session bootstrapped with %d tools before relaying client traffic "
+                            "(reasoning=%s, session=%s)", len(self.tools),
+                            normalize_reasoning_effort(self.reasoning_effort) if self.reasoning_enabled() else "off",
+                            session_id)
 
                 async def send_greeting_once(trigger: str = "unknown"):
                     nonlocal greeting_sent
@@ -760,7 +999,7 @@ class RTMiddleTier:
                                                 # GA would reject this with cannot_update_voice.
                                                 logger.info("Assistant audio already present — voice %s applies from the next conversation", new_voice)
                                             else:
-                                                await target_ws.send_str(self.build_voice_update(new_voice))
+                                                await target_ws.send_str(guard.track(self.build_voice_update(new_voice)))
                                         continue
                                 except (json.JSONDecodeError, KeyError):
                                     pass
@@ -776,7 +1015,7 @@ class RTMiddleTier:
                             if _MARKER_RESPONSE_CANCEL in msg.data:
                                 echo.on_barge_in(verbose)
                             # Forward client message to OpenAI.
-                            new_msg = await self._process_message_to_server(msg, ws, verbose, voice_locked=assistant_audio_seen)
+                            new_msg = await self._process_message_to_server(msg, ws, verbose, voice_locked=assistant_audio_seen, guard=guard)
                             if new_msg is not None:
                                 await target_ws.send_str(new_msg)
                             # The browser's session.update marks the start of a conversation.
@@ -810,10 +1049,12 @@ class RTMiddleTier:
                             # The bootstrap session.updated arrives as soon as the socket
                             # opens, so it must NOT trigger the greeting -- the browser's
                             # session.update (conversation start) does that.
-                            if _MARKER_SESSION_UPDATED in data and not session_configured.is_set():
-                                logger.info("session.updated received — tools are configured (session=%s)", session_id)
-                                _vlog(verbose, "─── [Lifecycle] session.updated — session configured ───")
-                                session_configured.set()
+                            if _MARKER_SESSION_UPDATED in data:
+                                guard.on_session_updated()
+                                if not session_configured.is_set():
+                                    logger.info("session.updated received — tools are configured (session=%s)", session_id)
+                                    _vlog(verbose, "─── [Lifecycle] session.updated — session configured ───")
+                                    session_configured.set()
 
                             # Verbose: log conversation transcription events
                             if (verbose or _VERBOSE_GLOBAL):
@@ -829,7 +1070,7 @@ class RTMiddleTier:
                                     except (json.JSONDecodeError, KeyError):
                                         pass
 
-                            new_msg = await self._process_message_to_client(msg, ws, target_ws, tools_pending, verbose)
+                            new_msg = await self._process_message_to_client(msg, ws, target_ws, tools_pending, verbose, guard=guard)
                             if new_msg is not None:
                                 await ws.send_str(new_msg)
                         elif msg.type == aiohttp.WSMsgType.ERROR:
@@ -892,3 +1133,24 @@ class RTMiddleTier:
     
     def attach_to_app(self, app: web.Application, path: str) -> None:
         app.router.add_get(path, self._websocket_handler)
+
+
+def configure_realtime_model(rtmt: RTMiddleTier, model_cfg: dict, environ: Any = None) -> RTMiddleTier:
+    """Apply `config.yaml` `model:` settings plus their env overrides to `rtmt`.
+
+    Shared by app.py and scripts/smoke_realtime.py so the smoke check sends
+    exactly the session the app sends.
+    """
+    env = os.environ if environ is None else environ
+    rtmt.temperature = model_cfg.get("temperature", 0.6)
+    rtmt.max_tokens = model_cfg.get("max_response_output_tokens", 4096)
+    rtmt.transcription_model = (env.get("AZURE_OPENAI_REALTIME_TRANSCRIPTION_MODEL")
+                                or model_cfg.get("transcription_model") or "whisper-1")
+    effort = env.get("AZURE_OPENAI_REALTIME_REASONING_EFFORT")
+    rtmt.reasoning_effort = normalize_reasoning_effort(effort if effort else model_cfg.get("reasoning_effort"))
+    parallel = model_cfg.get("parallel_tool_calls")
+    rtmt.parallel_tool_calls = None if parallel is None else bool(parallel)
+    if rtmt.reasoning_effort is not None and not deployment_supports_reasoning(rtmt.deployment):
+        logger.info("Deployment %s is not a reasoning model; `reasoning` (effort=%s) will not be sent",
+                    rtmt.deployment, rtmt.reasoning_effort)
+    return rtmt

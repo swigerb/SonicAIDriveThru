@@ -101,3 +101,20 @@ Detailed technical learnings from demo readiness, debugging, and prompt external
 - **Search index ingestion architecture**: Three notebooks in `scripts/`: (1) `sonic_menu_ingestion_search.ipynb` — reads from `sonic-menu-items.json` (1334 products, nested Sonic API format), the original production ingestion. (2) `menu_ingestion_search_json.ipynb` — reads from `menuItems.json` (flat 50-item format), simpler and correct for current use. (3) `menu_ingestion_search_pdf.ipynb` — PDF-based ingestion (not relevant). The JSON notebook is the one to use going forward — it reads `menuItems.json`, generates 3072-dim embeddings, and uploads in batches of 15 to the index named in `AZURE_SEARCH_INDEX` env var. The `structured_menu_items` file at repo root is a reference snapshot — the notebook reads directly from `menuItems.json`, not from it.
 - **rtmt.py Code Organization (Phase 3)**: Broke 766-line god file into 3 focused modules: `session_manager.py` (154 lines — SessionManager class for session lifecycle, greeting state, ContextMonitor for token tracking), `audio_pipeline.py` (199 lines — EchoSuppressor class, verbose logging infrastructure, audio constants/markers), and `rtmt.py` (586 lines — thin orchestrator, RTMiddleTier, WebSocket routing, message processing). Public API unchanged — `from rtmt import RTMiddleTier, ToolResult, ToolResultDirection, Tool, RTToolCall` still works. No circular imports. EchoSuppressor encapsulates the ai_speaking/cooldown_end/greeting_in_progress state machine with clean methods (should_suppress_audio, on_audio_delta, on_audio_done, on_speech_started, on_barge_in). SessionManager owns _session_map, _sent_greeting, and _context_monitors dicts — single point of cleanup in cleanup_session().
 - **Context Window Monitoring**: Added ContextMonitor class in session_manager.py. Tracks estimated token usage per session using ~4 chars/token heuristic. Logs WARNING at 80% and CRITICAL at 95% of configurable max_tokens (128K default). Tracks: system message, tool schemas, tool call args/results, AI response content, user transcriptions, greeting text. Config in config.yaml under `context:` key. No truncation — monitoring only. Warns once per threshold per session (no spam).
+
+### 2026-09-22 — Realtime model config plumbing (with Unity)
+- `configure_realtime_model(rtmt, model_cfg, environ)` in `rtmt.py` is now the single place that applies the `config.yaml` `model:` settings. app.py and `scripts/smoke_realtime.py` both call it, so the smoke check sends exactly what the app sends. It applies:
+  - temperature and max_tokens;
+  - `transcription_model`, with env `AZURE_OPENAI_REALTIME_TRANSCRIPTION_MODEL`;
+  - `reasoning_effort`, with env `AZURE_OPENAI_REALTIME_REASONING_EFFORT`;
+  - `parallel_tool_calls`.
+- Env precedence: an empty env value falls back to `config.yaml`, and `off` disables. Watch out: YAML parses an unquoted `off` as `False`, and `normalize_reasoning_effort` treats that as disabled.
+- The `infra/main.bicep` container env gains optional `AZURE_OPENAI_REALTIME_REASONING_EFFORT` / `AZURE_OPENAI_REALTIME_TRANSCRIPTION_MODEL`:
+  - they are added via `union()` only when set, so the default deploy is unchanged;
+  - `main.parameters.json` maps them from azd env;
+  - the voice default is now `${AZURE_OPENAI_REALTIME_VOICE_CHOICE=marin}`.
+- **Gotcha:** an azd env value beats the parameters-file default. The `sonic-demo` env had `shimmer` pinned and was updated with `azd env set AZURE_OPENAI_REALTIME_VOICE_CHOICE marin`. That file is gitignored, so other existing environments need the same command.
+- azure.yaml has a new **non-fatal** `postdeploy` hook, `scripts/smoke_realtime.ps1` / `.sh`:
+  - `continueOnError: true` and `interactive: false`;
+  - the wrapper always exits 0 and prints a loud warning on failure or when the check could not run;
+  - it skips if there is no venv, or if `SONIC_SKIP_REALTIME_SMOKE=true`.
