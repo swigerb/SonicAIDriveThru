@@ -9,7 +9,9 @@
     },
     "status": {
         "notRecordingMessage": "¡Ordena desde el Drive-In favorito de América!",
-        "conversationInProgress": "Conversación en progreso"
+        "conversationInProgress": "Conversación en progreso",
+        "sessionEndedIdle": "La sesión terminó por inactividad. Toca el micrófono para empezar un nuevo pedido.",
+        "connectionLost": "Se perdió la conexión. Toca el micrófono para empezar de nuevo."
     },
     "history": {
         "transcriptHistory": "Historial de transcripciones",

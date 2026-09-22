@@ -74,3 +74,20 @@
 - **Documentation**: Added full "Enable Entra ID Authentication" section to `DEPLOY.md` covering app registration, service principal creation, `appRoleAssignmentRequired`, user assignment, client secret, `azd env set` commands, and verification steps.
 - **Validation**: `az bicep build` zero errors (warnings only — all pre-existing except expected `no-hardcoded-env-urls` for `login.microsoftonline.com`). `ruff check .` clean. 368 tests pass + 1 pre-existing failure (`test_default_voice_is_coral` — expects "coral", config defaults to "shimmer"; unrelated to infra changes).
 
+
+- **WS transport investigation, infra findings (2026-09-22, read-only)**
+  - Transport path: Envoy ingress → EasyAuth sidecar (`http-auth`) → aiohttp. Chromium's `permessage-deflate` offer reached aiohttp intact; the proxies pass extensions through.
+  - Container app `capps-backend-axgpampkq3yfa`: min 1 / max 5 replicas, http scale at 20 concurrent, **no sticky sessions**. The Dockerfile runs gunicorn **`--workers 2`**.
+  - **Alert:** at inspection time the latest revision `--0000004` was serving `containerapps-helloworld` with 100% of traffic, while azd revision `azd-1790113609` had 0%. A provision probably overwrote the image. Nothing was changed; this needs a redeploy by the owner.
+  - The aiohttp fix for #13274 is unreleased. Re-enable `connection.ws_compression` only after a release that contains aio-libs/aiohttp#13302 and a green `test_ws_transport`.
+
+- **azd `exists` wiring fix: root cause of the helloworld revision (2026-09-22, `fix/ws-transport`)**
+  - `infra/main.parameters.json` mapped `webAppExists` to `${SERVICE_WEB_RESOURCE_EXISTS=false}`. The azd service in `azure.yaml` is `backend`, so azd only ever sets `SERVICE_BACKEND_RESOURCE_EXISTS`.
+  - As a result `exists` was always false. `container-app-upsert.bicep` never read the running image, and `container-app.bicep` fell back to `containerapps-helloworld:latest` on every `azd provision`.
+  - Fix: map it to `${SERVICE_BACKEND_RESOURCE_EXISTS=false}`. This was the only `SERVICE_WEB_` reference in the repo.
+  - Guard: `app/backend/tests/test_azd_service_wiring.py` (3 tests):
+    - every `SERVICE_*_RESOURCE_EXISTS` variable names a real azure.yaml service;
+    - every containerapp service has a mapping;
+    - `azd-service-name` tags in main.bicep are declared services.
+  - Mutation-checked. Reverting to `SERVICE_WEB_` fails 2 tests; changing the tag to `web` fails 1.
+  - `az bicep build`: 0 errors, and the same pre-existing warnings as before.

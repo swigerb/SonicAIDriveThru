@@ -2,16 +2,24 @@ import "./status-message.css";
 import { useTranslation } from "react-i18next";
 import { memo } from "react";
 
+export type ConnectionNotice = "idle" | "lost" | null;
+
 type Properties = {
     isRecording: boolean;
+    notice?: ConnectionNotice;
 };
 
-export default memo(function StatusMessage({ isRecording }: Properties) {
+const NOTICE_KEYS: Record<Exclude<ConnectionNotice, null>, string> = {
+    idle: "status.sessionEndedIdle",
+    lost: "status.connectionLost"
+};
+
+export default memo(function StatusMessage({ isRecording, notice = null }: Properties) {
     const { t } = useTranslation();
     if (!isRecording) {
         return (
             <p className="text mb-4 mt-6 text-sm text-muted-foreground" aria-live="polite">
-                {t("status.notRecordingMessage")}
+                {t(notice ? NOTICE_KEYS[notice] : "status.notRecordingMessage")}
             </p>
         );
     }

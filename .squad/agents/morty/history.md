@@ -157,3 +157,19 @@ Fixed `useAzureSpeech.tsx`: (1) `onReceivedToolResponse` parameter was declared 
 - All rows now have consistent height with no crowding or overlapping
 
 **Verified:** Build green, 13/13 tests pass, no purple in CSS output, `bg-primary` resolves to `rgb(230,0,73)` (light) / `rgb(255,26,98)` (dark) — both Sonic brand red. Public API unchanged (checked, onCheckedChange, size variants, id, ref forwarding). Accessibility preserved (sr-only input, label association, aria-label). No new dependencies.
+
+- **Realtime socket lifecycle hardening (2026-09-22, `fix/ws-transport`)**
+  - `useRealtime.tsx`:
+    - Waits for the `/api/auth/session` fetch before opening the socket. Previously a first socket was torn down and replaced the moment the token arrived.
+    - `shouldReconnect` is false for close 4000 (`WS_CLOSE_IDLE_TIMEOUT`), and `connect` is flipped off after it. `onReconnectStop` also turns connect off.
+    - New `reconnect()` fetches a fresh token and reconnects. New `onConnectionLost({code, reason, idle})` and `isConnected`.
+    - **Audio append, buffer clear and `response.cancel` now use `sendJsonMessage(msg, false)`.** react-use-websocket queues messages (keep=true) while the socket isn't OPEN and replays them onto the *next* socket; that is how mic audio reached a fresh upstream ahead of `session.update`.
+  - `App.tsx`:
+    - Any close during a conversation stops it (mic off, player stopped). The mic is never auto-resumed.
+    - The notice reads "Session ended after inactivity…" for 4000, or "Connection lost…" otherwise. The latter appears only if the conversation was active or the ticket had items.
+    - The next tap resets the ticket (the server order is gone), reconnects if the socket is down, and the queued `session.update` flushes on open.
+  - `StatusMessage` gained a `notice` prop; i18n added in en/es/fr/ja.
+  - Verified in real Chromium against the built app plus the real middle tier:
+    - 4000 → notice shown, no reconnect.
+    - Tap → exactly one new session, then the greeting.
+    - 1011 mid-conversation → mic stops, "Connection lost" shows, a background reconnect happens, and only the server bootstrap reaches the new upstream.

@@ -9,7 +9,9 @@
     },
     "status": {
         "notRecordingMessage": "Commandons chez America's Drive-In !",
-        "conversationInProgress": "Conversation en cours"
+        "conversationInProgress": "Conversation en cours",
+        "sessionEndedIdle": "Session terminée pour inactivité. Touchez le micro pour commencer une nouvelle commande.",
+        "connectionLost": "Connexion perdue. Touchez le micro pour recommencer."
     },
     "history": {
         "transcriptHistory": "Historique de la transcription",

@@ -1297,3 +1297,16 @@ Three interconnected bugs in combo ordering flow:
 - ✅ Comprehensive regression protection for future combo refactors
 - ✅ All 354 tests passing
 - ✅ Demo-ready: no silent billing or defaulting surprises
+
+## WebSocket Transport Fix (2026-09-22, `fix/ws-transport`)
+
+### Context
+Production error `Received frame with non-zero reserved bits` (2026-09-22T21:03:15Z, session 09ccb306). Root cause: an aiohttp 3.14.2/3.14.3 reader regression (aio-libs/aiohttp#13274). The first permessage-deflate data frame after an initial client PONG is rejected with 1002. The upstream fix, #13302, is merged but unreleased. Trigger: the 300s idle close, then a silent auto-reconnect, then a socket idle past one heartbeat before the mic tap.
+
+### Decisions Made
+1. **Deflate off** (Summer): `connection.ws_compression: false`. The browser `WebSocketResponse(compress=...)` reads this flag, and the upstream `ws_connect(compress=0)` is set explicitly.
+   - Measured: ~33% fewer bytes for ~5× the socket CPU.
+   - Re-enable only on an aiohttp release that contains #13302, with `tests/test_ws_transport.py` green.
+2. **Idle close is terminal** (Summer/Morty): `4000 / "idle_timeout"` (`session_manager.IDLE_CLOSE_CODE`). The frontend doesn't auto-reconnect and shows a "session ended" notice; the next tap reconnects with a fresh token and starts a fresh order.
+3. **No live-mic reconnects** (Morty): any close ends the active conversation. The mic is never auto-resumed. Audio, buffer clear and cancel are sent with `keep=false`, so they are never queued onto a later socket.
+4. **Order resume** (Rick): planned, not implemented. The prerequisite is gunicorn `--workers 1` plus ACA sticky sessions.

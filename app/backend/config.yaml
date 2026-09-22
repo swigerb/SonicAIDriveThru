@@ -37,6 +37,11 @@ search:
 
 connection:
   ws_heartbeat_seconds: 15.0
+  # permessage-deflate on the browser websocket. Keep false: aiohttp 3.14.2/3.14.3
+  # reject the first compressed frame after an initial PONG (aio-libs/aiohttp#13274),
+  # and base64 PCM only deflates ~33% for ~5x the socket CPU. Revisit once a fixed
+  # aiohttp release ships.
+  ws_compression: false
   ws_connect_timeout_total: 30
   ws_connect_timeout_connect: 10
   client_max_size_bytes: 4194304
