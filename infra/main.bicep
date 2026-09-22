@@ -244,11 +244,11 @@ module acaBackend 'core/host/container-app-upsert.bicep' = {
 var embedModel = 'text-embedding-3-large'
 var openAiDeployments = [
   {
-    name: 'gpt-realtime-1.5'
+    name: 'gpt-realtime-2.1'
     model: {
       format: 'OpenAI'
-      name: 'gpt-realtime-1.5'
-      version: '2026-02-23'
+      name: 'gpt-realtime-2.1'
+      version: '2026-07-07'
     }
     sku: {
       name: 'GlobalStandard'

@@ -2,11 +2,11 @@
   "version": 1,
   "teamRoot": ".",
   "agentModelOverrides": {
-    "rick": "claude-opus-4.6",
-    "morty": "claude-opus-4.6",
-    "summer": "claude-opus-4.6",
-    "birdperson": "claude-opus-4.6",
-    "squanchy": "claude-opus-4.6",
-    "unity": "claude-opus-4.6"
+    "rick": "claude-opus-5.5",
+    "morty": "claude-opus-5.5",
+    "summer": "claude-opus-5.5",
+    "birdperson": "claude-opus-5.5",
+    "squanchy": "claude-opus-5.5",
+    "unity": "claude-opus-5.5"
   }
 }

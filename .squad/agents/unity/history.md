@@ -126,5 +126,62 @@ Since `app/frontend/` is off-limits, the middleware (`rtmt.py` + `audio_pipeline
 - Which exact event names appear on the wire from `gpt-realtime-1.5`?
 - Which voices does `gpt-realtime-1.5` actually support? (docs don't enumerate per-model)
 
+### 2026-09-22: $0.00 Carhop Ticket — Unconfigured Upstream Session + GA Voice Lock; gpt-realtime-2.1
+
+**Problem:** On the deployed demo the Carhop Ticket stayed at $0.00 for the whole conversation. The assistant sounded in character but never called a tool. Its first reply was generic ("Hey there! Sounds like you're just warming up..."). No application code had changed since the verified August deploy.
+
+**Root Cause (confirmed in prod Log Analytics + a local repro against the real endpoint):**
+- The browser sends `session.update` only from `startSession()`, i.e. when the mic is pressed. It does not send one when react-use-websocket auto-reconnects.
+- Prod sequence:
+  - 21:02:30 — the idle checker closed the session.
+  - 21:03:15 — `Received frame with non-zero reserved bits` killed the new socket. It auto-reconnected with the mic live.
+  - The fresh upstream session ran on service defaults: no tools, generic instructions, voice alloy, server VAD auto-responding.
+  - 21:03:24 — the model answered the mic audio; that was the generic line.
+  - 21:03:30 — the browser's `session.update` (4 tools, `tool_choice=auto`, voice shimmer) was **rejected** with `invalid_request_error` / `cannot_update_voice`.
+- GA rejects the *whole* event, so tools and instructions were never applied. The "persona" came only from the greeting item text.
+- Two premises were wrong. There *was* an error event, and the instructions were *not* reaching the model.
+- `tool_choice` was never "none": `self.tools` is populated synchronously before `attach_to_app`.
+- Voice lock, verified live on gpt-realtime-1.5:
+  - Sending the same voice after audio is accepted.
+  - Sending a different voice after audio rejects the whole event.
+  - Omitting the voice is accepted.
+
+**Fix (`rtmt.py`):**
+- A server-authoritative bootstrap `session.update` is now the first upstream frame after `ws_connect`. It carries tools, instructions, voice, and the browser's VAD/transcription values (`_BOOTSTRAP_CLIENT_SESSION`).
+- A per-connection `assistant_audio_seen` flag tracks when the model has spoken.
+  - Once it is set, `_build_session(voice_locked=True)` strips `audio.output.voice`.
+  - `extension.set_voice` is deferred once it is set. The picker's voice is process-wide, so another tab can change it mid-call.
+- The greeting waits for `session.updated` (5 s timeout). This is the same fix as the sibling brand repo's `ba8c94d`.
+- The greeting is triggered by the client `session.update`, not the bootstrap, so the page never greets unprompted.
+- The server-override logic moved into `_build_session()`, so the bootstrap and the client update share one path.
+
+**Validation:**
+- Local repro (reconnect scenario, real AOAI):
+  - Before the fix: `cannot_update_voice`, `update_order_calls=0`, total $0.00.
+  - After the fix: no error, `update_order_calls=2`, total $10.13.
+- `tests/test_session_bootstrap.py` has 10 tests. Mutation-checked:
+  - reverting rtmt.py fails 6;
+  - removing the bootstrap fails 5;
+  - removing the voice strip fails 3;
+  - an unconditional picker send fails 1.
+- 412 backend tests pass; ruff is clean.
+
+**gpt-realtime-2.1 (GA 2026-07-07, retires 2027-07-31):**
+- `infra/main.bicep` → `gpt-realtime-2.1` / `2026-07-07` / `GlobalStandard`.
+  - The deployment name changes, so ARM's incremental mode leaves the old 1.5 deployment in place for rollback.
+- The GA surface is unchanged vs 1.5: same URL, session shape, event names, and 10 voices.
+- The only additions are `reasoning.effort` and `parallel_tool_calls`, for reasoning models only.
+  - `_to_ga_session` allows both through, but nothing sends them by default.
+  - On a non-reasoning model an unsupported field would reject the update, and the tools with it.
+- Learn still labels 2.1 "preview"; the resource model catalog says GenerallyAvailable.
+- Voices: OpenAI recommends marin/cedar for best quality.
+  - Recommended carhop default: **marin**.
+  - `shimmer` is left in place pending Brian's ear test, because the voice set did not change.
+
+**Needs Live Verification:**
+- Whether 2.1 accepts the bootstrap payload, including `input_audio_transcription.model=whisper-1`. Learn notes an Azure deviation that requires a deployment name in that field.
+- `reasoning.effort` latency tuning.
+- The cause of the reserved-bits websocket error.
+
 <!-- Older detailed sections archived above for space. Current learnings focused on Phase 3 integration. -->
 
