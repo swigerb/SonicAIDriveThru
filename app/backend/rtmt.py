@@ -57,6 +57,10 @@ __all__ = ["RTMiddleTier", "RTToolCall", "Tool", "ToolResult", "ToolResultDirect
 
 # Connection tuning constants
 _WS_HEARTBEAT_SEC = _conn_cfg.get("ws_heartbeat_seconds", 15.0)
+# permessage-deflate on the browser socket. Off by default: aiohttp 3.14.2/3.14.3
+# reject the first compressed frame after an initial PONG (aio-libs/aiohttp#13274),
+# which is exactly what a browser sends on a socket idle past one heartbeat.
+_WS_COMPRESS = bool(_conn_cfg.get("ws_compression", False))
 _WS_CONNECT_TIMEOUT = aiohttp.ClientTimeout(
     total=_conn_cfg.get("ws_connect_timeout_total", 30),
     connect=_conn_cfg.get("ws_connect_timeout_connect", 10),
@@ -643,6 +647,7 @@ class RTMiddleTier:
                 headers=headers,
                 params=params,
                 heartbeat=_WS_HEARTBEAT_SEC,
+                compress=0,  # Azure OpenAI declines deflate anyway; don't offer it.
             ) as target_ws:
                 loop = asyncio.get_running_loop()
                 session_id = self._sessions.get_session_id(ws)
@@ -882,6 +887,7 @@ class RTMiddleTier:
             heartbeat=_WS_HEARTBEAT_SEC,
             autoping=True,
             autoclose=True,
+            compress=_WS_COMPRESS,
         )
         await ws.prepare(request)
         

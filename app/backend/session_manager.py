@@ -30,6 +30,13 @@ _CTX_CRITICAL_PCT = _context_cfg.get("critical_threshold_pct", 95)
 _MAX_CONCURRENT_SESSIONS = _security_cfg.get("max_concurrent_sessions", 10)
 _IDLE_TIMEOUT_SECONDS = _security_cfg.get("idle_timeout_seconds", 300)
 
+# Close code for an intentional idle close. Application-range (4000-4999) so the
+# browser can tell it apart from transport errors (1002/1006/1011) and must not
+# auto-reconnect into a live-mic session. Mirrors WS_CLOSE_IDLE_TIMEOUT in
+# app/frontend/src/hooks/useRealtime.tsx.
+IDLE_CLOSE_CODE = 4000
+IDLE_CLOSE_REASON = "idle_timeout"
+
 # Rough token estimation: ~4 characters per token for English text.
 # This is intentionally conservative (over-estimates) for safety monitoring.
 _CHARS_PER_TOKEN = 4
@@ -170,7 +177,7 @@ class SessionManager:
         for ws, sid in idle_pairs:
             logger.warning("Closing idle session %s (idle > %ds)", sid, _IDLE_TIMEOUT_SECONDS)
             try:
-                await ws.close(code=4000, message=b"Session timed out due to inactivity")
+                await ws.close(code=IDLE_CLOSE_CODE, message=IDLE_CLOSE_REASON.encode())
             except Exception:
                 pass
             self.cleanup_session(ws, sid)

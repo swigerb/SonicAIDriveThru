@@ -43,3 +43,25 @@
     - an unconditional picker send fails 1.
   - Also added `GARealtime21SurfaceTests`: reasoning fields pass through but are never sent by default, and the picker offers exactly the 10 documented GA voices (allow-list mutation fails 1).
   - Watch-out: `test_rebrand_verification` flags the sibling brand's name in source comments, so refer to that repo generically.
+
+- **WS transport regression tests (2026-09-22, `fix/ws-transport`)**
+  - Backend `tests/test_ws_transport.py`:
+    - The handshake does not negotiate permessage-deflate.
+    - The exact production framing (server PING → client PONG → deflated data frame) keeps the session alive and the `session.update` reaches the upstream.
+    - Idle close delivers 4000/"idle_timeout" and deletes the order session.
+    - The config default is off.
+    - The upstream `ws_connect` passes `compress=0`.
+  - Frontend `hooks/__tests__/useRealtime.test.tsx` (6) mocks `react-use-websocket` and captures the url/options/connect arguments; `status-message` gained 2 tests.
+  - Mutations, each of which fails at least one test:
+    - Drop `compress=` → 2 fail, with the real 1002.
+    - Drop upstream `compress=0` → 1 fails.
+    - Idle `ws.close()` default → `1000 != 4000`.
+    - Config set to true → 3 fail.
+    - `shouldReconnect: () => true` → 1 fails.
+    - No `setShouldConnect(false)` on idle → 2 fail.
+    - Keep=true on audio → 1 fails.
+    - No token gating → 1 fails.
+    - No `onReconnectStop` → 1 fails.
+    - Stale token on reconnect → 1 fails.
+    - `StatusMessage` ignores the notice → 2 fail.
+  - The heartbeat test patched to 0.2s passed 10/10 in a flake loop.

@@ -8,7 +8,7 @@ import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 
-import StatusMessage from "@/components/ui/status-message";
+import StatusMessage, { ConnectionNotice } from "@/components/ui/status-message";
 import MenuPanel from "@/components/ui/menu-panel";
 import OrderSummary, { calculateOrderSummary, OrderSummaryProps } from "@/components/ui/order-summary";
 import TranscriptPanel from "@/components/ui/transcript-panel";
@@ -138,10 +138,29 @@ function SonicApp() {
     const startMicInFlightRef = useRef<Promise<void> | null>(null);
     const isAiSpeakingRef = useRef(false);
 
+    // A closed socket means the server-side session (and its order) is gone;
+    // the next conversation starts fresh. Never auto-resume the mic.
+    const [connectionNotice, setConnectionNotice] = useState<ConnectionNotice>(null);
+    const serverSessionLostRef = useRef(false);
+    const orderItemCountRef = useRef(0);
+    useEffect(() => {
+        orderItemCountRef.current = order.items.length;
+    }, [order]);
+
     const realtime = useRealTime({
         enableInputAudioTranscription: true,
         onWebSocketOpen: () => console.log("WebSocket connection opened"),
         onWebSocketClose: () => console.log("WebSocket connection closed"),
+        onConnectionLost: ({ code, reason, idle }) => {
+            console.warn(`WebSocket closed (code=${code}${reason ? `, reason=${reason}` : ""})`);
+            if (useAzureSpeechOn) return;
+            serverSessionLostRef.current = true;
+            const wasActive = isSessionActiveRef.current;
+            if (wasActive) void stopConversation();
+            if (idle || wasActive || orderItemCountRef.current > 0) {
+                setConnectionNotice(idle ? "idle" : "lost");
+            }
+        },
         onWebSocketError: event => console.error("WebSocket error:", event),
         onReceivedError: message => console.error("error", message),
         onReceivedResponseCreated: () => {
@@ -282,9 +301,33 @@ function SonicApp() {
         onBargeIn: handleBargeIn
     });
 
+    const stopConversation = async () => {
+        await stopAudioRecording();
+        stopAudioPlayer();
+        isSessionActiveRef.current = false;
+        isAiSpeakingRef.current = false;
+        awaitingGreetingDoneRef.current = false;
+        if (useAzureSpeechOn) {
+            azureSpeech.inputAudioBufferClear();
+        } else {
+            realtime.inputAudioBufferClear();
+        }
+        setIsRecording(false);
+    };
+
     const onToggleListening = async () => {
         if (!isRecording) {
             setSessionIdentifiers(null);
+            setConnectionNotice(null);
+            if (!useAzureSpeechOn) {
+                if (serverSessionLostRef.current) {
+                    serverSessionLostRef.current = false;
+                    setOrder(initialOrder);
+                }
+                // Idle close / exhausted retries leave the socket down on purpose.
+                // startSession() below is queued and sent once the new socket opens.
+                if (!realtime.isConnected) void realtime.reconnect();
+            }
 
             // Start session and playback immediately, but delay mic capture until the greeting finishes.
             isSessionActiveRef.current = true;
@@ -321,17 +364,7 @@ function SonicApp() {
 
             setIsRecording(true);
         } else {
-            await stopAudioRecording();
-            stopAudioPlayer();
-            isSessionActiveRef.current = false;
-            isAiSpeakingRef.current = false;
-            awaitingGreetingDoneRef.current = false;
-            if (useAzureSpeechOn) {
-                azureSpeech.inputAudioBufferClear();
-            } else {
-                realtime.inputAudioBufferClear();
-            }
-            setIsRecording(false);
+            await stopConversation();
         }
     };
 
@@ -449,7 +482,7 @@ function SonicApp() {
                                         </>
                                     )}
                                 </Button>
-                                <StatusMessage isRecording={isRecording} />
+                                <StatusMessage isRecording={isRecording} notice={connectionNotice} />
                             </div>
                         </div>
                     </Card>

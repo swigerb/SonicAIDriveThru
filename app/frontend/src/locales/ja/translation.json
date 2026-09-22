@@ -9,7 +9,9 @@
     },
     "status": {
         "notRecordingMessage": "アメリカのドライブインで注文しよう！",
-        "conversationInProgress": "会話が進行中"
+        "conversationInProgress": "会話が進行中",
+        "sessionEndedIdle": "操作がなかったためセッションが終了しました。マイクをタップして新しい注文を始めてください。",
+        "connectionLost": "接続が切れました。マイクをタップしてもう一度始めてください。"
     },
     "history": {
         "transcriptHistory": "トランスクリプト履歴",

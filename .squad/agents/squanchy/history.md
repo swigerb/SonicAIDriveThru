@@ -74,3 +74,9 @@
 - **Documentation**: Added full "Enable Entra ID Authentication" section to `DEPLOY.md` covering app registration, service principal creation, `appRoleAssignmentRequired`, user assignment, client secret, `azd env set` commands, and verification steps.
 - **Validation**: `az bicep build` zero errors (warnings only — all pre-existing except expected `no-hardcoded-env-urls` for `login.microsoftonline.com`). `ruff check .` clean. 368 tests pass + 1 pre-existing failure (`test_default_voice_is_coral` — expects "coral", config defaults to "shimmer"; unrelated to infra changes).
 
+
+- **WS transport investigation, infra findings (2026-09-22, read-only)**
+  - Transport path: Envoy ingress → EasyAuth sidecar (`http-auth`) → aiohttp. Chromium's `permessage-deflate` offer reached aiohttp intact; the proxies pass extensions through.
+  - Container app `capps-backend-axgpampkq3yfa`: min 1 / max 5 replicas, http scale at 20 concurrent, **no sticky sessions**. The Dockerfile runs gunicorn **`--workers 2`**.
+  - **Alert:** at inspection time the latest revision `--0000004` was serving `containerapps-helloworld` with 100% of traffic, while azd revision `azd-1790113609` had 0%. A provision probably overwrote the image. Nothing was changed; this needs a redeploy by the owner.
+  - The aiohttp fix for #13274 is unreleased. Re-enable `connection.ws_compression` only after a release that contains aio-libs/aiohttp#13302 and a green `test_ws_transport`.
