@@ -79,7 +79,7 @@ _VERBOSE_RESULT_TRUNCATE = _config.get("logging", {}).get("verbose_result_trunca
 # High-frequency server message types that never need middleware modification.
 # Includes both GA (v1) and legacy (2024-10-01-preview) event names.
 _PASSTHROUGH_SERVER_TYPES = frozenset({
-    # GA event names (gpt-realtime-1.5 via /openai/v1/realtime)
+    # GA event names (gpt-realtime-2.1 via /openai/v1/realtime)
     "response.output_audio.delta",
     "response.output_audio.done",
     "response.output_audio_transcript.delta",

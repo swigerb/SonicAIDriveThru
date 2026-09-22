@@ -1,16 +1,27 @@
 ---
 name: gpt-realtime-expert
-description: Expert guidance for implementing OpenAI gpt-realtime-1.5, including WebRTC, WebSocket, and SIP configurations.
+description: Expert guidance for implementing OpenAI gpt-realtime-2.1 (and 1.5), including WebRTC, WebSocket, and SIP configurations.
 confidence: high
 ---
 
-# gpt-realtime-1.5 Expertise
-You are an expert in the OpenAI Realtime API (gpt-realtime-1.5). 
+# gpt-realtime Expertise (2.1 GA; 1.5 compatible)
+You are an expert in the OpenAI Realtime API (gpt-realtime-2.1 / gpt-realtime-1.5). 
 
 ## Model Capabilities
 - **Low Latency:** Optimized for speech-to-speech with ~32k input and 4k output tokens.
 - **Modality:** Supports Text, Audio, and Image input; Text and Audio output.
 - **Features:** Enhanced tool calling, multilingual accuracy, and natural prosody.
+
+## gpt-realtime-2.1 (GA 2026-07-07) — verified 2026-09-22
+- **Deployed model:** `gpt-realtime-2.1` / `2026-07-07` / `GlobalStandard` (GA, retires 2027-07-31). Learn's model table still tags it "preview" — trust `az cognitiveservices account list-models` (`lifecycleStatus`).
+- **GA surface unchanged vs 1.5:** same `/openai/v1/realtime?model=<deployment>` URL, same `session.update` shape (`type: "realtime"`, `audio.input.*`, `audio.output.voice`), same event names (`response.output_audio.*`, `response.output_audio_transcript.*`, `conversation.item.added/done`, `response.function_call_arguments.done`).
+- **Additive only (reasoning models):** `session.reasoning.effort` (`minimal|low|medium|high|xhigh`) and `session.parallel_tool_calls`. `_to_ga_session()` lets them through, but NOTHING sends them by default — an unsupported field rejects the whole `session.update`, tools included.
+- **Voices (same 10):** alloy, ash, ballad, coral, echo, sage, shimmer, verse, marin, cedar (+ custom `{ "id": "voice_..." }`). OpenAI recommends **marin** / **cedar** for best quality.
+
+## Session configuration rules (learned the hard way — $0.00 ticket, 2026-09-22)
+- **Configure the upstream session server-side the instant the socket opens.** Never rely on the browser to send `session.update`: reconnects and mic timing mean it may arrive late or never, and an unconfigured session runs on service defaults (no tools, generic instructions, server VAD auto-responding).
+- **Voice is locked once the model has emitted audio.** A `session.update` with a *different* voice after that is rejected wholesale with `cannot_update_voice` — tools, `tool_choice` and instructions are lost with it. Same voice or no voice is accepted. Omit `audio.output.voice` once assistant audio has been seen.
+- **Symptom to recognise:** persona-ish replies, `Response completed with NO tool calls`, totals stuck at $0.00. Grep the logs for `invalid_request_error` before assuming "no errors".
 
 ## Implementation Standards
 - Prefer **WebRTC** for browser-based low-latency audio.
