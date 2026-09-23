@@ -150,6 +150,7 @@
 - Mutation-checked both: (1) `WindowsJobObject`'s `JobObjectLimitKillOnJobClose` flipped to `0x0` → `Disposing_the_job_object_kills_the_assigned_process` fails cleanly (times out waiting for exit) — restored → green, confirmed no orphaned `python.exe` left behind afterwards (`Get-Process python*` empty); (2) `PortRaceDetection.LooksLikePortBindFailure` neutered to always return `false` → 6 of 10 theory cases fail — restored → green.
 - Documented the whole mechanism in `tests/conformance/README.md`'s new "Process lifecycle hardening" section.
 - Full suite: 70 passed / 1 skipped / 71 total (10 new tests, no regressions). 3× green. No orphaned `python.exe` processes after the full run (`Get-Process python*` empty).
+- Commit: `5c8004d`.
 
 
 
