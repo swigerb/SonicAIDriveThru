@@ -18,11 +18,25 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
 {
     private WebApplication? _app;
     private readonly ConnectionRegistry _connections = new();
-
-    /// <summary>Mutated by tests to control what happens when the backend creates a response.</summary>
-    public RealtimeScript Script { get; } = new();
+    private readonly Lock _rejectionGate = new();
+    private readonly Queue<int> _pendingHandshakeRejections = new();
 
     public Uri BaseUri { get; private set; } = new("http://127.0.0.1:0");
+
+    /// <summary>
+    /// Queues an HTTP status (e.g. 401 for a bad api-key, 429 for rate-limited before a session
+    /// even starts) that the *next* upgrade attempt is rejected with instead of being accepted as
+    /// a WebSocket connection. FIFO across multiple calls; consumed one-per-attempt. This has to
+    /// live at the server level (not on <see cref="FakeRealtimeConnection"/>) because there is no
+    /// connection object yet at the point a handshake is rejected.
+    /// </summary>
+    public void RejectNextConnectionWith(int httpStatusCode)
+    {
+        lock (_rejectionGate)
+        {
+            _pendingHandshakeRejections.Enqueue(httpStatusCode);
+        }
+    }
 
     /// <summary>Number of accepted upstream connections whose socket loop hasn't exited yet.</summary>
     public int OpenConnectionCount => _connections.OpenCount;
@@ -76,16 +90,50 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
             return;
         }
 
-        var connection = _connections.Add(context.Request.Headers["api-key"], context.Request.Query["model"]);
+        int? rejection;
+        lock (_rejectionGate)
+        {
+            rejection = _pendingHandshakeRejections.Count > 0 ? _pendingHandshakeRejections.Dequeue() : null;
+        }
+        if (rejection is not null)
+        {
+            // Do not call AcceptWebSocketAsync -- setting the status code on an unaccepted
+            // upgrade request makes Kestrel return a plain HTTP error instead of completing the
+            // 101 handshake, exactly like a real gateway rejecting a bad api-key or applying
+            // rate-limiting before the session even starts.
+            context.Response.StatusCode = rejection.Value;
+            return;
+        }
+
         var deployment = context.Request.Query["model"].ToString();
 
+        var connection = _connections.Add(context.Request.Headers["api-key"], context.Request.Query["model"]);
         using var socket = await context.WebSockets.AcceptWebSocketAsync().ConfigureAwait(false);
-        var state = new RealtimeSessionState();
+        connection.AttachSocket(socket);
         var ct = context.RequestAborted;
+
+        // Frame handling runs off the receive loop (non-blocking receive loop, item 8) so a
+        // slow-streaming response.create reply, a VAD-default echo, and the next incoming client
+        // frame can all be in flight concurrently -- writes are serialized by
+        // FakeRealtimeConnection.SendAsync's own lock, not by this loop. Outstanding handler
+        // tasks are tracked and drained before the connection is marked closed so "no open
+        // connections" can't go true while a handler is still writing to the (already-closing)
+        // socket.
+        var outstanding = new List<Task>();
+        var outstandingGate = new Lock();
+
+        void TrackHandler(Task task)
+        {
+            lock (outstandingGate)
+            {
+                outstanding.RemoveAll(t => t.IsCompleted);
+                outstanding.Add(task);
+            }
+        }
 
         try
         {
-            await WebSocketJson.SendAsync(socket, BuildSessionCreated(), ct).ConfigureAwait(false);
+            await connection.SendAsync(BuildSessionCreated(), ct).ConfigureAwait(false);
 
             while (socket.State == WebSocketState.Open)
             {
@@ -96,22 +144,22 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
                 }
 
                 var frame = connection.ReceivedFrames.Add(received.Value);
-                await HandleFrameAsync(socket, frame, state, deployment, ct).ConfigureAwait(false);
+                TrackHandler(HandleFrameAsync(connection, frame, deployment, ct));
             }
+
+            List<Task> toAwait;
+            lock (outstandingGate)
+            {
+                toAwait = [.. outstanding];
+            }
+            await Task.WhenAll(toAwait).ConfigureAwait(false);
 
             if (socket.State is WebSocketState.Open or WebSocketState.CloseReceived)
             {
                 // CloseReceived means the client already sent its close frame (observed via the null
                 // return from ReceiveJsonAsync above) — we still owe it the server-side close frame
                 // to complete the handshake cleanly, otherwise the client sees an abrupt disconnect.
-                try
-                {
-                    await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None).ConfigureAwait(false);
-                }
-                catch (WebSocketException)
-                {
-                    // Client may have already torn down the connection — best-effort close.
-                }
+                await connection.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None).ConfigureAwait(false);
             }
         }
         finally
@@ -120,26 +168,37 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
         }
     }
 
-    private async Task HandleFrameAsync(
-        WebSocket socket, RecordedFrame frame, RealtimeSessionState state, string deployment, CancellationToken ct)
+    private async Task HandleFrameAsync(FakeRealtimeConnection connection, RecordedFrame frame, string deployment, CancellationToken ct)
     {
         switch (frame.Type)
         {
             case "session.update":
-                await HandleSessionUpdateAsync(socket, frame, state, deployment, ct).ConfigureAwait(false);
+                await HandleSessionUpdateAsync(connection, frame, deployment, ct).ConfigureAwait(false);
                 break;
             case "response.create":
-                if (Script.AutoRespond)
+                if (connection.Script.AutoRespond)
                 {
-                    await RespondAsync(socket, state, ct).ConfigureAwait(false);
+                    await RespondAsync(connection, ct).ConfigureAwait(false);
                 }
                 break;
         }
+
+        // Rule-based triggers (VAD-like defaults plus anything a test added via Script.On) run
+        // for every frame type, independent of — and in addition to — the two built-in handlers
+        // above, since real GA acknowledges input-buffer/conversation-item frames regardless of
+        // whether a response is also in flight.
+        foreach (var rule in connection.Script.Rules)
+        {
+            if (rule.Predicate(frame))
+            {
+                await rule.Handler(connection, frame, ct).ConfigureAwait(false);
+            }
+        }
     }
 
-    private async Task HandleSessionUpdateAsync(
-        WebSocket socket, RecordedFrame frame, RealtimeSessionState state, string deployment, CancellationToken ct)
+    private async Task HandleSessionUpdateAsync(FakeRealtimeConnection connection, RecordedFrame frame, string deployment, CancellationToken ct)
     {
+        var state = connection.SessionState;
         var result = GaSessionValidator.Validate(frame.Json, state, deployment);
         var eventId = TryGetString(frame.Json, "event_id");
 
@@ -148,7 +207,7 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
             var error = new JsonObject
             {
                 ["type"] = "error",
-                ["event_id"] = $"evt_{Guid.NewGuid():N}",
+                ["event_id"] = FakeRealtimeConnection.NewEventId(),
                 ["error"] = new JsonObject
                 {
                     ["type"] = "invalid_request_error",
@@ -158,7 +217,7 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
                     ["event_id"] = result.EchoEventId ? eventId : null,
                 },
             };
-            await WebSocketJson.SendAsync(socket, error, ct).ConfigureAwait(false);
+            await connection.SendAsync(error, ct).ConfigureAwait(false);
             return;
         }
 
@@ -174,7 +233,7 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
         var updated = new JsonObject
         {
             ["type"] = "session.updated",
-            ["event_id"] = $"evt_{Guid.NewGuid():N}",
+            ["event_id"] = FakeRealtimeConnection.NewEventId(),
             ["session"] = new JsonObject
             {
                 ["id"] = "sess_fake",
@@ -182,18 +241,21 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
                 ["model"] = deployment,
             },
         };
-        await WebSocketJson.SendAsync(socket, updated, ct).ConfigureAwait(false);
+        await connection.SendAsync(updated, ct).ConfigureAwait(false);
     }
 
-    private async Task RespondAsync(WebSocket socket, RealtimeSessionState state, CancellationToken ct)
+    private async Task RespondAsync(FakeRealtimeConnection connection, CancellationToken ct)
     {
-        var script = Script.QueuedResponses.Count > 0 ? Script.QueuedResponses.Dequeue() : ResponseScript.Default;
+        var state = connection.SessionState;
+        var script = connection.Script.QueuedResponses.Count > 0
+            ? connection.Script.QueuedResponses.Dequeue()
+            : ResponseScript.Default;
         var responseId = $"resp_{Guid.NewGuid():N}";
 
-        await WebSocketJson.SendAsync(socket, new JsonObject
+        await connection.SendAsync(new JsonObject
         {
             ["type"] = "response.created",
-            ["event_id"] = NewEventId(),
+            ["event_id"] = FakeRealtimeConnection.NewEventId(),
             ["response"] = new JsonObject { ["id"] = responseId, ["status"] = "in_progress" },
         }, ct).ConfigureAwait(false);
 
@@ -215,19 +277,19 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
                 return;
             }
 
-            await WebSocketJson.SendAsync(socket, new JsonObject
+            await connection.SendAsync(new JsonObject
             {
                 ["type"] = "response.output_audio.done",
-                ["event_id"] = NewEventId(),
+                ["event_id"] = FakeRealtimeConnection.NewEventId(),
                 ["response_id"] = responseId,
                 ["item_id"] = audioItemId,
                 ["output_index"] = outputIndex,
                 ["content_index"] = audioContentIndex,
             }, ct).ConfigureAwait(false);
-            await WebSocketJson.SendAsync(socket, new JsonObject
+            await connection.SendAsync(new JsonObject
             {
                 ["type"] = "response.content_part.done",
-                ["event_id"] = NewEventId(),
+                ["event_id"] = FakeRealtimeConnection.NewEventId(),
                 ["response_id"] = responseId,
                 ["item_id"] = audioItemId,
                 ["output_index"] = outputIndex,
@@ -243,10 +305,10 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
                 ["role"] = "assistant",
                 ["content"] = new JsonArray(new JsonObject { ["type"] = "audio", ["transcript"] = "" }),
             };
-            await WebSocketJson.SendAsync(socket, new JsonObject
+            await connection.SendAsync(new JsonObject
             {
                 ["type"] = "response.output_item.done",
-                ["event_id"] = NewEventId(),
+                ["event_id"] = FakeRealtimeConnection.NewEventId(),
                 ["response_id"] = responseId,
                 ["output_index"] = outputIndex,
                 ["item"] = completedItem.DeepClone(),
@@ -263,6 +325,16 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
             switch (evt)
             {
                 case AudioDeltaEvent audio:
+                    if (audio.Pace is { } pace)
+                    {
+                        // Scripted pacing for barge-in scenarios: a real delay (not a
+                        // synchronization sleep) between deltas so a test can send a
+                        // response.cancel / new input_audio_buffer.append while a response is
+                        // still streaming. Uses the connection's own TimeProvider so a future
+                        // fake clock can make this deterministic without touching call sites.
+                        await Task.Delay(pace, connection.TimeProvider, ct).ConfigureAwait(false);
+                    }
+
                     if (audioItemId is null)
                     {
                         audioItemId = $"item_{Guid.NewGuid():N}";
@@ -274,26 +346,26 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
                             ["role"] = "assistant",
                             ["content"] = new JsonArray(),
                         };
-                        await WebSocketJson.SendAsync(socket, new JsonObject
+                        await connection.SendAsync(new JsonObject
                         {
                             ["type"] = "response.output_item.added",
-                            ["event_id"] = NewEventId(),
+                            ["event_id"] = FakeRealtimeConnection.NewEventId(),
                             ["response_id"] = responseId,
                             ["output_index"] = outputIndex,
                             ["item"] = openItem.DeepClone(),
                         }, ct).ConfigureAwait(false);
-                        await WebSocketJson.SendAsync(socket, new JsonObject
+                        await connection.SendAsync(new JsonObject
                         {
                             ["type"] = "conversation.item.added",
-                            ["event_id"] = NewEventId(),
+                            ["event_id"] = FakeRealtimeConnection.NewEventId(),
                             ["previous_item_id"] = state.LastConversationItemId,
                             ["item"] = openItem.DeepClone(),
                         }, ct).ConfigureAwait(false);
                         state.LastConversationItemId = audioItemId;
-                        await WebSocketJson.SendAsync(socket, new JsonObject
+                        await connection.SendAsync(new JsonObject
                         {
                             ["type"] = "response.content_part.added",
-                            ["event_id"] = NewEventId(),
+                            ["event_id"] = FakeRealtimeConnection.NewEventId(),
                             ["response_id"] = responseId,
                             ["item_id"] = audioItemId,
                             ["output_index"] = outputIndex,
@@ -302,10 +374,10 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
                         }, ct).ConfigureAwait(false);
                     }
 
-                    await WebSocketJson.SendAsync(socket, new JsonObject
+                    await connection.SendAsync(new JsonObject
                     {
                         ["type"] = "response.output_audio.delta",
-                        ["event_id"] = NewEventId(),
+                        ["event_id"] = FakeRealtimeConnection.NewEventId(),
                         ["response_id"] = responseId,
                         ["item_id"] = audioItemId,
                         ["output_index"] = outputIndex,
@@ -335,10 +407,10 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
                         ["call_id"] = call.CallId,
                         ["arguments"] = "",
                     };
-                    await WebSocketJson.SendAsync(socket, new JsonObject
+                    await connection.SendAsync(new JsonObject
                     {
                         ["type"] = "response.output_item.added",
-                        ["event_id"] = NewEventId(),
+                        ["event_id"] = FakeRealtimeConnection.NewEventId(),
                         ["response_id"] = responseId,
                         ["output_index"] = outputIndex,
                         ["item"] = openCallItem.DeepClone(),
@@ -346,19 +418,19 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
                     // rtmt.py reads the top-level `previous_item_id` off this exact event type
                     // (conversation.item.created | conversation.item.added) to remember what to
                     // stitch extension.middle_tier_tool_response's own previous_item_id to.
-                    await WebSocketJson.SendAsync(socket, new JsonObject
+                    await connection.SendAsync(new JsonObject
                     {
                         ["type"] = "conversation.item.added",
-                        ["event_id"] = NewEventId(),
+                        ["event_id"] = FakeRealtimeConnection.NewEventId(),
                         ["previous_item_id"] = state.LastConversationItemId,
                         ["item"] = openCallItem.DeepClone(),
                     }, ct).ConfigureAwait(false);
                     state.LastConversationItemId = callItemId;
 
-                    await WebSocketJson.SendAsync(socket, new JsonObject
+                    await connection.SendAsync(new JsonObject
                     {
                         ["type"] = "response.function_call_arguments.done",
-                        ["event_id"] = NewEventId(),
+                        ["event_id"] = FakeRealtimeConnection.NewEventId(),
                         ["response_id"] = responseId,
                         ["item_id"] = callItemId,
                         ["output_index"] = outputIndex,
@@ -379,10 +451,10 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
                     // rtmt.py's response.output_item.done handler is what actually invokes the
                     // backend tool and sends conversation.item.create(function_call_output)
                     // upstream — this frame is the trigger for item 3's tool-execution scenario.
-                    await WebSocketJson.SendAsync(socket, new JsonObject
+                    await connection.SendAsync(new JsonObject
                     {
                         ["type"] = "response.output_item.done",
-                        ["event_id"] = NewEventId(),
+                        ["event_id"] = FakeRealtimeConnection.NewEventId(),
                         ["response_id"] = responseId,
                         ["output_index"] = outputIndex,
                         ["item"] = completedCallItem.DeepClone(),
@@ -414,18 +486,16 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
                             },
                         };
                     }
-                    await WebSocketJson.SendAsync(socket, new JsonObject
+                    await connection.SendAsync(new JsonObject
                     {
                         ["type"] = "response.done",
-                        ["event_id"] = NewEventId(),
+                        ["event_id"] = FakeRealtimeConnection.NewEventId(),
                         ["response"] = responseBody,
                     }, ct).ConfigureAwait(false);
                     break;
             }
         }
     }
-
-    private static string NewEventId() => $"evt_{Guid.NewGuid():N}";
 
     /// <summary>A minimal but GA-shaped usage object — real token counts are meaningless from a
     /// fake, but the backend's context-window tracking only reads `output[]`, so this exists
@@ -457,7 +527,7 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
     private static JsonObject BuildSessionCreated() => new()
     {
         ["type"] = "session.created",
-        ["event_id"] = $"evt_{Guid.NewGuid():N}",
+        ["event_id"] = FakeRealtimeConnection.NewEventId(),
         ["session"] = new JsonObject
         {
             ["id"] = "sess_fake",

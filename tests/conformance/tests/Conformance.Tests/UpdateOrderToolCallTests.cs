@@ -40,7 +40,7 @@ public sealed class UpdateOrderToolCallTests(ConformanceFixture fixture)
         Assert.True(greetingRoundTrip is not null, "Greeting round trip never completed.");
 
         const string callId = "call_update_order_1";
-        fixture.Realtime.Script.Enqueue(new ResponseScript([
+        connection!.Script.Enqueue(new ResponseScript([
             new FunctionCallEvent(
                 Name: "update_order",
                 ArgumentsJson: """{"action":"add","item_name":"Small Fries","size":"Small","quantity":1,"price":2.49}""",

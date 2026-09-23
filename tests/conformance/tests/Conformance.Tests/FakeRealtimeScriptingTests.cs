@@ -23,11 +23,14 @@ public sealed class FakeRealtimeScriptingTests
         await using var fake = new FakeRealtimeUpstreamServer();
         await fake.StartAsync(TestContext.Current.CancellationToken);
 
-        fake.Script.Enqueue(ResponseScript.RateLimited("Rate limit reached. Please try again in 2s."));
-
         using var socket = new ClientWebSocket();
         var wsUri = new Uri($"ws://{fake.BaseUri.Host}:{fake.BaseUri.Port}/openai/v1/realtime?model=gpt-realtime-test");
+        var connectionTask = fake.WaitForNextConnectionAsync(FrameTimeout, TestContext.Current.CancellationToken);
         await socket.ConnectAsync(wsUri, TestContext.Current.CancellationToken);
+        var connection = await connectionTask;
+        Assert.NotNull(connection);
+
+        connection!.Script.Enqueue(ResponseScript.RateLimited("Rate limit reached. Please try again in 2s."));
 
         // session.created greeting frame.
         Assert.NotNull(await WebSocketJson.ReceiveJsonAsync(socket, TestContext.Current.CancellationToken));

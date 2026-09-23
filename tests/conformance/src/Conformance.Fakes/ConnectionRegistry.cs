@@ -20,7 +20,7 @@ internal sealed class ConnectionRegistry
 
     public FakeRealtimeConnection Add(string? apiKeyHeader, string? modelQueryParam)
     {
-        var connection = new FakeRealtimeConnection(apiKeyHeader, modelQueryParam);
+        var connection = new FakeRealtimeConnection(apiKeyHeader, modelQueryParam, _timeProvider);
         Signal(() => _connections.Add(connection));
         return connection;
     }
