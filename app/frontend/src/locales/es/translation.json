@@ -5,13 +5,19 @@
         "showTranscript": "Mostrar transcripción",
         "stopRecording": "Detener grabación",
         "startRecording": "Comenzar grabación",
-        "stopConversation": "Detener conversación"
+        "stopConversation": "Detener conversación",
+        "newOrder": "Empezar un pedido nuevo"
     },
     "status": {
         "notRecordingMessage": "¡Ordena desde el Drive-In favorito de América!",
         "conversationInProgress": "Conversación en progreso",
         "sessionEndedIdle": "La sesión terminó por inactividad. Toca el micrófono para empezar un nuevo pedido.",
-        "connectionLost": "Se perdió la conexión. Toca el micrófono para empezar de nuevo."
+        "connectionLost": "Se perdió la conexión. Toca el micrófono para empezar de nuevo.",
+        "reconnecting": "Se perdió la conexión. Reconectando — tu pedido está a salvo…",
+        "resumed": "Reconectado — tu pedido sigue aquí.",
+        "resumedTapToContinue": "Reconectado — tu pedido sigue aquí. Toca el micrófono para continuar.",
+        "resumeRejected": "No pudimos recuperar tu pedido. Toca el micrófono para empezar uno nuevo.",
+        "superseded": "Este pedido continuó en otra ventana. Toca el micrófono para empezar de nuevo."
     },
     "history": {
         "transcriptHistory": "Historial de transcripciones",

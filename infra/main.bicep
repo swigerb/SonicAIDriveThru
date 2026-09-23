@@ -134,6 +134,19 @@ param authTenantId string = tenant().tenantId
 @description('Entra ID client secret. Stored as Container App secret "aad-client-secret". Provision via azd env or out-of-band — never commit to source.')
 param authClientSecret string = ''
 
+// --- HMAC session-token secret (/api/auth/session) ---
+// Every replica/restart must validate tokens minted by any other, so the secret
+// is shared via a Container App secret instead of os.urandom per process.
+@secure()
+@description('HMAC secret for /api/auth/session tokens (container env APP_SESSION_SECRET). Pin it with `azd env set APP_SESSION_SECRET <random>`; empty = a random secret generated on each provision.')
+param appSessionSecret string = ''
+
+@secure()
+@description('Do not set. Random fallback for appSessionSecret (newGuid() is only allowed as a parameter default).')
+param appSessionSecretFallback string = '${newGuid()}${newGuid()}'
+
+var effectiveAppSessionSecret = !empty(appSessionSecret) ? appSessionSecret : appSessionSecretFallback
+
 // Figure out if we're running as a user or service principal
 var principalType = empty(runningOnGh) && empty(runningOnAdo) ? 'User' : 'ServicePrincipal'
 
@@ -222,7 +235,20 @@ module acaBackend 'core/host/container-app-upsert.bicep' = {
     containerMaxReplicas: 5
     healthProbePath: '/health'
     enableWebSocket: true
-    secrets: enableAuth && !empty(authClientSecret) ? { 'aad-client-secret': authClientSecret } : {}
+    // Order state and the resume credential live in one process (gunicorn
+    // --workers 1), so a reconnecting browser must land on the same replica.
+    // The Envoy affinity cookie is set on the page load and sent on the
+    // websocket upgrade. Needs single revision mode (container-app.bicep default).
+    stickySessionsAffinity: 'sticky'
+    secrets: union(enableAuth && !empty(authClientSecret) ? { 'aad-client-secret': authClientSecret } : {}, {
+      'app-session-secret': effectiveAppSessionSecret
+    })
+    // Sending a secrets list replaces the app's secrets, so keep an
+    // out-of-band aad-client-secret alive when it isn't supplied here.
+    preserveExistingSecretNames: enableAuth && empty(authClientSecret) ? [ 'aad-client-secret' ] : []
+    secretEnv: {
+      APP_SESSION_SECRET: 'app-session-secret'
+    }
     env: union({
       AZURE_SEARCH_ENDPOINT: reuseExistingSearch
         ? searchEndpoint
@@ -241,6 +267,10 @@ module acaBackend 'core/host/container-app-upsert.bicep' = {
       AZURE_OPENAI_REALTIME_DEPLOYMENT: reuseExistingOpenAi ? openAiRealtimeDeployment : openAiDeployments[0].name
       AZURE_OPENAI_REALTIME_VOICE_CHOICE: openAiRealtimeVoiceChoice
       RUNNING_IN_PRODUCTION: 'true'
+      // Changing a secret alone does not restart running replicas; a changed
+      // fingerprint changes the template, so every replica restarts on the new
+      // secret together instead of old and new replicas disagreeing.
+      APP_SESSION_SECRET_FINGERPRINT: uniqueString(effectiveAppSessionSecret)
       // For using managed identity to access Azure resources. See https://github.com/microsoft/azure-container-apps/issues/442
       AZURE_CLIENT_ID: acaIdentity.outputs.clientId
     },

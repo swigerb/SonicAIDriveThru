@@ -40,7 +40,7 @@ if [ "$PRODUCTION_MODE" = "--production" ]; then
     python -m gunicorn app:create_app \
         -b "${HOST}:${PORT}" \
         --worker-class aiohttp.GunicornWebWorker \
-        --workers 2 \
+        --workers 1 \
         --timeout 120 \
         --keep-alive 65 \
         --access-logfile - \

@@ -189,3 +189,21 @@ Fixed `useAzureSpeech.tsx`: (1) `onReceivedToolResponse` parameter was declared 
 - The backend test `test_voice_picker_offers_exactly_the_ga_voices` now parses `voices.ts`. A new `test_frontend_and_backend_default_voice_agree` checks it against `config.yaml`.
 - Websocket and reconnect code was not touched; a concurrent transport branch owns it.
 - **Verified:** `npm run build` green; `npm test` 16/16 (was 13). No `npm install`, so the lockfile is unchanged.
+
+- **Order resume — Stage 2 frontend (2026-09-22, `feat/order-resume`)**
+  - `useRealtime`:
+    - Owns its outgoing queue. Every send is `keep=false`; while closed, only `session.update` and extension frames are held.
+    - `onOpen` sends `extension.resume` first if `sessionStorage['sonic.resumeId']` is set, then the queue.
+    - `classifyClose()`: transport → reconnect + resume. idle (4000), superseded (4002) and ended (1000 `session_ended`) are final; 4000 and ended clear the id, 4002 keeps it. The 4001/"expired" refresh path is unchanged.
+    - `session_resumed` stores the rotated `resume_id`; `resume_rejected` clears the id.
+    - `endSession()` sends `extension.end_session`, holds later frames, and after the 1000 close opens a fresh socket with a new token.
+  - `App.tsx`:
+    - A drop pauses the mic and shows "Reconnecting".
+    - Resumed → ticket from `order_summary`, re-send `session.update` and verbose flags, auto-restart the mic, "Reconnected — your order is still here".
+    - If the mic refuses, fall back to "Tap the mic to continue". That tap skips the greeting wait.
+    - Rejected → clear the ticket and show the notice. Idle, superseded and gave-up each get their own notice.
+    - A "Start a new order" button appears once the ticket has items.
+  - `Recorder.start()` returns a boolean, with a 1.5s timeout on resuming a suspended AudioContext. It now releases the getUserMedia stream on failure (previously the mic indicator stayed on).
+  - i18n keys added in en/es/fr/ja.
+  - Gesture finding (Edge 153): the first-tap AudioContext stays running across a drop, so the mic auto-restarts even under a strict autoplay policy. A reload's new document starts suspended, so a reload asks for a tap.
+  - vitest 65 (was 24). `npm run build` green. No `npm install`; lockfile unchanged.

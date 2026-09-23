@@ -91,3 +91,13 @@
     - `azd-service-name` tags in main.bicep are declared services.
   - Mutation-checked. Reverting to `SERVICE_WEB_` fails 2 tests; changing the tag to `web` fails 1.
   - `az bicep build`: 0 errors, and the same pre-existing warnings as before.
+
+- **Order resume infra (2026-09-22, `feat/order-resume` step 0)**
+  - `app/Dockerfile` and the start scripts now run gunicorn `--workers 1`.
+  - Backend Container App ingress uses `stickySessions.affinity: 'sticky'` via the `stickySessionsAffinity` param in `container-app.bicep` and the upsert. The app is in single revision mode.
+  - `APP_SESSION_SECRET` is a Container App secret (`app-session-secret`), mapped to env through secretRef. It defaults to newGuid()+newGuid() and can be pinned with `azd env set APP_SESSION_SECRET`.
+    - `APP_SESSION_SECRET_FINGERPRINT` forces a new revision when the secret changes.
+    - An out-of-band `aad-client-secret` is preserved via listSecrets.
+  - Guard: `tests/test_infra_resume.py` (parses the Dockerfile and bicep). 5 mutations, all killed.
+  - `az bicep build`: 0 errors, with the baseline warnings.
+  - Live-only checks: the affinity cookie on the WS upgrade through the EasyAuth sidecar, and the secrets PUT semantics.

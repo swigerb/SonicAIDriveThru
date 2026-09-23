@@ -5,13 +5,19 @@
         "showTranscript": "Show transcript",
         "stopRecording": "Stop recording",
         "startRecording": "Start recording",
-        "stopConversation": "Stop conversation"
+        "stopConversation": "Stop conversation",
+        "newOrder": "Start a new order"
     },
     "status": {
         "notRecordingMessage": "Let's order from America's Drive-In!",
         "conversationInProgress": "Conversation in progress",
         "sessionEndedIdle": "Session ended after inactivity. Tap the mic to start a new order.",
-        "connectionLost": "Connection lost. Tap the mic to start again."
+        "connectionLost": "Connection lost. Tap the mic to start again.",
+        "reconnecting": "Connection dropped. Reconnecting — your order is safe…",
+        "resumed": "Reconnected — your order is still here.",
+        "resumedTapToContinue": "Reconnected — your order is still here. Tap the mic to continue.",
+        "resumeRejected": "We couldn't restore your order. Tap the mic to start a new one.",
+        "superseded": "This order continued in another window. Tap the mic to start again."
     },
     "history": {
         "transcriptHistory": "Transcript history",

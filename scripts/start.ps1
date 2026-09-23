@@ -56,7 +56,7 @@ try {
                 "-m", "gunicorn", "app:create_app",
                 "-b", "$($env:HOST):$($env:PORT)",
                 "--worker-class", "aiohttp.GunicornWebWorker",
-                "--workers", "2",
+                "--workers", "1",
                 "--timeout", "120",
                 "--keep-alive", "65",
                 "--access-logfile", "-",

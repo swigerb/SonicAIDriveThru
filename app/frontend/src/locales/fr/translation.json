@@ -5,13 +5,19 @@
         "showTranscript": "Afficher la transcription",
         "stopRecording": "Arrêter l'enregistrement",
         "startRecording": "Commencer l'enregistrement",
-        "stopConversation": "Arrêter la conversation"
+        "stopConversation": "Arrêter la conversation",
+        "newOrder": "Commencer une nouvelle commande"
     },
     "status": {
         "notRecordingMessage": "Commandons chez America's Drive-In !",
         "conversationInProgress": "Conversation en cours",
         "sessionEndedIdle": "Session terminée pour inactivité. Touchez le micro pour commencer une nouvelle commande.",
-        "connectionLost": "Connexion perdue. Touchez le micro pour recommencer."
+        "connectionLost": "Connexion perdue. Touchez le micro pour recommencer.",
+        "reconnecting": "Connexion perdue. Reconnexion — votre commande est conservée…",
+        "resumed": "Reconnecté — votre commande est toujours là.",
+        "resumedTapToContinue": "Reconnecté — votre commande est toujours là. Touchez le micro pour continuer.",
+        "resumeRejected": "Impossible de récupérer votre commande. Touchez le micro pour en commencer une nouvelle.",
+        "superseded": "Cette commande s'est poursuivie dans une autre fenêtre. Touchez le micro pour recommencer."
     },
     "history": {
         "transcriptHistory": "Historique de la transcription",

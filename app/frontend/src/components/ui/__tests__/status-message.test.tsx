@@ -22,4 +22,27 @@ describe("StatusMessage", () => {
         render(<StatusMessage isRecording={false} notice="lost" />);
         expect(screen.getByText("status.connectionLost")).toBeInTheDocument();
     });
+
+    it.each([
+        ["reconnecting", "status.reconnecting"],
+        ["resumed", "status.resumed"],
+        ["tapToResume", "status.resumedTapToContinue"],
+        ["resumeRejected", "status.resumeRejected"],
+        ["superseded", "status.superseded"]
+    ] as const)("renders the %s notice when the mic is off", (notice, key) => {
+        render(<StatusMessage isRecording={false} notice={notice} />);
+        expect(screen.getByText(key)).toBeInTheDocument();
+    });
+
+    it("shows the reconnected line while listening after a resume", () => {
+        const { container } = render(<StatusMessage isRecording notice="resumed" />);
+        expect(screen.getByText("status.resumed")).toBeInTheDocument();
+        expect(screen.queryByText("status.conversationInProgress")).not.toBeInTheDocument();
+        expect(container.querySelector(".listening-equalizer")).not.toBeNull();
+    });
+
+    it("other notices don't replace the listening label", () => {
+        render(<StatusMessage isRecording notice="reconnecting" />);
+        expect(screen.getByText("status.conversationInProgress")).toBeInTheDocument();
+    });
 });

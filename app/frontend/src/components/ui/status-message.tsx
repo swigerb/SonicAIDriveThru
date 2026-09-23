@@ -2,7 +2,7 @@ import "./status-message.css";
 import { useTranslation } from "react-i18next";
 import { memo } from "react";
 
-export type ConnectionNotice = "idle" | "lost" | null;
+export type ConnectionNotice = "idle" | "lost" | "reconnecting" | "resumed" | "tapToResume" | "resumeRejected" | "superseded" | null;
 
 type Properties = {
     isRecording: boolean;
@@ -11,7 +11,12 @@ type Properties = {
 
 const NOTICE_KEYS: Record<Exclude<ConnectionNotice, null>, string> = {
     idle: "status.sessionEndedIdle",
-    lost: "status.connectionLost"
+    lost: "status.connectionLost",
+    reconnecting: "status.reconnecting",
+    resumed: "status.resumed",
+    tapToResume: "status.resumedTapToContinue",
+    resumeRejected: "status.resumeRejected",
+    superseded: "status.superseded"
 };
 
 export default memo(function StatusMessage({ isRecording, notice = null }: Properties) {
@@ -32,7 +37,7 @@ export default memo(function StatusMessage({ isRecording, notice = null }: Prope
                 ))}
             </div>
             <p className="mb-4 ml-2 mt-6 font-semibold text-primary">
-                {t("status.conversationInProgress")}
+                {t(notice === "resumed" ? NOTICE_KEYS.resumed : "status.conversationInProgress")}
             </p>
         </div>
     );
