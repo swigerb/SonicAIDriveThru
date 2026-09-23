@@ -207,3 +207,11 @@ Fixed `useAzureSpeech.tsx`: (1) `onReceivedToolResponse` parameter was declared 
   - i18n keys added in en/es/fr/ja.
   - Gesture finding (Edge 153): the first-tap AudioContext stays running across a drop, so the mic auto-restarts even under a strict autoplay policy. A reload's new document starts suspended, so a reload asks for a tap.
   - vitest 65 (was 24). `npm run build` green. No `npm install`; lockfile unchanged.
+
+## 2026-09-23 — feat/round3
+
+- **R1 frontend:** `onReceivedRateLimited` in `useRealtime`; `App.tsx` handles attempt 1 (notice "One moment, please…", mute mic, play `/audio/apology-<lang>.wav` with en fallback, 5 s cap, unmute unless the carhop is talking) and `final` ("We're a little busy — please say that again."). Notice clears on guest speech, a transcript or stop. `src/lib/apology.ts`; keys in en/es/fr/ja.
+- **R3 (template-leftover sweep):** es/fr/ja `app.title` was still "Talk to your data" and the footer still credited "Azure AI Search + Azure OpenAI"; fixed to Sonic wording and the English services list. Added missing `menu.title`. `DEPLOY.md` contoso UPN → placeholder; VoiceRAG naming out of `customizing_deploy.md` / `existing_services.md`.
+  - Guard: `src/locales/__tests__/locales.test.ts` (23 tests) scans every locale value plus user-visible source and `index.html` for Contoso, Mercer, VoiceRAG, "Talk to your data" (4 langs), the old footer, Dunkin, coffee-chat; also key parity, no empties, Sonic title, footer services.
+  - `Array.prototype.at` isn't in the tsconfig lib; use `slice(-2)[0]` in tests.
+- vitest 65 → 116. Build green. No `npm install`; lockfile unchanged.

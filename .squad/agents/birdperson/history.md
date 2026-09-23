@@ -126,3 +126,19 @@
   - `scripts/e2e_order_resume.py`:
     - Setup: headless Edge, built frontend, the real RTMiddleTier and real order tools, and a fake GA upstream. 42/42 checks in ~37s.
     - Scenarios: 1011 drop → same ticket and sid, bootstrap → rehydration → no greeting, auto mic, one nudge after the shortened 4s. Also the gesture fallback, a tap while reconnecting, a reload, idle 4000, strict autoplay, and resume ids absent from URLs and logs.
+
+## 2026-09-23 — feat/round3
+
+- Mutation checks (all scripts kept outside the repo):
+
+  | item | mutants | killed |
+  |---|---|---|
+  | R1 backend | 20 + 4 follow-ups | all; M10 killed after adding a `silent` fake mode; M11/M21/M22 were dead code and removed; M17 killed via `RecoveryUnitTests` |
+  | R1 frontend | 15 | 15 |
+  | R1 clips | 11 | 11 |
+  | R2 smoke | 27 | 27 (a 0.97 threshold first survived; added ~0.95 cases) |
+  | R3 locales | 17 | 17 |
+  | dz | 5 | 5 |
+
+- Counts: backend 496 → 568 (+61 subtests); vitest 65 → 116.
+- `ResumeInteractionTests` covers retry vs nudge (no double response either way), retry not refreshing idle, and detach cancelling a pending retry.
