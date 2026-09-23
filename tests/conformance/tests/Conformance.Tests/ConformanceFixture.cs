@@ -10,8 +10,15 @@ namespace Conformance.Tests;
 /// the suite too slow to be useful as a fast feedback loop. Individual tests must not depend on
 /// each other's socket state (each opens its own <see cref="RealtimeBrowserClient"/> connection).
 /// </summary>
-public sealed class ConformanceFixture : IAsyncLifetime
+public class ConformanceFixture : IAsyncLifetime
 {
+    /// <summary>
+    /// The env-var profile the Python backend is launched with. Default profile (hooks
+    /// disabled) — derived fixtures override this to opt into <see cref="BackendProfiles.ShortTimers"/>
+    /// or <see cref="BackendProfiles.FixedClock"/> on their own dedicated collection.
+    /// </summary>
+    protected virtual BackendProfile Profile => BackendProfiles.Default;
+
     public FakeRealtimeUpstreamServer Realtime { get; } = new();
     public FakeSearchServer Search { get; private set; } = null!;
 
@@ -38,7 +45,8 @@ public sealed class ConformanceFixture : IAsyncLifetime
         var port = NetworkUtils.GetFreeTcpPort();
         try
         {
-            Backend = await BackendLauncherFactory.StartAsync(Realtime.BaseUri, Search.BaseUri, port)
+            Backend = await BackendLauncherFactory.StartAsync(
+                Realtime.BaseUri, Search.BaseUri, port, extraEnvironment: Profile.ExtraEnvironment)
                 .ConfigureAwait(false);
         }
         catch (ConformanceBackendNotImplementedException ex)

@@ -38,6 +38,39 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
         }
     }
 
+    private readonly Lock _suppressionGate = new();
+    private int _pendingSessionUpdatedSuppressions;
+
+    /// <summary>
+    /// Arms a one-shot suppression: the next `session.update` accepted on any connection is
+    /// validated and merged into that connection's effective session as normal, but no
+    /// `session.updated` response is sent back. FIFO across multiple calls, like
+    /// <see cref="RejectNextConnectionWith"/>. Used to exercise a backend's session-configured
+    /// fallback timeout (e.g. CONFORMANCE_GREETING_TIMEOUT_SECONDS) deterministically — armed
+    /// before the connection is even created, so there is no race with the connection's own
+    /// bootstrap `session.update` arriving first.
+    /// </summary>
+    public void SuppressNextSessionUpdatedResponse()
+    {
+        lock (_suppressionGate)
+        {
+            _pendingSessionUpdatedSuppressions++;
+        }
+    }
+
+    private bool TryConsumeSessionUpdatedSuppression()
+    {
+        lock (_suppressionGate)
+        {
+            if (_pendingSessionUpdatedSuppressions > 0)
+            {
+                _pendingSessionUpdatedSuppressions--;
+                return true;
+            }
+            return false;
+        }
+    }
+
     /// <summary>Number of accepted upstream connections whose socket loop hasn't exited yet.</summary>
     public int OpenConnectionCount => _connections.OpenCount;
 
@@ -296,6 +329,15 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
             ["event_id"] = FakeRealtimeConnection.NewEventId(),
             ["session"] = effective,
         };
+
+        if (TryConsumeSessionUpdatedSuppression())
+        {
+            // Deliberately swallowed: the session state above is still merged/validated as
+            // normal, we just never send the acknowledgement, simulating an upstream that never
+            // confirms session configuration so a backend's fallback timeout path can be tested.
+            return;
+        }
+
         await connection.SendAsync(updated, ct).ConfigureAwait(false);
     }
 
