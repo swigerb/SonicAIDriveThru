@@ -17,7 +17,9 @@
         "resumed": "Reconectado — tu pedido sigue aquí.",
         "resumedTapToContinue": "Reconectado — tu pedido sigue aquí. Toca el micrófono para continuar.",
         "resumeRejected": "No pudimos recuperar tu pedido. Toca el micrófono para empezar uno nuevo.",
-        "superseded": "Este pedido continuó en otra ventana. Toca el micrófono para empezar de nuevo."
+        "superseded": "Este pedido continuó en otra ventana. Toca el micrófono para empezar de nuevo.",
+        "rateLimited": "Un momento, por favor…",
+        "rateLimitedFinal": "Estamos un poco ocupados — ¿puedes repetirlo, por favor?"
     },
     "history": {
         "transcriptHistory": "Historial de transcripciones",

@@ -127,3 +127,12 @@ export type ExtensionRoundTripToken = {
     roundTripIndex: number;
     roundTripToken: string;
 };
+
+// A model response was rate-limited. attempt 1: the server's silent retry failed
+// too and a second retry is coming (play the apology clip). final: that failed as
+// well; the guest is asked to say it again. See docs/rate_limit_recovery.md.
+export type ExtensionRateLimited = {
+    type: "extension.rate_limited";
+    attempt: number;
+    final?: boolean;
+};

@@ -41,6 +41,16 @@ describe("StatusMessage", () => {
         expect(container.querySelector(".listening-equalizer")).not.toBeNull();
     });
 
+    it.each([
+        ["rateLimited", "status.rateLimited"],
+        ["rateLimitedFinal", "status.rateLimitedFinal"]
+    ] as const)("shows the %s rate-limit notice while listening", (notice, key) => {
+        const { container } = render(<StatusMessage isRecording notice={notice} />);
+        expect(screen.getByText(key)).toBeInTheDocument();
+        expect(screen.queryByText("status.conversationInProgress")).not.toBeInTheDocument();
+        expect(container.querySelector(".listening-equalizer")).not.toBeNull();
+    });
+
     it("other notices don't replace the listening label", () => {
         render(<StatusMessage isRecording notice="reconnecting" />);
         expect(screen.getByText("status.conversationInProgress")).toBeInTheDocument();

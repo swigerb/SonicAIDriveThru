@@ -295,3 +295,21 @@ describe("useRealTime order resume", () => {
         expect(sentTypes()).not.toContain("extension.resume");
     });
 });
+
+describe("useRealTime rate-limit recovery", () => {
+    it("hands extension.rate_limited to onReceivedRateLimited and nothing else", async () => {
+        const onReceivedRateLimited = vi.fn();
+        const onReceivedError = vi.fn();
+        const onReceivedResponseDone = vi.fn();
+        await renderConnected({ onReceivedRateLimited, onReceivedError, onReceivedResponseDone });
+        open();
+        act(() => serverSays({ type: "extension.rate_limited", attempt: 1 }));
+        act(() => serverSays({ type: "extension.rate_limited", attempt: 2, final: true }));
+        expect(onReceivedRateLimited.mock.calls).toEqual([
+            [{ type: "extension.rate_limited", attempt: 1 }],
+            [{ type: "extension.rate_limited", attempt: 2, final: true }]
+        ]);
+        expect(onReceivedError).not.toHaveBeenCalled();
+        expect(onReceivedResponseDone).not.toHaveBeenCalled();
+    });
+});
