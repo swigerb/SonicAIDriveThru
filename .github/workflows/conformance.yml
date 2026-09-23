@@ -25,6 +25,7 @@ jobs:
   python-tests:
     name: Python backend unit tests
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -80,6 +81,7 @@ jobs:
   frontend-tests:
     name: Frontend build and tests
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -123,6 +125,7 @@ jobs:
   conformance:
     name: Conformance suite (backend=${{ matrix.backend }})
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -184,7 +187,13 @@ jobs:
             --logger "trx;LogFileName=conformance.trx" \
             --logger "console;verbosity=detailed" \
             --results-directory TestResults \
+            --blame-hang --blame-hang-timeout 10min --blame-hang-dump-type mini \
+            --blame-crash --blame-crash-dump-type mini \
             2>&1 | tee conformance-output.log
+          # PR #22 review item 17: a hung scenario (e.g. a broken await-with-timeout, or the
+          # Python backend wedged and never answering /health) must produce a crash/hang dump and
+          # fail the job well before the job-level timeout-minutes kill, instead of silently
+          # eating the whole 20-minute budget with no diagnostic artifact at all.
 
       - name: Upload conformance test results on failure
         if: failure()

@@ -21,11 +21,25 @@ public sealed class ConformanceBackendNotImplementedException(string message) : 
 /// exist yet).</summary>
 public sealed class ConformanceBackendUnavailableException(string message) : Exception(message);
 
+/// <summary>Thrown internally by <see cref="PythonBackendLauncher"/> when an early process exit
+/// looks like a TCP port-bind race rather than a real backend crash (see
+/// <see cref="PortRaceDetection"/>) — caught only by <see cref="PythonBackendLauncher.StartAsync"/>'s
+/// own bounded retry loop and never allowed to escape to a caller.</summary>
+internal sealed class PortBindRaceException(string message) : Exception(message);
+
 /// <summary>Starts the Python backend (app/backend, via .venv) on a free port, pointed at the fakes.</summary>
 public static class PythonBackendLauncher
 {
     private static readonly TimeSpan HealthTimeout = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan HealthPollInterval = TimeSpan.FromMilliseconds(250);
+
+    /// <summary>
+    /// Bounded so a genuinely unbindable environment (e.g. loopback sockets exhausted) fails
+    /// loudly instead of retrying forever (PR #22 review item 17). One real port race is already
+    /// an unlikely coincidence on a CI runner or dev box; three in a row means something else is
+    /// wrong and the real error should surface.
+    /// </summary>
+    private const int MaxStartAttempts = 3;
 
     public static async Task<IBackendUnderTest> StartAsync(
         BackendContract contract, PythonBackendOptions options, CancellationToken cancellationToken = default)
@@ -52,6 +66,27 @@ public static class PythonBackendLauncher
                 "\"backend exited early\" failure.");
         }
 
+        var attemptContract = contract;
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                return await StartAttemptAsync(attemptContract, options, backendDir, pythonExe, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (PortBindRaceException) when (attempt < MaxStartAttempts)
+            {
+                // NetworkUtils.GetFreeTcpPort() has an inherent TOCTOU race between releasing the
+                // probe socket and the backend's own bind — pick a fresh port and try again.
+                attemptContract = attemptContract with { Port = NetworkUtils.GetFreeTcpPort() };
+            }
+        }
+    }
+
+    private static async Task<IBackendUnderTest> StartAttemptAsync(
+        BackendContract contract, PythonBackendOptions options, string backendDir, string pythonExe,
+        CancellationToken cancellationToken)
+    {
         var env = BackendEnvironment.Build(contract, options);
         var startInfo = new ProcessStartInfo(pythonExe, "app.py")
         {
@@ -80,6 +115,7 @@ public static class PythonBackendLauncher
         var output = new CapturedProcessOutput();
         output.Attach(process);
 
+        var startedAt = DateTimeOffset.UtcNow;
         if (!process.Start())
         {
             throw new InvalidOperationException($"Failed to start Python backend process '{pythonExe} app.py'.");
@@ -87,23 +123,41 @@ public static class PythonBackendLauncher
         process.BeginOutputReadLine();
         process.BeginErrorReadLine();
 
+        // Defence-in-depth against orphaned python.exe processes (PR #22 review item 17): if this
+        // .NET test process itself is killed forcibly (Stop-Process, a crash, a CI runner reaping
+        // an orphaned job) with no chance to run IAsyncDisposable/ProcessExit cleanup, Windows
+        // closes every handle the killed process owned -- including this job handle -- which
+        // (because of KILL_ON_JOB_CLOSE) makes the OS itself kill the Python process tree. No-op
+        // on non-Windows (see WindowsJobObject's own docs for why).
+        var jobObject = WindowsJobObject.TryCreateAndAssign(process.Id);
+
+        // Belt-and-suspenders for the *graceful* exit paths that skip normal disposal (e.g. an
+        // unhandled exception unwinding past IAsyncDisposable, or a hard Environment.Exit call
+        // elsewhere in the process) -- runs on every platform, unlike the job object.
+        EventHandler? processExitHandler = null;
+        processExitHandler = (_, _) => TryKill(process);
+        AppDomain.CurrentDomain.ProcessExit += processExitHandler;
+
         var baseUri = new Uri($"http://{BackendContract.Host}:{contract.Port}/");
 
         try
         {
-            await WaitForHealthAsync(baseUri, process, output, cancellationToken).ConfigureAwait(false);
+            await WaitForHealthAsync(baseUri, process, output, startedAt, cancellationToken).ConfigureAwait(false);
         }
         catch
         {
+            AppDomain.CurrentDomain.ProcessExit -= processExitHandler;
             TryKill(process);
+            jobObject?.Dispose();
             throw;
         }
 
-        return new ProcessBackend(process, baseUri, output);
+        return new ProcessBackend(process, baseUri, output, jobObject, processExitHandler);
     }
 
     private static async Task WaitForHealthAsync(
-        Uri baseUri, Process process, CapturedProcessOutput output, CancellationToken cancellationToken)
+        Uri baseUri, Process process, CapturedProcessOutput output, DateTimeOffset startedAt,
+        CancellationToken cancellationToken)
     {
         using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
         var healthUri = new Uri(baseUri, "/health");
@@ -115,9 +169,21 @@ public static class PythonBackendLauncher
 
             if (process.HasExited)
             {
+                var elapsed = DateTimeOffset.UtcNow - startedAt;
+                var dump = output.Dump();
+                if (PortRaceDetection.ShouldRetry(elapsed, dump))
+                {
+                    throw new PortBindRaceException(
+                        $"Python backend exited immediately (code {process.ExitCode}), " +
+                        $"{elapsed.TotalSeconds:F1}s after starting, with output matching a TCP " +
+                        $"port-bind failure signature -- treating as a port race between " +
+                        $"NetworkUtils.GetFreeTcpPort() and the backend's own bind.\n" +
+                        $"--- backend stdout/stderr ---\n{dump}");
+                }
+
                 throw new InvalidOperationException(
                     $"Python backend exited early (code {process.ExitCode}) before becoming healthy.\n" +
-                    $"--- backend stdout/stderr ---\n{output.Dump()}");
+                    $"--- backend stdout/stderr ---\n{dump}");
             }
 
             try
@@ -161,7 +227,9 @@ public static class PythonBackendLauncher
     }
 }
 
-internal sealed class ProcessBackend(Process process, Uri baseUri, CapturedProcessOutput output) : IBackendUnderTest
+internal sealed class ProcessBackend(
+    Process process, Uri baseUri, CapturedProcessOutput output, WindowsJobObject? jobObject,
+    EventHandler? processExitHandler) : IBackendUnderTest
 {
     public Uri BaseUri { get; } = baseUri;
 
@@ -169,6 +237,11 @@ internal sealed class ProcessBackend(Process process, Uri baseUri, CapturedProce
 
     public async ValueTask DisposeAsync()
     {
+        if (processExitHandler is not null)
+        {
+            AppDomain.CurrentDomain.ProcessExit -= processExitHandler;
+        }
+
         try
         {
             if (!process.HasExited)
@@ -184,6 +257,7 @@ internal sealed class ProcessBackend(Process process, Uri baseUri, CapturedProce
         finally
         {
             process.Dispose();
+            jobObject?.Dispose();
         }
     }
 }

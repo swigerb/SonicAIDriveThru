@@ -123,6 +123,44 @@ failure).
 | `app/frontend/src/data/menuItems.json` | `FakeSearchServer` | Source data for every fake Azure AI Search response — the same menu data the real backend's search client would otherwise be querying against the real index. |
 | `app/backend/static/index.html` (gitignored; built via `npm run build`) | Python backend startup | aiohttp's `add_static` raises at app-creation time without this directory existing — `PythonBackendLauncher` checks for it explicitly and fails with a clear message instead of the opaque "backend exited early" (PR #22 review item 1). |
 
+### Process lifecycle hardening (PR #22 review item 17)
+
+`PythonBackendLauncher` treats "no orphaned `python.exe` after this suite exits, however it exits"
+as a hard requirement, not just the graceful `IAsyncDisposable.DisposeAsync` path:
+
+- **Windows Job Object** (`WindowsJobObject.cs`): every launched Python process is assigned to a
+  job object created with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. If this .NET test process is
+  itself killed forcibly (`Stop-Process`, a crash, a CI runner reaping an orphaned job) with no
+  chance to run any cleanup code at all, Windows closes every handle the killed process owned —
+  including the job handle — which (because of the kill-on-close limit) makes the OS itself kill
+  the whole Python process tree. No-op on non-Windows (CI runs on `ubuntu-latest`); `WindowsJobObjectTests.cs`
+  proves the mechanism directly (assign a real spawned process to a job, `Dispose()` the job,
+  assert the process exits) and skips cleanly off-Windows.
+- **`AppDomain.ProcessExit` handler**: a cross-platform belt-and-suspenders net for the *graceful*
+  exit paths that skip normal disposal (an unhandled exception unwinding past
+  `IAsyncDisposable`, a stray `Environment.Exit` elsewhere in the process). Registered right after
+  the process starts, unregistered in `ProcessBackend.DisposeAsync` so it never fires twice or
+  outlives the backend it was meant to guard.
+- **Retry on port-bind races** (`PortRaceDetection.cs`): `NetworkUtils.GetFreeTcpPort()` has an
+  inherent (tiny) TOCTOU race between releasing its probe socket and the backend's own bind. If
+  the Python process exits within `PortRaceDetection.RaceDetectionWindow` (20s — widened from an
+  initial 5s guess after empirically observing the real backend's own non-fatal Azure
+  OpenAI/Search reachability probes, each with their own ~2s timeout, run *before* it attempts its
+  socket bind, PR #22 review item 17) **and** its captured output matches a known bind-failure
+  signature (`errno 98`/`WinError 10048`/`WinError 10013`/"address already in use"),
+  `PythonBackendLauncher.StartAsync` picks a fresh port and retries, up to 3 attempts total. Any
+  other early exit (a real crash) is never retried — retrying it would just hide a real bug behind
+  a slow, flaky-looking pass. `PortRaceDetectionTests.cs` covers the pure heuristic; verified for
+  real by pre-occupying a port with a raw `TcpListener` and confirming `PythonBackendLauncher`
+  retries past it and starts healthy on a different port.
+- **CI**: `.github/workflows/conformance.yml` sets `timeout-minutes` on every job (15m for
+  `python-tests`/`frontend-tests`, 20m for `conformance`) so a genuine hang fails the job instead
+  of burning the whole Actions time budget, and the `dotnet test` step passes
+  `--blame-hang --blame-hang-timeout 10min --blame-hang-dump-type mini --blame-crash
+  --blame-crash-dump-type mini` so a hang or crash produces a diagnostic dump in `TestResults`
+  (already uploaded as an artifact on failure) well before the job-level timeout would otherwise
+  kill it with no diagnostics at all.
+
 ## GA validation fidelity — live-probe evidence
 
 `GaSessionValidator` (in `src/Conformance.Fakes/GaSessionValidator.cs`) re-derives the Azure OpenAI
