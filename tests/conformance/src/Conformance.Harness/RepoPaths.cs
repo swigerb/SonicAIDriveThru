@@ -5,16 +5,24 @@ public static class RepoPaths
 {
     /// <summary>
     /// Walks up from the test assembly's directory until it finds a folder containing both
-    /// `app` and `.git`, which is the repo root regardless of whether tests run from
-    /// `tests/conformance`, the repo root, or a `dotnet test` working directory in CI.
+    /// `app` and `azure.yaml` (a unique repo-root marker), plus a `.git` entry of either kind,
+    /// which is the repo root regardless of whether tests run from `tests/conformance`, the repo
+    /// root, or a `dotnet test` working directory in CI. `.git` is a *directory* in a normal
+    /// clone but a plain *file* (containing a `gitdir: ...` pointer) inside a git worktree, so
+    /// both are accepted rather than requiring `Directory.Exists`.
     /// </summary>
-    public static string FindRepoRoot()
+    public static string FindRepoRoot() => FindRepoRoot(AppContext.BaseDirectory);
+
+    /// <summary>Testable overload: walks up from an arbitrary starting directory.</summary>
+    public static string FindRepoRoot(string startDirectory)
     {
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        var dir = new DirectoryInfo(startDirectory);
         while (dir is not null)
         {
+            var gitPath = Path.Combine(dir.FullName, ".git");
             if (Directory.Exists(Path.Combine(dir.FullName, "app")) &&
-                Directory.Exists(Path.Combine(dir.FullName, ".git")))
+                File.Exists(Path.Combine(dir.FullName, "azure.yaml")) &&
+                (Directory.Exists(gitPath) || File.Exists(gitPath)))
             {
                 return dir.FullName;
             }
@@ -22,8 +30,9 @@ public static class RepoPaths
         }
 
         throw new DirectoryNotFoundException(
-            $"Could not locate the SonicAIDriveThru repo root by walking up from '{AppContext.BaseDirectory}' " +
-            "looking for a folder containing both 'app' and '.git'.");
+            $"Could not locate the SonicAIDriveThru repo root by walking up from '{startDirectory}' " +
+            "looking for a folder containing 'app', 'azure.yaml', and a '.git' directory or file (worktrees " +
+            "use a '.git' file).");
     }
 
     public static string BackendDirectory(string repoRoot) => Path.Combine(repoRoot, "app", "backend");
