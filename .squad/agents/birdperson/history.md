@@ -151,3 +151,16 @@
 - Green 3× in a row at three points in the work (initial, after Summer's test-hook changes, after Beth's cross-platform fix) — deterministic, no sleeps, `FrameLog.WaitForAsync`-style timeout waits throughout.
 - `CONFORMANCE_BACKEND=dotnet` (S2 placeholder) skips cleanly: 5 skip, 3 fake-only pass, 0 fail.
 - Decision logged: `.squad/decisions/inbox/birdperson-conformance-suite-design.md`.
+
+## 2026-09-24 — feat/conformance-harness Stage A (Rick's PR #22 review, #7/#11)
+
+- Rick reviewed PR #22 and requested changes; CI was confirmed red because `app/backend/static` (gitignored, built by the frontend) doesn't exist on a clean runner — the coordinator's local "8/8" only passed because that machine had a stale built frontend. Lesson applied: re-validated everything this round from a genuinely clean state (moved `static` aside, confirmed the suite fails with the intended clear message, restored it, then re-ran green).
+- Owned/drove the scenario design for items 2, 3, 4, 5:
+  - **Item 5** — replaced the shared server-level frame log with a per-connection `FakeRealtimeConnection` (id, own `ReceivedFrames`, api-key, model) plus a `ConnectionRegistry` (`WaitForNextConnectionAsync`, `WaitForNoOpenConnectionsAsync`). Rewrote `SmokeSessionBootstrapTests` to assert only on its own captured connection and to fail if a connection is already open at test start.
+  - **Item 4** — new scenario `Voice_cannot_be_changed_after_assistant_audio_has_been_sent`: sets voice pre-audio (accepted), drives a full scripted response through, then asserts a second voice change is rejected with `cannot_update_voice` echoing the request's `event_id`.
+  - **Item 2** — new `ResponseDoneRoundTripTests`: waits *past* the greeting for `extension.round_trip_token` on the browser and asserts no `"Traceback"` in captured backend stderr. Mutation-checked by removing `output`/`usage` from the fake's `response.done` body — reproduced the exact `rtmt.py` `KeyError: 'output'` traceback that silently kills the connection (root cause of the missing round-trip token); restoring is green again.
+  - **Item 3** — new `UpdateOrderToolCallTests`: scripts a real `update_order` function call through the full GA item lifecycle, sends a raw client `response.create`, asserts the resulting `function_call_output` reaches the upstream fake for the exact `call_id` and `extension.middle_tier_tool_response` reaches the browser, with no backend traceback.
+- Full suite: 8 → 14 tests across the 9 Stage-A commits. Green 3× in a row from the final clean state (14/14 each run, ~1s).
+- Final clean-state validation: `dotnet test` 3×green (14/14), `pytest app/backend/tests -q` 586 passed/61 subtests, `ruff check .` clean, `npm test` in `app/frontend` 116 passed, `git status` clean, no `bin/`/`obj/` tracked (`tests/conformance/.gitignore` confirmed via `git check-ignore -v`).
+- Stopped after Stage A per instruction — Stage B (items 8–17) waits for the coordinator to push and confirm CI green.
+- Decision logged: `.squad/decisions/inbox/birdperson-stage-a-review-response.md`.
