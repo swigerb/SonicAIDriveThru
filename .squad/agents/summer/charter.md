@@ -37,10 +37,9 @@
 
 ## Model
 
-- **Preferred:** claude-opus-4.6
-- **Rationale:** Summer owns the critical real-time audio pipeline and tool-calling logic — always uses Claude Opus 4.6 for maximum reasoning depth on async patterns and failure modes
-- **Fallback:** claude-opus-4.6 (no fallback — always Opus)
-
+- **Preferred:** claude-sonnet-5
+- **Rationale:** Brian's policy (2026-09-23): developers run on the latest Sonnet (Claude Sonnet 5). Escalate to the lead (Opus) for architecture calls.
+- **Fallback:** Standard chain — the coordinator handles fallback automatically
 ## Collaboration
 
 Before starting work, run `git rev-parse --show-toplevel` to find the repo root, or use the `TEAM ROOT` provided in the spawn prompt. All `.squad/` paths must be resolved relative to this root — do not assume CWD is the repo root (you may be in a worktree or subdirectory).

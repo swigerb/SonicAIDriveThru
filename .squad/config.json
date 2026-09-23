@@ -3,10 +3,11 @@
   "teamRoot": ".",
   "agentModelOverrides": {
     "rick": "claude-opus-5.5",
-    "morty": "claude-opus-5.5",
-    "summer": "claude-opus-5.5",
-    "birdperson": "claude-opus-5.5",
-    "squanchy": "claude-opus-5.5",
-    "unity": "claude-opus-5.5"
+    "morty": "claude-sonnet-5",
+    "summer": "claude-sonnet-5",
+    "birdperson": "claude-sonnet-5",
+    "squanchy": "claude-sonnet-5",
+    "unity": "claude-sonnet-5",
+    "beth": "claude-sonnet-5"
   }
 }
