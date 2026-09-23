@@ -36,9 +36,8 @@
 ## Model
 
 - **Preferred:** claude-opus-5.5
-- **Rationale:** Rick is the lead architect and deep thinker — always uses Claude Opus 5.5 for maximum reasoning quality
+- **Rationale:** Lead architect and reviewer. Brian's policy (2026-09-23): the lead always runs on Claude Opus 5.5 for maximum reasoning quality.
 - **Fallback:** claude-opus-5.5 (no fallback — always Opus)
-
 ## Collaboration
 
 Before starting work, run `git rev-parse --show-toplevel` to find the repo root, or use the `TEAM ROOT` provided in the spawn prompt. All `.squad/` paths must be resolved relative to this root — do not assume CWD is the repo root (you may be in a worktree or subdirectory).
