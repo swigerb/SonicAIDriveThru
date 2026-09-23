@@ -28,7 +28,10 @@ public static class RepoPaths
 
     public static string BackendDirectory(string repoRoot) => Path.Combine(repoRoot, "app", "backend");
 
-    public static string PythonExecutable(string repoRoot) => Path.Combine(repoRoot, ".venv", "Scripts", "python.exe");
+    public static string PythonExecutable(string repoRoot) =>
+        OperatingSystem.IsWindows()
+            ? Path.Combine(repoRoot, ".venv", "Scripts", "python.exe")
+            : Path.Combine(repoRoot, ".venv", "bin", "python");
 
     public static string MenuItemsJsonPath(string repoRoot) =>
         Path.Combine(repoRoot, "app", "frontend", "src", "data", "menuItems.json");

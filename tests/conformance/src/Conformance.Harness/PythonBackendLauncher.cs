@@ -21,8 +21,8 @@ public static class PythonBackendLauncher
         if (!File.Exists(pythonExe))
         {
             throw new FileNotFoundException(
-                $"Python venv interpreter not found at '{pythonExe}'. Expected a venv at {repoRoot}\\.venv " +
-                "(see the repo README for setup).", pythonExe);
+                $"Python venv interpreter not found at '{pythonExe}'. Expected a venv at " +
+                $"{Path.Combine(repoRoot, ".venv")} (see the repo README for setup).", pythonExe);
         }
 
         var env = BackendEnvironment.Build(options);
