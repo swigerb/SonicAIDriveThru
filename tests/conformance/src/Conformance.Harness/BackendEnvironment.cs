@@ -32,6 +32,18 @@ public sealed class PythonBackendOptions
 /// </summary>
 public static class BackendEnvironment
 {
+    /// <summary>
+    /// The fixed `AZURE_OPENAI_EASTUS2_API_KEY` value the Python backend sends as the `api-key`
+    /// header on every upstream realtime connection (rtmt.py: `headers = {"api-key": self.key}`
+    /// under key auth). Exposed so <c>ConformanceFixture</c> can configure
+    /// <c>FakeRealtimeUpstreamServer.ExpectedApiKey</c> to the exact same value instead of
+    /// duplicating the literal.
+    /// </summary>
+    public const string OpenAiApiKey = "conformance-test-openai-key";
+
+    /// <summary>The fixed `AZURE_SEARCH_API_KEY` value, analogous to <see cref="OpenAiApiKey"/>.</summary>
+    public const string SearchApiKey = "conformance-test-search-key";
+
     public static Dictionary<string, string> Build(PythonBackendOptions options)
     {
         var env = new Dictionary<string, string>(StringComparer.Ordinal)
@@ -44,8 +56,8 @@ public static class BackendEnvironment
             ["PYTHONUTF8"] = "1",
 
             // Key auth (never DefaultAzureCredential/AzureDeveloperCliCredential in CI).
-            ["AZURE_OPENAI_EASTUS2_API_KEY"] = "conformance-test-openai-key",
-            ["AZURE_SEARCH_API_KEY"] = "conformance-test-search-key",
+            ["AZURE_OPENAI_EASTUS2_API_KEY"] = OpenAiApiKey,
+            ["AZURE_SEARCH_API_KEY"] = SearchApiKey,
 
             // Point straight at the fakes.
             ["AZURE_OPENAI_EASTUS2_ENDPOINT"] = options.RealtimeBaseUri.ToString().TrimEnd('/'),

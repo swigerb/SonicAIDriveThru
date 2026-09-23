@@ -203,5 +203,181 @@ public sealed class FakeRealtimeScriptingModelTests
 
         await socketB.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
     }
+
+    // --- PR #22 review item 9: validation fidelity, re-derived from the official GA reference
+    // doc (not rtmt.py) and cross-checked with a live probe against the real service. See
+    // GaSessionValidator's class doc and tests/conformance/README.md for citations and the
+    // exact recorded live-probe JSON.
+
+    [Fact]
+    public async Task Session_update_without_session_type_is_rejected_as_missing_required_parameter()
+    {
+        await using var fake = new FakeRealtimeUpstreamServer();
+        await fake.StartAsync(TestContext.Current.CancellationToken);
+
+        using var socket = new ClientWebSocket();
+        var wsUri = new Uri($"ws://{fake.BaseUri.Host}:{fake.BaseUri.Port}/openai/v1/realtime?model=gpt-realtime-test");
+        await socket.ConnectAsync(wsUri, TestContext.Current.CancellationToken);
+        Assert.NotNull(await ReceiveJsonWithTimeoutAsync(socket, TestContext.Current.CancellationToken)); // session.created
+
+        // Otherwise-clean payload -- no unknown key, no reasoning/voice interplay -- so the only
+        // possible rejection is the missing `session.type` discriminator.
+        await WebSocketJson.SendAsync(socket, new JsonObject
+        {
+            ["type"] = "session.update",
+            ["event_id"] = "evt_missing_type",
+            ["session"] = new JsonObject { ["instructions"] = "hello" },
+        }, TestContext.Current.CancellationToken);
+
+        var error = await ReceiveJsonWithTimeoutAsync(socket, TestContext.Current.CancellationToken);
+        Assert.NotNull(error);
+        Assert.Equal("error", error!.Value.GetProperty("type").GetString());
+        var errorBody = error.Value.GetProperty("error");
+        Assert.Equal("missing_required_parameter", errorBody.GetProperty("code").GetString());
+        Assert.Equal("session.type", errorBody.GetProperty("param").GetString());
+        Assert.Equal("evt_missing_type", errorBody.GetProperty("event_id").GetString());
+
+        await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task Session_update_with_unknown_top_level_key_is_rejected_as_unknown_parameter()
+    {
+        await using var fake = new FakeRealtimeUpstreamServer();
+        await fake.StartAsync(TestContext.Current.CancellationToken);
+
+        using var socket = new ClientWebSocket();
+        var wsUri = new Uri($"ws://{fake.BaseUri.Host}:{fake.BaseUri.Port}/openai/v1/realtime?model=gpt-realtime-test");
+        await socket.ConnectAsync(wsUri, TestContext.Current.CancellationToken);
+        Assert.NotNull(await ReceiveJsonWithTimeoutAsync(socket, TestContext.Current.CancellationToken)); // session.created
+
+        // Live-confirmed (2026-09-24): an unrecognised top-level session key returns
+        // code "unknown_parameter" (NOT the coarse "invalid_request_error" outer error.type),
+        // param "session.<key>", with event_id echoed.
+        await WebSocketJson.SendAsync(socket, new JsonObject
+        {
+            ["type"] = "session.update",
+            ["event_id"] = "evt_unknown_top_level",
+            ["session"] = new JsonObject { ["type"] = "realtime", ["totally_bogus_key"] = "x" },
+        }, TestContext.Current.CancellationToken);
+
+        var error = await ReceiveJsonWithTimeoutAsync(socket, TestContext.Current.CancellationToken);
+        Assert.NotNull(error);
+        Assert.Equal("error", error!.Value.GetProperty("type").GetString());
+        var errorBody = error.Value.GetProperty("error");
+        Assert.Equal("unknown_parameter", errorBody.GetProperty("code").GetString());
+        Assert.Equal("session.totally_bogus_key", errorBody.GetProperty("param").GetString());
+        Assert.Equal("evt_unknown_top_level", errorBody.GetProperty("event_id").GetString());
+
+        await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
+    }
+
+    [Theory]
+    [InlineData("input", "bogus_input_key")]
+    [InlineData("output", "bogus_output_key")]
+    public async Task Session_update_with_unknown_nested_audio_key_is_rejected(string side, string badKey)
+    {
+        await using var fake = new FakeRealtimeUpstreamServer();
+        await fake.StartAsync(TestContext.Current.CancellationToken);
+
+        using var socket = new ClientWebSocket();
+        var wsUri = new Uri($"ws://{fake.BaseUri.Host}:{fake.BaseUri.Port}/openai/v1/realtime?model=gpt-realtime-test");
+        await socket.ConnectAsync(wsUri, TestContext.Current.CancellationToken);
+        Assert.NotNull(await ReceiveJsonWithTimeoutAsync(socket, TestContext.Current.CancellationToken)); // session.created
+
+        await WebSocketJson.SendAsync(socket, new JsonObject
+        {
+            ["type"] = "session.update",
+            ["event_id"] = "evt_bad_nested_audio",
+            ["session"] = new JsonObject
+            {
+                ["type"] = "realtime",
+                ["audio"] = new JsonObject { [side] = new JsonObject { [badKey] = true } },
+            },
+        }, TestContext.Current.CancellationToken);
+
+        var error = await ReceiveJsonWithTimeoutAsync(socket, TestContext.Current.CancellationToken);
+        Assert.NotNull(error);
+        var errorBody = error!.Value.GetProperty("error");
+        Assert.Equal("unknown_parameter", errorBody.GetProperty("code").GetString());
+        Assert.Equal($"session.audio.{side}.{badKey}", errorBody.GetProperty("param").GetString());
+
+        await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task Unknown_top_level_client_event_type_is_rejected_before_dispatch()
+    {
+        await using var fake = new FakeRealtimeUpstreamServer();
+        await fake.StartAsync(TestContext.Current.CancellationToken);
+
+        using var socket = new ClientWebSocket();
+        var wsUri = new Uri($"ws://{fake.BaseUri.Host}:{fake.BaseUri.Port}/openai/v1/realtime?model=gpt-realtime-test");
+        await socket.ConnectAsync(wsUri, TestContext.Current.CancellationToken);
+        Assert.NotNull(await ReceiveJsonWithTimeoutAsync(socket, TestContext.Current.CancellationToken)); // session.created
+
+        // A leaked internal frame type -- never valid to forward upstream unchanged.
+        await WebSocketJson.SendAsync(socket, new JsonObject
+        {
+            ["type"] = "extension.middle_tier_tool_response",
+            ["event_id"] = "evt_leaked_extension_frame",
+        }, TestContext.Current.CancellationToken);
+
+        var error = await ReceiveJsonWithTimeoutAsync(socket, TestContext.Current.CancellationToken);
+        Assert.NotNull(error);
+        var errorBody = error!.Value.GetProperty("error");
+        Assert.Equal("invalid_value", errorBody.GetProperty("code").GetString());
+        Assert.Equal("type", errorBody.GetProperty("param").GetString());
+        Assert.Equal("evt_leaked_extension_frame", errorBody.GetProperty("event_id").GetString());
+
+        await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task Handshake_with_missing_api_key_is_rejected_with_401_when_required()
+    {
+        await using var fake = new FakeRealtimeUpstreamServer { RequireApiKey = true, ExpectedApiKey = "expected-key" };
+        await fake.StartAsync(TestContext.Current.CancellationToken);
+
+        using var socket = new ClientWebSocket();
+        socket.Options.CollectHttpResponseDetails = true;
+        var wsUri = new Uri($"ws://{fake.BaseUri.Host}:{fake.BaseUri.Port}/openai/v1/realtime?model=gpt-realtime-test");
+        await Assert.ThrowsAsync<WebSocketException>(() => socket.ConnectAsync(wsUri, TestContext.Current.CancellationToken));
+
+        Assert.Equal(System.Net.HttpStatusCode.Unauthorized, socket.HttpStatusCode);
+        Assert.Equal(0, fake.OpenConnectionCount);
+    }
+
+    [Fact]
+    public async Task Handshake_with_wrong_api_key_is_rejected_with_401_when_expected_key_set()
+    {
+        await using var fake = new FakeRealtimeUpstreamServer { RequireApiKey = true, ExpectedApiKey = "expected-key" };
+        await fake.StartAsync(TestContext.Current.CancellationToken);
+
+        using var socket = new ClientWebSocket();
+        socket.Options.CollectHttpResponseDetails = true;
+        socket.Options.SetRequestHeader("api-key", "totally-wrong-key");
+        var wsUri = new Uri($"ws://{fake.BaseUri.Host}:{fake.BaseUri.Port}/openai/v1/realtime?model=gpt-realtime-test");
+        await Assert.ThrowsAsync<WebSocketException>(() => socket.ConnectAsync(wsUri, TestContext.Current.CancellationToken));
+
+        Assert.Equal(System.Net.HttpStatusCode.Unauthorized, socket.HttpStatusCode);
+        Assert.Equal(0, fake.OpenConnectionCount);
+    }
+
+    [Fact]
+    public async Task Handshake_with_correct_api_key_is_accepted_when_required()
+    {
+        await using var fake = new FakeRealtimeUpstreamServer { RequireApiKey = true, ExpectedApiKey = "expected-key" };
+        await fake.StartAsync(TestContext.Current.CancellationToken);
+
+        using var socket = new ClientWebSocket();
+        socket.Options.SetRequestHeader("api-key", "expected-key");
+        var wsUri = new Uri($"ws://{fake.BaseUri.Host}:{fake.BaseUri.Port}/openai/v1/realtime?model=gpt-realtime-test");
+        await socket.ConnectAsync(wsUri, TestContext.Current.CancellationToken);
+        Assert.Equal(WebSocketState.Open, socket.State);
+        Assert.NotNull(await ReceiveJsonWithTimeoutAsync(socket, TestContext.Current.CancellationToken)); // session.created
+
+        await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
+    }
 }
 

@@ -120,12 +120,14 @@ public sealed class FakeRealtimeScriptingTests
         await socket.ConnectAsync(wsUri, TestContext.Current.CancellationToken);
         Assert.NotNull(await WebSocketJson.ReceiveJsonAsync(socket, TestContext.Current.CancellationToken)); // session.created
 
-        // Setting a voice before any audio has been sent must be accepted.
+        // Setting a voice before any audio has been sent must be accepted. Includes the
+        // required `session.type` discriminator (PR #22 review item 9) since this test's point
+        // is voice-lock behaviour, not the type-required check exercised elsewhere.
         await WebSocketJson.SendAsync(socket, new JsonObject
         {
             ["type"] = "session.update",
             ["event_id"] = "evt_voice_1",
-            ["session"] = new JsonObject { ["audio"] = new JsonObject { ["output"] = new JsonObject { ["voice"] = "alloy" } } },
+            ["session"] = new JsonObject { ["type"] = "realtime", ["audio"] = new JsonObject { ["output"] = new JsonObject { ["voice"] = "alloy" } } },
         }, TestContext.Current.CancellationToken);
         var accepted = await WebSocketJson.ReceiveJsonAsync(socket, TestContext.Current.CancellationToken);
         Assert.NotNull(accepted);
@@ -148,7 +150,7 @@ public sealed class FakeRealtimeScriptingTests
         {
             ["type"] = "session.update",
             ["event_id"] = "evt_voice_2",
-            ["session"] = new JsonObject { ["audio"] = new JsonObject { ["output"] = new JsonObject { ["voice"] = "verse" } } },
+            ["session"] = new JsonObject { ["type"] = "realtime", ["audio"] = new JsonObject { ["output"] = new JsonObject { ["voice"] = "verse" } } },
         }, TestContext.Current.CancellationToken);
         var rejected = await WebSocketJson.ReceiveJsonAsync(socket, TestContext.Current.CancellationToken);
         Assert.NotNull(rejected);

@@ -42,6 +42,21 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
     public int OpenConnectionCount => _connections.OpenCount;
 
     /// <summary>
+    /// When true, the handshake is refused with 401 (matching GA's real behaviour) unless the
+    /// `api-key` header is present and, if <see cref="ExpectedApiKey"/> is set, matches it.
+    /// Defaults to false so the many direct-connect scripting tests that don't care about auth
+    /// (and never set the header) keep working unchanged — opt in per test/fixture instead of
+    /// forcing every caller to authenticate. <c>ConformanceFixture</c> turns this on for the
+    /// shared instance the real Python backend connects through, since rtmt.py always sends
+    /// `api-key` for key auth (see BackendEnvironment.OpenAiApiKey), so real end-to-end
+    /// scenarios exercise this path with zero risk of a false failure.
+    /// </summary>
+    public bool RequireApiKey { get; set; }
+
+    /// <summary>The exact `api-key` value to require when <see cref="RequireApiKey"/> is true. Null means "any non-empty value is accepted".</summary>
+    public string? ExpectedApiKey { get; set; }
+
+    /// <summary>
     /// Waits for the next upstream connection accepted after this call — not one already open —
     /// so tests can assert on a specific connection's own <see cref="FakeRealtimeConnection.ReceivedFrames"/>
     /// instead of a server-wide log that every past and future connection shares.
@@ -103,6 +118,22 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
             // rate-limiting before the session even starts.
             context.Response.StatusCode = rejection.Value;
             return;
+        }
+
+        if (RequireApiKey)
+        {
+            var apiKey = context.Request.Headers["api-key"].ToString();
+            var keyMissing = string.IsNullOrEmpty(apiKey);
+            var keyMismatched = !keyMissing && ExpectedApiKey is not null &&
+                !string.Equals(apiKey, ExpectedApiKey, StringComparison.Ordinal);
+            if (keyMissing || keyMismatched)
+            {
+                // Live-confirmed shape (2026-09-24): a missing Authorization header fails the
+                // handshake itself with HTTP 401 -- no JSON error frame, same as the rejection
+                // queue above.
+                context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                return;
+            }
         }
 
         var deployment = context.Request.Query["model"].ToString();
@@ -170,6 +201,18 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
 
     private async Task HandleFrameAsync(FakeRealtimeConnection connection, RecordedFrame frame, string deployment, CancellationToken ct)
     {
+        // GA rejects any top-level client event `type` it doesn't recognise (item 9 of PR #22's
+        // review) — checked before dispatch so an unrecognised type never reaches the switch
+        // below or the rule-based triggers, exactly like the real service refusing to act on it
+        // at all. Catches a leaked internal frame type (e.g. a stray `extension.*` frame)
+        // forwarded upstream unchanged by mistake.
+        var typeCheck = GaSessionValidator.ValidateClientEventType(frame.Type);
+        if (!typeCheck.IsAccepted)
+        {
+            await SendValidationErrorAsync(connection, typeCheck, TryGetString(frame.Json, "event_id"), ct).ConfigureAwait(false);
+            return;
+        }
+
         switch (frame.Type)
         {
             case "session.update":
@@ -196,6 +239,25 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
         }
     }
 
+    private static async Task SendValidationErrorAsync(
+        FakeRealtimeConnection connection, SessionUpdateValidationResult result, string? eventId, CancellationToken ct)
+    {
+        var error = new JsonObject
+        {
+            ["type"] = "error",
+            ["event_id"] = FakeRealtimeConnection.NewEventId(),
+            ["error"] = new JsonObject
+            {
+                ["type"] = "invalid_request_error",
+                ["code"] = result.Code,
+                ["message"] = result.Message,
+                ["param"] = result.Param,
+                ["event_id"] = result.EchoEventId ? eventId : null,
+            },
+        };
+        await connection.SendAsync(error, ct).ConfigureAwait(false);
+    }
+
     private async Task HandleSessionUpdateAsync(FakeRealtimeConnection connection, RecordedFrame frame, string deployment, CancellationToken ct)
     {
         var state = connection.SessionState;
@@ -204,20 +266,7 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
 
         if (!result.IsAccepted)
         {
-            var error = new JsonObject
-            {
-                ["type"] = "error",
-                ["event_id"] = FakeRealtimeConnection.NewEventId(),
-                ["error"] = new JsonObject
-                {
-                    ["type"] = "invalid_request_error",
-                    ["code"] = result.Code,
-                    ["message"] = result.Message,
-                    ["param"] = result.Param,
-                    ["event_id"] = result.EchoEventId ? eventId : null,
-                },
-            };
-            await connection.SendAsync(error, ct).ConfigureAwait(false);
+            await SendValidationErrorAsync(connection, result, eventId, ct).ConfigureAwait(false);
             return;
         }
 
