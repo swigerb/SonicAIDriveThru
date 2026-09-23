@@ -35,4 +35,12 @@ public static class RepoPaths
 
     public static string MenuItemsJsonPath(string repoRoot) =>
         Path.Combine(repoRoot, "app", "frontend", "src", "data", "menuItems.json");
+
+    /// <summary>
+    /// app/backend/static is gitignored — populated only by `npm run build` in app/frontend
+    /// (vite's outDir points there). aiohttp's `add_static` raises at app-creation time if this
+    /// directory doesn't exist, so the Python backend fails immediately on startup without it.
+    /// </summary>
+    public static string FrontendStaticIndexHtmlPath(string repoRoot) =>
+        Path.Combine(repoRoot, "app", "backend", "static", "index.html");
 }

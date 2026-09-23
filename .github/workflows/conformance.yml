@@ -45,6 +45,19 @@ jobs:
           # branch was validated against.
           pip install ruff==0.16.1 pytest==9.1.1 pytest-asyncio==1.4.0
 
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/frontend/package-lock.json
+
+      - name: Build frontend (app/backend/static is gitignored and required by app.py's add_static)
+        working-directory: app/frontend
+        run: |
+          npm ci
+          npm run build
+
       - name: ruff check
         run: ruff check .
 
@@ -133,6 +146,19 @@ jobs:
           python -m venv .venv
           .venv/bin/python -m pip install --upgrade pip
           .venv/bin/python -m pip install -r app/backend/requirements.txt
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/frontend/package-lock.json
+
+      - name: Build frontend (app/backend/static is gitignored and required by app.py's add_static)
+        working-directory: app/frontend
+        run: |
+          npm ci
+          npm run build
 
       - name: Set up .NET ${{ env.DOTNET_VERSION }}
         uses: actions/setup-dotnet@v4
