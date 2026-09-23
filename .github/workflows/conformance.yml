@@ -13,7 +13,7 @@ permissions:
   contents: read
 
 env:
-  # Keep these two in sync with tests/conformance/global.json.
+  # Keep these two in sync with global.json (repo root).
   DOTNET_VERSION: "11.0.100-rc.1.26425.128"
   PYTHON_VERSION: "3.12"
   DOTNET_NOLOGO: "true"
