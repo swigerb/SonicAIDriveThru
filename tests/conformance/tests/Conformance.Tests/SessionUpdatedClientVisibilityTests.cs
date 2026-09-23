@@ -28,7 +28,7 @@ public sealed class SessionUpdatedClientVisibilityTests(ConformanceFixture fixtu
 {
     private static readonly TimeSpan FrameTimeout = TimeSpan.FromSeconds(30);
 
-    [Fact(Skip = "Known finding from PR #22 review item 10, reported to the coordinator: " +
+    [Fact(Skip = "Known finding from PR #22 review item 10, tracked in issue #27: " +
         "app/backend/rtmt.py forwards session.updated to the browser unscrubbed -- instructions " +
         "and the full tool schema leak to the client. rtmt.py's _process_message_to_client only " +
         "scrubs session.created (see 'Hide the instructions, tools and max tokens from clients'), " +
