@@ -23,7 +23,8 @@ hooks:
         interactive: true
         continueOnError: false
     # Non-fatal: checks the live realtime deployment accepts the carhop's exact
-    # session config (tools, tool_choice, instructions). Warns, never fails.
+    # session config (tools, tool_choice, instructions) and transcribes a test
+    # phrase word for word. Warns, never fails.
     postdeploy:
       windows:
         shell: pwsh
