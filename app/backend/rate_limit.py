@@ -33,6 +33,8 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+import test_hooks
+
 logger = logging.getLogger("sonic-drive-in")
 
 RATE_LIMITED_EVENT = "extension.rate_limited"
@@ -114,8 +116,12 @@ class RateLimitSettings:
             enabled = _truthy(env_value)
         return cls(
             enabled=enabled,
-            retry_delay_seconds=float(cfg.get("retry_delay_seconds", 1.5)),
-            second_retry_delay_seconds=float(cfg.get("second_retry_delay_seconds", 4.0)),
+            retry_delay_seconds=test_hooks.seconds(
+                "CONFORMANCE_RATE_LIMIT_RETRY_DELAY_SECONDS", float(cfg.get("retry_delay_seconds", 1.5))
+            ),
+            second_retry_delay_seconds=test_hooks.seconds(
+                "CONFORMANCE_RATE_LIMIT_SECOND_RETRY_DELAY_SECONDS", float(cfg.get("second_retry_delay_seconds", 4.0))
+            ),
             max_retries=max(0, int(cfg.get("max_retries", 2))),
         )
 
