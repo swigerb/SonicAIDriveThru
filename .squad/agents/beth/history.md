@@ -124,5 +124,6 @@
 - Verified all three real branches end-to-end (not just the unit tests) by actually running `dotnet test` with `CONFORMANCE_BACKEND=dotnet` set: (1) no opt-in → both smoke tests **FAIL** with the new `ConformanceBackendUnavailableException` message; (2) `+CONFORMANCE_ALLOW_SKIP=1` → both **SKIP**; (3) `+GITHUB_ACTIONS=true` on top of the opt-in → back to **FAIL**, proving CI can't be talked into skipping even if the opt-in env var leaks in from somewhere.
 - Added a README section ("Choosing a backend") documenting `CONFORMANCE_BACKEND`/`CONFORMANCE_BACKEND_URL`/`CONFORMANCE_ALLOW_SKIP` and the CI-detection rule.
 - `dotnet test tests/conformance`: 45 passed / 1 skipped / 46 total (10 new tests, no regressions). 3× green.
+- Commit: `57be769`.
 
 
