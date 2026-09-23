@@ -1,4 +1,5 @@
 using System.Net.WebSockets;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using Conformance.Fakes;
 using Xunit;
@@ -127,12 +128,17 @@ public sealed class FakeRealtimeScriptingTests
         Assert.NotNull(accepted);
         Assert.Equal("session.updated", accepted!.Value.GetProperty("type").GetString());
 
-        // response.create with no queued script uses ResponseScript.Default, which emits one
-        // audio delta then response.done — this is what must flip AssistantAudioSeen.
+        // response.create with no queued script uses ResponseScript.Default, which emits the full
+        // GA item lifecycle (output_item.added -> ... -> output_audio.delta -> ... -> response.done)
+        // for one audio delta — drain all of it; only response.done flipping AssistantAudioSeen
+        // (via the delta in between) is what this test actually cares about.
         await WebSocketJson.SendAsync(socket, new JsonObject { ["type"] = "response.create" }, TestContext.Current.CancellationToken);
-        Assert.NotNull(await WebSocketJson.ReceiveJsonAsync(socket, TestContext.Current.CancellationToken)); // response.created
-        Assert.NotNull(await WebSocketJson.ReceiveJsonAsync(socket, TestContext.Current.CancellationToken)); // response.output_audio.delta
-        Assert.NotNull(await WebSocketJson.ReceiveJsonAsync(socket, TestContext.Current.CancellationToken)); // response.done
+        JsonElement? frame;
+        do
+        {
+            frame = await WebSocketJson.ReceiveJsonAsync(socket, TestContext.Current.CancellationToken);
+            Assert.NotNull(frame);
+        } while (frame!.Value.GetProperty("type").GetString() != "response.done");
 
         // Now changing the voice must be rejected.
         await WebSocketJson.SendAsync(socket, new JsonObject

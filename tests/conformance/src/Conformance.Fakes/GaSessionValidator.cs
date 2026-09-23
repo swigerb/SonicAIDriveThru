@@ -91,9 +91,12 @@ public sealed record SessionUpdateValidationResult(bool IsAccepted, string? Code
         new(false, code, param, message, echoEventId);
 }
 
-/// <summary>Per-connection state the validator needs: current voice lock and deployment name.</summary>
+/// <summary>Per-connection state the validator and response scripting need: current voice lock,
+/// whether assistant audio has gone out yet, and the last conversation item id (for GA's
+/// `previous_item_id` chaining across responses on the same connection).</summary>
 public sealed class RealtimeSessionState
 {
     public string? CurrentVoice { get; set; }
     public bool AssistantAudioSeen { get; set; }
+    public string? LastConversationItemId { get; set; }
 }

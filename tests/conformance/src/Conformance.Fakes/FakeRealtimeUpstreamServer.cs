@@ -193,18 +193,123 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
         await WebSocketJson.SendAsync(socket, new JsonObject
         {
             ["type"] = "response.created",
+            ["event_id"] = NewEventId(),
             ["response"] = new JsonObject { ["id"] = responseId, ["status"] = "in_progress" },
         }, ct).ConfigureAwait(false);
+
+        // Accumulated into the final response.done's `output[]`, exactly like GA: every item this
+        // response produced, each carrying its own completed `status`.
+        var output = new JsonArray();
+        var outputIndex = 0;
+
+        // An open (in_progress) assistant "message" item that consecutive AudioDeltaEvents are
+        // collected into — GA groups audio deltas under one output item + one content part, it
+        // does not open a fresh item per delta.
+        string? audioItemId = null;
+        var audioContentIndex = 0;
+
+        async Task CloseOpenAudioItemAsync()
+        {
+            if (audioItemId is null)
+            {
+                return;
+            }
+
+            await WebSocketJson.SendAsync(socket, new JsonObject
+            {
+                ["type"] = "response.output_audio.done",
+                ["event_id"] = NewEventId(),
+                ["response_id"] = responseId,
+                ["item_id"] = audioItemId,
+                ["output_index"] = outputIndex,
+                ["content_index"] = audioContentIndex,
+            }, ct).ConfigureAwait(false);
+            await WebSocketJson.SendAsync(socket, new JsonObject
+            {
+                ["type"] = "response.content_part.done",
+                ["event_id"] = NewEventId(),
+                ["response_id"] = responseId,
+                ["item_id"] = audioItemId,
+                ["output_index"] = outputIndex,
+                ["content_index"] = audioContentIndex,
+                ["part"] = new JsonObject { ["type"] = "audio", ["transcript"] = "" },
+            }, ct).ConfigureAwait(false);
+
+            var completedItem = new JsonObject
+            {
+                ["id"] = audioItemId,
+                ["type"] = "message",
+                ["status"] = "completed",
+                ["role"] = "assistant",
+                ["content"] = new JsonArray(new JsonObject { ["type"] = "audio", ["transcript"] = "" }),
+            };
+            await WebSocketJson.SendAsync(socket, new JsonObject
+            {
+                ["type"] = "response.output_item.done",
+                ["event_id"] = NewEventId(),
+                ["response_id"] = responseId,
+                ["output_index"] = outputIndex,
+                ["item"] = completedItem.DeepClone(),
+            }, ct).ConfigureAwait(false);
+
+            output.Add(completedItem.DeepClone());
+            outputIndex++;
+            audioItemId = null;
+            audioContentIndex = 0;
+        }
 
         foreach (var evt in script.Events)
         {
             switch (evt)
             {
                 case AudioDeltaEvent audio:
+                    if (audioItemId is null)
+                    {
+                        audioItemId = $"item_{Guid.NewGuid():N}";
+                        var openItem = new JsonObject
+                        {
+                            ["id"] = audioItemId,
+                            ["type"] = "message",
+                            ["status"] = "in_progress",
+                            ["role"] = "assistant",
+                            ["content"] = new JsonArray(),
+                        };
+                        await WebSocketJson.SendAsync(socket, new JsonObject
+                        {
+                            ["type"] = "response.output_item.added",
+                            ["event_id"] = NewEventId(),
+                            ["response_id"] = responseId,
+                            ["output_index"] = outputIndex,
+                            ["item"] = openItem.DeepClone(),
+                        }, ct).ConfigureAwait(false);
+                        await WebSocketJson.SendAsync(socket, new JsonObject
+                        {
+                            ["type"] = "conversation.item.added",
+                            ["event_id"] = NewEventId(),
+                            ["previous_item_id"] = state.LastConversationItemId,
+                            ["item"] = openItem.DeepClone(),
+                        }, ct).ConfigureAwait(false);
+                        state.LastConversationItemId = audioItemId;
+                        await WebSocketJson.SendAsync(socket, new JsonObject
+                        {
+                            ["type"] = "response.content_part.added",
+                            ["event_id"] = NewEventId(),
+                            ["response_id"] = responseId,
+                            ["item_id"] = audioItemId,
+                            ["output_index"] = outputIndex,
+                            ["content_index"] = audioContentIndex,
+                            ["part"] = new JsonObject { ["type"] = "audio", ["transcript"] = "" },
+                        }, ct).ConfigureAwait(false);
+                    }
+
                     await WebSocketJson.SendAsync(socket, new JsonObject
                     {
                         ["type"] = "response.output_audio.delta",
+                        ["event_id"] = NewEventId(),
                         ["response_id"] = responseId,
+                        ["item_id"] = audioItemId,
+                        ["output_index"] = outputIndex,
+                        ["content_index"] = audioContentIndex,
                         ["delta"] = audio.Base64Delta,
                     }, ct).ConfigureAwait(false);
                     // GA rejects session.update's `voice` field once any assistant audio has been
@@ -215,21 +320,87 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
                     break;
 
                 case FunctionCallEvent call:
+                    // A function call is its own item — close out any open audio item first so
+                    // output ordering matches a real turn (assistant says something, then calls
+                    // a tool, rather than interleaving).
+                    await CloseOpenAudioItemAsync().ConfigureAwait(false);
+
+                    var callItemId = $"item_{Guid.NewGuid():N}";
+                    var openCallItem = new JsonObject
+                    {
+                        ["id"] = callItemId,
+                        ["type"] = "function_call",
+                        ["status"] = "in_progress",
+                        ["name"] = call.Name,
+                        ["call_id"] = call.CallId,
+                        ["arguments"] = "",
+                    };
+                    await WebSocketJson.SendAsync(socket, new JsonObject
+                    {
+                        ["type"] = "response.output_item.added",
+                        ["event_id"] = NewEventId(),
+                        ["response_id"] = responseId,
+                        ["output_index"] = outputIndex,
+                        ["item"] = openCallItem.DeepClone(),
+                    }, ct).ConfigureAwait(false);
+                    // rtmt.py reads the top-level `previous_item_id` off this exact event type
+                    // (conversation.item.created | conversation.item.added) to remember what to
+                    // stitch extension.middle_tier_tool_response's own previous_item_id to.
+                    await WebSocketJson.SendAsync(socket, new JsonObject
+                    {
+                        ["type"] = "conversation.item.added",
+                        ["event_id"] = NewEventId(),
+                        ["previous_item_id"] = state.LastConversationItemId,
+                        ["item"] = openCallItem.DeepClone(),
+                    }, ct).ConfigureAwait(false);
+                    state.LastConversationItemId = callItemId;
+
                     await WebSocketJson.SendAsync(socket, new JsonObject
                     {
                         ["type"] = "response.function_call_arguments.done",
+                        ["event_id"] = NewEventId(),
                         ["response_id"] = responseId,
+                        ["item_id"] = callItemId,
+                        ["output_index"] = outputIndex,
                         ["call_id"] = call.CallId,
                         ["name"] = call.Name,
                         ["arguments"] = call.ArgumentsJson,
                     }, ct).ConfigureAwait(false);
+
+                    var completedCallItem = new JsonObject
+                    {
+                        ["id"] = callItemId,
+                        ["type"] = "function_call",
+                        ["status"] = "completed",
+                        ["name"] = call.Name,
+                        ["call_id"] = call.CallId,
+                        ["arguments"] = call.ArgumentsJson,
+                    };
+                    // rtmt.py's response.output_item.done handler is what actually invokes the
+                    // backend tool and sends conversation.item.create(function_call_output)
+                    // upstream — this frame is the trigger for item 3's tool-execution scenario.
+                    await WebSocketJson.SendAsync(socket, new JsonObject
+                    {
+                        ["type"] = "response.output_item.done",
+                        ["event_id"] = NewEventId(),
+                        ["response_id"] = responseId,
+                        ["output_index"] = outputIndex,
+                        ["item"] = completedCallItem.DeepClone(),
+                    }, ct).ConfigureAwait(false);
+
+                    output.Add(completedCallItem.DeepClone());
+                    outputIndex++;
                     break;
 
                 case DoneEvent done:
+                    await CloseOpenAudioItemAsync().ConfigureAwait(false);
+
                     var responseBody = new JsonObject
                     {
                         ["id"] = responseId,
                         ["status"] = done.Status,
+                        ["output"] = output.DeepClone(),
+                        ["usage"] = BuildUsage(output.Count),
                     };
                     if (done.ErrorCode is not null)
                     {
@@ -246,11 +417,41 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
                     await WebSocketJson.SendAsync(socket, new JsonObject
                     {
                         ["type"] = "response.done",
+                        ["event_id"] = NewEventId(),
                         ["response"] = responseBody,
                     }, ct).ConfigureAwait(false);
                     break;
             }
         }
+    }
+
+    private static string NewEventId() => $"evt_{Guid.NewGuid():N}";
+
+    /// <summary>A minimal but GA-shaped usage object — real token counts are meaningless from a
+    /// fake, but the backend's context-window tracking only reads `output[]`, so this exists
+    /// purely so consumers that expect the `usage` key (as GA always sends it) don't have to
+    /// special-case the fake.</summary>
+    private static JsonObject BuildUsage(int outputItemCount)
+    {
+        var outputTokens = 16 * Math.Max(outputItemCount, 1);
+        const int inputTokens = 32;
+        return new JsonObject
+        {
+            ["total_tokens"] = inputTokens + outputTokens,
+            ["input_tokens"] = inputTokens,
+            ["output_tokens"] = outputTokens,
+            ["input_token_details"] = new JsonObject
+            {
+                ["text_tokens"] = inputTokens,
+                ["audio_tokens"] = 0,
+                ["cached_tokens"] = 0,
+            },
+            ["output_token_details"] = new JsonObject
+            {
+                ["text_tokens"] = 0,
+                ["audio_tokens"] = outputTokens,
+            },
+        };
     }
 
     private static JsonObject BuildSessionCreated() => new()
