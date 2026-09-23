@@ -136,6 +136,7 @@
 - Verified the real end-to-end failure/success path (not just unit tests) via `dotnet test` with `CONFORMANCE_BACKEND_URL` set: missing `CONFORMANCE_FAKE_REALTIME_PORT` → clean `InvalidOperationException` naming the variable, thrown from `ConformanceFixture.InitializeAsync` before any fake starts; both fixed ports supplied → fixture init succeeds (fails later and separately, as expected, only when the *scenario* itself tries to reach the nonexistent external backend at the placeholder test URL — proving the fakes' own startup was never the problem).
 - Documented `CONFORMANCE_FAKE_REALTIME_PORT`/`CONFORMANCE_FAKE_SEARCH_PORT` in the README's "Choosing a backend" section.
 - `dotnet test tests/conformance`: 58 passed / 1 skipped / 59 total (13 new tests, no regressions). 3× green.
+- Commit: `2590034`.
 
 
 
