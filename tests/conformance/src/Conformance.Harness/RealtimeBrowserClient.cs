@@ -31,6 +31,10 @@ public sealed class RealtimeBrowserClient : IAsyncDisposable
         var token = tokenResponse.GetProperty("token").GetString();
 
         var client = new RealtimeBrowserClient();
+        // Without this, ClientWebSocket.HttpResponseHeaders is always null regardless of what the
+        // server actually negotiated, which silently made NegotiatedExtensions always null too —
+        // the deflate test could never fail no matter what the backend did.
+        client._socket.Options.CollectHttpResponseDetails = true;
         if (offerDeflate)
         {
             client._socket.Options.DangerousDeflateOptions = new WebSocketDeflateOptions();
