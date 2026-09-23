@@ -22,13 +22,15 @@ model:
   # gpt-realtime-1.5 rejects `reasoning` -- the whole session.update, tools
   # included. See scripts/benchmark_reasoning.py.
   # Env override: AZURE_OPENAI_REALTIME_REASONING_EFFORT ("off" disables).
+  # "low": 30/30 correct, best TTFA p90 (0.98s/1.57s) on 2.1; none/minimal skip the spoken preamble (docs/customizing_deploy.md).
   reasoning_effort: "low"
   # Is the deployment a reasoning model? true | false | auto. "auto" infers it
   # from the deployment name (gpt-realtime-1.5, gpt-realtime, gpt-realtime-mini,
   # gpt-4o-* => no; anything else => yes). Set it explicitly for custom names.
   # Env override: AZURE_OPENAI_REALTIME_REASONING_MODEL.
   reasoning_model: "auto"
-  # parallel_tool_calls for reasoning models; null leaves the service default.
+  # parallel_tool_calls for reasoning models; null leaves the service default
+  # (2.1 already batches calls; `false` serialises them and is ~1.3s slower).
   parallel_tool_calls: null
 
 vad:

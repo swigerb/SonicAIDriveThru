@@ -185,3 +185,21 @@ Since `app/frontend/` is off-limits, the middleware (`rtmt.py` + `audio_pipeline
 
 <!-- Older detailed sections archived above for space. Current learnings focused on Phase 3 integration. -->
 
+
+## 2026-09-22 — feat/voice-reasoning finalize (reasoning effort benchmark)
+
+- Live probes, 2.1:
+  - Accepts `reasoning.effort` none, minimal, low, medium, high and xhigh.
+  - Accepts `parallel_tool_calls` true and false, but does not echo it.
+  - Accepts exactly 10 voices (fable, onyx and nova are rejected).
+- Live probes, 1.5:
+  - Rejects `reasoning` at every level (`invalid_value`, with NO `error.event_id`).
+  - Rejects `parallel_tool_calls: true` and accepts `false`.
+- Transcription: `whisper-1` is the only model that works without an extra deployment. `gpt-4o-(mini-)transcribe` pass `session.update`, but every turn then fails with `DeploymentNotFound`.
+- Benchmark (2.1, real prompt and tools, text in, audio out; 18–30 trials per effort):
+  - All efforts from `none` to `xhigh` have a TTFA median of 0.87–1.01 s (jitter).
+  - `none` and `minimal` call tools before speaking (7/30 and 11/18 trials), so their p90 is a silent gap of 2.1 s / 5.3 s.
+  - **Chose `low`**: 30/30 correct, TTFA p90 1.57 s, first tool call at 2.04 s.
+  - `parallel_tool_calls` false serialises search→add, is about 1.3 s slower and uses about 2× the tokens. Keep `null`.
+- Results table: `docs/customizing_deploy.md`.
+- Raw JSONL: in the session `bench/` directory.

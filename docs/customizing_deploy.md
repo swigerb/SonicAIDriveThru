@@ -21,3 +21,56 @@ are rejected). OpenAI recommends `marin` and `cedar` for the best quality.
 
 Once you have set the voice choice, run `azd up` to apply the changes to the deployed app.
 If you've already run `azd up` and want to first preview the voice with the development server, then update your local `.env` file by running `./scripts/write_env.sh` or `pwsh ./scripts/write_env.ps1`, and then restart the development server.
+
+## Reasoning effort, parallel tool calls and transcription
+
+`model.reasoning_effort` (default `low`; env `AZURE_OPENAI_REALTIME_REASONING_EFFORT`, `off` disables) is sent as
+`session.reasoning.effort` only when the deployment is a reasoning model. `model.reasoning_model`
+(env `AZURE_OPENAI_REALTIME_REASONING_MODEL`: `auto` | `true` | `false`) says whether it is; `auto` infers it from the name
+(`gpt-realtime-1.5`, `gpt-realtime`, `gpt-realtime-mini`, `gpt-4o-*` are treated as non-reasoning). If the service still
+rejects the session, the backend resends a minimal update (instructions + tools only), so tools always register.
+
+Probed on `gpt-realtime-2.1` and `gpt-realtime-1.5`:
+
+- 2.1 accepts `none`, `minimal`, `low`, `medium`, `high` and `xhigh`. 1.5 rejects `reasoning` at every level. That
+  error carries no `event_id`, and the backend still recovers.
+- 2.1 accepts `parallel_tool_calls` `true` or `false`. 1.5 rejects `true` and accepts `false`.
+- Transcription: `whisper-1` works with no extra deployment. `gpt-4o-transcribe` and `gpt-4o-mini-transcribe` pass
+  `session.update`, but every turn then fails with `DeploymentNotFound` unless you deploy that model on the resource.
+
+Benchmark on `gpt-realtime-2.1` (`scripts/benchmark_reasoning.py`):
+
+- Setup: real Sonic prompt and tool schemas, text turns, audio output on, stub search.
+- Six utterances: single, modification, multi-item, combo, size change and a menu question.
+- Reps: 3 each; 5 each for `none`, `low` and `medium`.
+- TTFA is `response.create` → first audio delta. "Tool first" counts trials where the model called a tool before
+  speaking, leaving the guest in silence.
+
+| effort | trials | correct | TTFA median / p90 | first tool call median / p90 | total median / p90 | tool first |
+|---|---|---|---|---|---|---|
+| none | 30 | 30/30 | 0.89s / 2.09s | 1.51s / 2.54s | 4.60s / 8.97s | 7 |
+| minimal | 18 | 17/18¹ | 2.11s / 5.34s | 1.38s / 8.95s | 4.79s / 9.08s | 11 |
+| **low** | 30 | 30/30 | 0.98s / **1.57s** | 2.04s / 2.80s | 5.30s / 8.62s | 0 |
+| medium | 30 | 29/30¹ | 0.87s / 1.67s | 2.36s / 3.72s | 5.62s / 8.72s | 0 |
+| high | 18 | 18/18 | 1.01s / 1.50s | 2.50s / 4.39s | 6.32s / 9.21s | 0 |
+| xhigh | 18 | 18/18 | 0.95s / 1.64s | 2.86s / 4.13s | 6.38s / 8.40s | 0 |
+| (omitted) | 18 | 18/18 | 0.91s / 1.60s | 2.47s / 2.76s | 5.81s / 7.50s | 0 |
+
+¹ One service `output_timeout` each; no wrong orders.
+
+Why `low` is the default:
+
+- The TTFA medians for `none` through `xhigh` fall within the service jitter.
+- Of the efforts with no errors, only `low` combines a tight TTFA p90 with the fastest tool call (after `none`).
+- `none` and `minimal` often call tools before speaking, which gives a long silent p90.
+- Higher efforts only add latency.
+
+`parallel_tool_calls` at `low` (multi-item and combo, 6 trials each, all correct):
+
+| value | TTFA median | total median / p90 |
+|---|---|---|
+| `true` | 0.92s | 6.93s / 8.14s |
+| `false` | 0.71s | 8.27s / 10.13s |
+
+`false` serialises search→add pairs and uses about 2× the tokens. Leaving it unset (`null`) already batches calls on 2.1
+and is safe on 1.5, so `null` is the default.

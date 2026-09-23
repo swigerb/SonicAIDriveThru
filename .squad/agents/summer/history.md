@@ -118,3 +118,15 @@ Detailed technical learnings from demo readiness, debugging, and prompt external
   - `continueOnError: true` and `interactive: false`;
   - the wrapper always exits 0 and prints a loud warning on failure or when the check could not run;
   - it skips if there is no venv, or if `SONIC_SKIP_REALTIME_SMOKE=true`.
+
+## 2026-09-22 — feat/voice-reasoning: explicit reasoning_model switch
+
+- Added `model.reasoning_model` (`auto` | `true` | `false`), overridable by env `AZURE_OPENAI_REALTIME_REASONING_MODEL`. It is plumbed through `main.bicep`, `main.parameters.json` and the `azure.yaml` pipeline vars.
+  - Precedence: runtime rejection > explicit switch > deployment-name check (the safe default for 1.5 and older).
+- The fallback in `rtmt.py` was audited and is correct:
+  - Every `session.update` has an `event_id`.
+  - A correlated error triggers exactly one minimal resend (type, instructions, tools, tool_choice).
+  - There is no loop, unrelated errors are ignored, and the error reaches the browser only if the fallback is also rejected.
+  - 1.5's reasoning rejection has no `event_id`, so the in-flight heuristic is required.
+- `azure.yaml` adds a non-fatal postdeploy smoke hook. The service is still named `backend`.
+- `config.yaml`: `reasoning_effort: low` is now validated by the benchmark. `parallel_tool_calls: null` is kept.

@@ -2,10 +2,12 @@
 
 Runs realistic guest utterances as TEXT input against a live realtime
 deployment, with audio output (what the guest hears), the real Sonic system
-prompt, the real tool schemas and the REAL tool implementations (Azure AI
-Search + order state), mirroring the middle tier's tool loop: every
+prompt and the real tool schemas, mirroring the middle tier's tool loop: every
 function_call is executed and answered, and `response.create` is re-sent after
-a response that called tools, until the model answers without tools.
+a response that called tools, until the model answers without tools. By default
+`search` answers from canned results captured from the live menu index
+(--tools stub) and the order tools are the real in-memory implementations;
+--tools real also queries Azure AI Search.
 
 Per trial it records:
   * ttfa   -- response.create -> first response.output_audio.delta (guest hears something)
@@ -19,9 +21,13 @@ Usage (repo root, `az login` done, azd env selected or env vars set):
     python scripts/benchmark_reasoning.py --efforts low,medium --reps 5
     python scripts/benchmark_reasoning.py --parallel-only --effort low
     python scripts/benchmark_reasoning.py --out %TEMP%\\bench.json  # raw per-trial JSON
+    # one effort per invocation, appended to a JSONL that survives interruption:
+    python scripts/benchmark_reasoning.py --efforts low --resume %TEMP%\\bench.jsonl
+    python scripts/benchmark_reasoning.py --summarize %TEMP%\\bench.jsonl
 
-Needs AZURE_OPENAI_EASTUS2_ENDPOINT, AZURE_OPENAI_REALTIME_DEPLOYMENT,
-AZURE_SEARCH_ENDPOINT, AZURE_SEARCH_INDEX (environment or `azd env get-values`).
+Needs AZURE_OPENAI_EASTUS2_ENDPOINT and AZURE_OPENAI_REALTIME_DEPLOYMENT (plus
+AZURE_SEARCH_ENDPOINT / AZURE_SEARCH_INDEX with --tools real), from the
+environment or `azd env get-values`.
 Raw results contain no credentials; still, write them outside the repo.
 """
 from __future__ import annotations
@@ -50,6 +56,7 @@ from smoke_realtime import (  # noqa: E402
 
 from order_state import order_state_singleton  # noqa: E402
 from prompt_loader import PromptLoader  # noqa: E402
+from rtmt import ToolResult, ToolResultDirection  # noqa: E402
 
 DEFAULT_EFFORTS = ["default", "none", "minimal", "low", "medium", "high"]
 MAX_ROUNDS = 10
@@ -73,21 +80,22 @@ def _has_add(trial, *words, size=None):
 
 
 def _check_single(t):
-    return _has_add(t, "cherry limeade", size="large")
+    return len(_adds(t)) == 1 and _has_add(t, "cherry limeade", size="large")
 
 
 def _check_modification(t):
-    return any("cheeseburger" in a.get("item_name", "").lower() and "pickle" in a.get("item_name", "").lower()
-               for a in _adds(t))
+    return len(_adds(t)) == 1 and any(
+        "cheeseburger" in a.get("item_name", "").lower() and "pickle" in a.get("item_name", "").lower()
+        for a in _adds(t))
 
 
 def _check_multi(t):
-    return (_has_add(t, "corn dog") and _has_add(t, "tots", size="medium")
+    return (len(_adds(t)) == 3 and _has_add(t, "corn dog") and _has_add(t, "tots", size="medium")
             and _has_add(t, "cherry limeade", size="large"))
 
 
 def _check_combo(t):
-    return (_has_add(t, "supersonic", "combo") and _has_add(t, "tots", size="medium")
+    return (len(_adds(t)) == 3 and _has_add(t, "supersonic", "combo") and _has_add(t, "tots", size="medium")
             and _has_add(t, "cherry limeade", size="large"))
 
 
@@ -111,6 +119,72 @@ SCENARIOS = {
     "question": ("What slush flavors do you have?", _check_question, None),
 }
 
+# Canned `search` results, in the exact format tools.search returns, captured from
+# the live sonic-menu-items index (2026-09-22). With --tools stub (the default)
+# search answers from these instantly, so the timings measure the model, not
+# Azure AI Search, and runs are repeatable. The order tools are always the real
+# (local, in-memory) implementations.
+STUB_MENU = [
+    ("burgers___sandwiches_sonic__cheeseburger", "SONIC® Cheeseburger", "Burgers & Sandwiches", "Standard ($5.29)"),
+    ("burgers___sandwiches_supersonic__double_cheeseburger", "SuperSONIC® Double Cheeseburger",
+     "Burgers & Sandwiches", "Standard ($6.59)"),
+    ("combos_sonic__cheeseburger_combo", "SONIC® Cheeseburger Combo", "Combos", "Standard ($8.49)"),
+    ("combos_supersonic__double_cheeseburger_combo", "SuperSONIC® Double Cheeseburger Combo", "Combos",
+     "Standard ($10.19)"),
+    ("combos_supersonic__bacon_double_cheeseburger_combo", "SuperSONIC® Bacon Double Cheeseburger Combo", "Combos",
+     "Standard ($10.99)"),
+    ("hot_dogs___tots_tots", "Tots", "Hot Dogs & Tots", "Small ($2.19), Medium ($2.79), Large ($3.49)"),
+    ("extras___sides_cheese_tots", "Cheese Tots", "Extras & Sides", "Small ($2.69), Medium ($3.39), Large ($3.99)"),
+    ("hot_dogs___tots_chili_cheese_tots", "Chili Cheese Tots", "Hot Dogs & Tots",
+     "Small ($2.99), Medium ($3.79), Large ($4.49)"),
+    ("hot_dogs___tots_corn_dog", "Corn Dog", "Hot Dogs & Tots", "Standard ($1.99)"),
+    ("hot_dogs___tots_chili_cheese_coney", "Chili Cheese Coney", "Hot Dogs & Tots", "Standard ($3.19)"),
+    ("hot_dogs___tots_all-american_dog", "All-American Dog", "Hot Dogs & Tots", "Standard ($3.19)"),
+    ("slushes___drinks_cherry_limeade", "Cherry Limeade", "Slushes & Drinks",
+     "Mini ($1.59), Small ($2.49), Medium ($2.89), Large ($3.39), Route 44 ($3.79)"),
+    ("slushes___drinks_cranberry_limeade", "Cranberry Limeade", "Slushes & Drinks",
+     "Mini ($1.59), Small ($2.49), Medium ($2.89), Large ($3.39), Route 44 ($3.79)"),
+    ("slushes___drinks_strawberry_limeade", "Strawberry Limeade", "Slushes & Drinks",
+     "Mini ($1.59), Small ($2.49), Medium ($2.89), Large ($3.39), Route 44 ($3.79)"),
+    ("slushes___drinks_cherry_slush", "Cherry Slush", "Slushes & Drinks",
+     "Mini ($1.39), Small ($2.19), Medium ($2.79), Large ($3.39), Route 44 ($3.79)"),
+    ("slushes___drinks_grape_slush", "Grape Slush", "Slushes & Drinks",
+     "Mini ($1.39), Small ($2.19), Medium ($2.79), Large ($3.39), Route 44 ($3.79)"),
+    ("slushes___drinks_strawberry_slush", "Strawberry Slush", "Slushes & Drinks",
+     "Mini ($1.89), Small ($2.69), Medium ($3.29), Large ($3.89), Route 44 ($4.29)"),
+    ("slushes___drinks_blue_raspberry_slush", "Blue Raspberry Slush", "Slushes & Drinks",
+     "Mini ($1.39), Small ($2.19), Medium ($2.79), Large ($3.39), Route 44 ($3.79)"),
+]
+_STUB_STOPWORDS = {"a", "an", "the", "of", "with", "and", "no", "please", "can", "i", "get", "small", "medium",
+                   "large", "mini", "route", "44", "size", "what", "do", "you", "have", "menu", "item", "items"}
+
+
+def _stub_words(text: str) -> set[str]:
+    words = set()
+    for raw in text.lower().replace("®", "").replace("-", " ").split():
+        word = raw.strip(".,!?'\"()")
+        word = word[:-1] if word.endswith("s") and len(word) > 4 else word  # slushes -> slushe; flavors -> flavor
+        if word and word not in _STUB_STOPWORDS:
+            words.add(word)
+    return words
+
+
+async def stub_search(args) -> ToolResult:
+    query = _stub_words(str((args or {}).get("query", "")))
+    scored = []
+    for rid, name, category, sizes in STUB_MENU:
+        haystack = _stub_words(f"{name} {category}")
+        name_words = _stub_words(name)
+        hits = len(query & haystack)
+        if hits:
+            # Prefer names fully covered by the query, then the tightest name.
+            scored.append((-(hits + (name_words <= query)), len(name_words), rid, name, category, sizes))
+    scored.sort()
+    limit = 6 if query & {"slush", "slushe", "flavor"} else 3
+    records = [f"[{rid}]: Item: {name}, Category: {category}, Available Sizes: {sizes}"
+               for *_, rid, name, category, sizes in scored[:limit]]
+    return ToolResult("\n-----\n".join(records) or "No matching menu entries found.", ToolResultDirection.TO_SERVER)
+
 
 @dataclass
 class Trial:
@@ -133,23 +207,27 @@ class Trial:
 
 
 async def _seed_medium_limeade(ws, rtmt, session_id):
-    """Guest already has a Medium Cherry Limeade on the order (via the real tools)."""
-    search = await rtmt.tools["search"].target({"query": "Cherry Limeade"})
-    text = search.to_text()
-    price = 2.99
-    try:
-        import re
-        m = re.search(r'"size"\s*:\s*"Medium"\s*,\s*"price"\s*:\s*([0-9.]+)', text)
-        price = float(m.group(1)) if m else price
-    except Exception:  # noqa: BLE001
-        pass
-    await rtmt.tools["update_order"].target(
-        {"action": "add", "item_name": "Cherry Limeade", "size": "Medium", "quantity": 1, "price": price}, session_id)
-    for item in (
+    """Guest already has a Medium Cherry Limeade on the order: the real tools ran,
+    and the conversation holds the same items the live app's history would --
+    the guest's request, the search + update_order calls with their outputs, and
+    the carhop's confirmation."""
+    import re
+    search_args = {"query": "Cherry Limeade"}
+    search = (await rtmt.tools["search"].target(search_args)).to_text()
+    m = re.search(r"Medium \(\$([0-9.]+)\)", search)
+    add_args = {"action": "add", "item_name": "Cherry Limeade", "size": "Medium", "quantity": 1,
+                "price": float(m.group(1)) if m else 2.89}
+    added = (await rtmt.tools["update_order"].target(add_args, session_id)).to_text()
+    items = [
         {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Can I get a medium Cherry Limeade?"}]},
+        {"type": "function_call", "call_id": "seed_search", "name": "search", "arguments": json.dumps(search_args)},
+        {"type": "function_call_output", "call_id": "seed_search", "output": search},
+        {"type": "function_call", "call_id": "seed_add", "name": "update_order", "arguments": json.dumps(add_args)},
+        {"type": "function_call_output", "call_id": "seed_add", "output": added},
         {"type": "message", "role": "assistant",
          "content": [{"type": "output_text", "text": "You got it, one Medium Cherry Limeade. Anything else?"}]},
-    ):
+    ]
+    for item in items:
         await ws.send_json({"type": "conversation.item.create", "item": item})
 
 
@@ -291,6 +369,18 @@ def _fmt(values):
     return f"{statistics.median(values):5.2f}s"
 
 
+def _p90(values):
+    values = sorted(v for v in values if v is not None)
+    if not values:
+        return None
+    return values[min(len(values) - 1, int(round(0.9 * (len(values) - 1))))]
+
+
+def _med_p90(values):
+    p90 = _p90(values)
+    return f"{_fmt(values).strip()} / {'-' if p90 is None else f'{p90:.2f}s'}"
+
+
 def summarize(trials: list[Trial]) -> str:
     lines = []
     keys = []
@@ -298,17 +388,16 @@ def summarize(trials: list[Trial]) -> str:
         k = (t.effort, t.parallel_tool_calls)
         if k not in keys:
             keys.append(k)
-    header = ("| effort | parallel_tool_calls | trials | correct | median TTFA | median first tool call "
-              "| median total | p90 total | avg reasoning tok | errors |")
-    lines += [header, "|" + "---|" * 10]
+    header = ("| effort | parallel_tool_calls | trials | correct | TTFA median / p90 | first tool call median / p90 "
+              "| total median / p90 | avg reasoning tok | errors |")
+    lines += [header, "|" + "---|" * 9]
     for effort, ptc in keys:
         ts = [t for t in trials if (t.effort, t.parallel_tool_calls) == (effort, ptc)]
-        totals = sorted(t.total for t in ts if t.total is not None)
-        p90 = totals[min(len(totals) - 1, int(round(0.9 * (len(totals) - 1))))] if totals else None
         lines.append(
             f"| {effort} | {'default' if ptc is None else ptc} | {len(ts)} | "
-            f"{sum(t.correct for t in ts)}/{len(ts)} | {_fmt([t.ttfa for t in ts])} | {_fmt([t.ttfc for t in ts])} | "
-            f"{_fmt(totals)} | {_fmt([p90])} | {statistics.mean(t.reasoning_tokens for t in ts):.0f} | "
+            f"{sum(t.correct for t in ts)}/{len(ts)} | {_med_p90([t.ttfa for t in ts])} | "
+            f"{_med_p90([t.ttfc for t in ts])} | {_med_p90([t.total for t in ts])} | "
+            f"{statistics.mean(t.reasoning_tokens for t in ts):.0f} | "
             f"{sum(t.error is not None for t in ts)} |")
     lines += ["", "Per scenario (correct / median TTFA / median total):", ""]
     scen_header = "| effort | ptc | " + " | ".join(SCENARIOS) + " |"
@@ -332,29 +421,51 @@ def _trial_dict(trial: Trial) -> dict:
     return d
 
 
+def _load_trials(path: str) -> list[Trial]:
+    """Trials from a --resume JSONL file (one finished trial per line)."""
+    trials = []
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            trials.append(Trial(**json.loads(line)))
+    return trials
+
+
 async def main_async(args) -> int:
+    if args.summarize:
+        trials = _load_trials(args.summarize)
+        print(summarize(trials))
+        return 0
     azd_values = _azd_env_values()
     endpoint = resolve_setting("AZURE_OPENAI_EASTUS2_ENDPOINT", args.endpoint, azd_values)
     deployment = resolve_setting("AZURE_OPENAI_REALTIME_DEPLOYMENT", args.deployment, azd_values)
-    search_endpoint = resolve_setting("AZURE_SEARCH_ENDPOINT", None, azd_values)
-    search_index = resolve_setting("AZURE_SEARCH_INDEX", None, azd_values)
-    if not all((endpoint, deployment, search_endpoint, search_index)):
-        print("Need AZURE_OPENAI_EASTUS2_ENDPOINT, AZURE_OPENAI_REALTIME_DEPLOYMENT, AZURE_SEARCH_ENDPOINT, "
-              "AZURE_SEARCH_INDEX", file=sys.stderr)
+    if not all((endpoint, deployment)):
+        print("Need AZURE_OPENAI_EASTUS2_ENDPOINT and AZURE_OPENAI_REALTIME_DEPLOYMENT", file=sys.stderr)
         return 2
 
-    from azure.identity import DefaultAzureCredential
-
-    from tools import attach_tools_rtmt
+    import tools
     rtmt = build_middle_tier(endpoint, deployment, voice=args.voice)
-    rtmt.tools.clear()
-    semantic = (resolve_setting("AZURE_SEARCH_SEMANTIC_RANKER", None, azd_values) or "standard").lower()
-    attach_tools_rtmt(
-        rtmt, credentials=DefaultAzureCredential(exclude_interactive_browser_credential=True),
-        search_endpoint=search_endpoint, search_index=search_index,
-        semantic_configuration=resolve_setting("AZURE_SEARCH_SEMANTIC_CONFIGURATION", None, azd_values) or "menuSemanticConfig",
-        identifier_field="id", content_field="description", embedding_field="embedding", title_field="name",
-        use_vector_query=True, prompt_loader=PromptLoader(), use_semantic_ranker=semantic != "disabled")
+    if args.tools == "stub":
+        tools._prompt_loader = PromptLoader()
+        rtmt.tools["search"].target = stub_search
+        rtmt.tools["update_order"].target = tools.update_order
+        rtmt.tools["get_order"].target = tools.get_order
+        rtmt.tools["reset_order"].target = tools.reset_order
+    else:
+        search_endpoint = resolve_setting("AZURE_SEARCH_ENDPOINT", None, azd_values)
+        search_index = resolve_setting("AZURE_SEARCH_INDEX", None, azd_values)
+        if not all((search_endpoint, search_index)):
+            print("--tools real needs AZURE_SEARCH_ENDPOINT and AZURE_SEARCH_INDEX", file=sys.stderr)
+            return 2
+        from azure.identity import DefaultAzureCredential
+        rtmt.tools.clear()
+        semantic = (resolve_setting("AZURE_SEARCH_SEMANTIC_RANKER", None, azd_values) or "standard").lower()
+        tools.attach_tools_rtmt(
+            rtmt, credentials=DefaultAzureCredential(exclude_interactive_browser_credential=True),
+            search_endpoint=search_endpoint, search_index=search_index,
+            semantic_configuration=resolve_setting("AZURE_SEARCH_SEMANTIC_CONFIGURATION", None, azd_values)
+            or "menuSemanticConfig",
+            identifier_field="id", content_field="description", embedding_field="embedding", title_field="name",
+            use_vector_query=True, prompt_loader=PromptLoader(), use_semantic_ranker=semantic != "disabled")
     headers = get_auth_headers()
     url = realtime_url(endpoint, deployment)
 
@@ -368,11 +479,9 @@ async def main_async(args) -> int:
     trials: list[Trial] = []
     done: set[tuple] = set()
     if args.resume and Path(args.resume).exists():
-        for line in Path(args.resume).read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                trial = Trial(**json.loads(line))
-                trials.append(trial)
-                done.add((trial.effort, trial.parallel_tool_calls, trial.scenario, trial.rep))
+        for trial in _load_trials(args.resume):
+            trials.append(trial)
+            done.add((trial.effort, trial.parallel_tool_calls, trial.scenario, trial.rep))
     pacer = TokenPacer(args.tpm_budget)
     total = len(grid) * args.reps
     print(f"Benchmark: deployment={deployment} voice={rtmt.voice_choice} trials={total} "
@@ -433,6 +542,10 @@ def main() -> int:
     p.add_argument("--out", help="Write raw per-trial JSON here (keep it out of the repo)")
     p.add_argument("--resume", help="JSONL file: append each finished trial, and skip trials already in it "
                                     "(lets a long grid survive an interrupted run)")
+    p.add_argument("--tools", choices=("stub", "real"), default="stub",
+                   help="stub (default): canned search results + the real in-memory order tools, so timings "
+                        "measure the model; real: live Azure AI Search too")
+    p.add_argument("--summarize", metavar="JSONL", help="Only print the summary tables for a --resume file")
     args = p.parse_args()
     unknown = [s for s in args.scenarios if s not in SCENARIOS]
     if unknown:

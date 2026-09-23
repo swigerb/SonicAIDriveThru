@@ -67,3 +67,17 @@
   - Removing the one-fallback loop guard fails both (b) tests with `187 != 2` / `180 != 2` updates, i.e. a runaway loop.
   - (c) is the negative control and correctly still passes.
 - Backend: 431 passed (baseline 412).
+
+## 2026-09-22 — feat/voice-reasoning verification
+
+- Fallback mutation checks, run on `test_session_bootstrap.py`:
+  - Fallback disabled: 4 failed (bootstrap minimal fallback, no-loop, no-loop without event_id, no-event_id recovery).
+  - Loop guard removed: 2 failed.
+  - Foreign event_id correlated: 2 failed.
+  - Reasoning switch ignored: 6 failed.
+  - Everything restored: all pass.
+- `smoke_realtime.py`: 1.5 answered the TTS phrase instead of reading it aloud. The instructions are now firmer and an empty transcript fails. PASS on 2.1 and 1.5.
+- `benchmark_reasoning.py`:
+  - Repaired: stub search with the real result format, real order tools, stricter add counts, and realistic size-change history.
+  - New: median/p90 output, a `--summarize` mode, and `--resume` for chunked runs.
+- Final gate: pytest 434 passed; ruff clean; frontend build OK with 16/16 tests; `az bicep build` 0 errors.
