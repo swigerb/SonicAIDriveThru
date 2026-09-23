@@ -138,8 +138,10 @@ class FakeGARealtime:
 class _RealtimeHarness(unittest.IsolatedAsyncioTestCase):
     """Real middle tier <-> FakeGARealtime, driven through a fake browser socket."""
 
+    fake_class = FakeGARealtime
+
     async def asyncSetUp(self):
-        self.fake = FakeGARealtime()
+        self.fake = self.fake_class()
         self.fake_server = TestServer(self.fake.app())
         await self.fake_server.start_server()
 
