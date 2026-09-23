@@ -1,6 +1,6 @@
-# Customizing the VoiceRAG deployment
+# Customizing the Sonic AI Drive-Thru deployment
 
-This guide shows you how to customize the [VoiceRAG](../README.md#deploying-the-app) deployment to specify different options.
+This guide shows you how to customize the [Sonic AI Drive-Thru](../README.md#deploying-the-app) deployment to specify different options.
 If your goal is to reuse existing services (OpenAI or Search), see the [existing services guide](./existing_services.md) instead.
 
 ## Customizing the real-time voice choice

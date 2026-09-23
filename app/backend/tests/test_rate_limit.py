@@ -548,7 +548,8 @@ class ApologyClipTests(unittest.TestCase):
         cls.gen = generate_apology_clips
 
     def test_one_clip_per_ui_language(self):
-        locales = sorted(p.name for p in (self.REPO / "app" / "frontend" / "src" / "locales").iterdir() if p.is_dir())
+        locales = sorted(p.name for p in (self.REPO / "app" / "frontend" / "src" / "locales").iterdir()
+                         if (p / "translation.json").is_file())
         apology_ts = (self.REPO / "app" / "frontend" / "src" / "lib" / "apology.ts").read_text(encoding="utf-8")
         frontend = re.search(r"APOLOGY_LANGUAGES = \[([^\]]*)\]", apology_ts).group(1)
         self.assertEqual(sorted(re.findall(r'"(\w+)"', frontend)), locales)

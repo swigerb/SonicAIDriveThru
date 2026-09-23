@@ -1,7 +1,7 @@
 {
     "app": {
-        "title": "Parlez à vos données",
-        "footer": "Créée avec Azure AI Search + Azure OpenAI",
+        "title": "Commande vocale Sonic",
+        "footer": "Conçu avec Azure AI, Azure OpenAI et Azure Speech",
         "showTranscript": "Afficher la transcription",
         "stopRecording": "Arrêter l'enregistrement",
         "startRecording": "Commencer l'enregistrement",
@@ -28,5 +28,8 @@
     "groundingFiles": {
         "title": "Fichiers d'ancrage",
         "description": "Fichiers utilisés pour ancrer les réponses."
+    },
+    "menu": {
+        "title": "Menu"
     }
 }
