@@ -22,6 +22,19 @@ hooks:
         run: ./scripts/write_env.sh; ./scripts/setup_search_index.sh
         interactive: true
         continueOnError: false
+    # Non-fatal: checks the live realtime deployment accepts the carhop's exact
+    # session config (tools, tool_choice, instructions). Warns, never fails.
+    postdeploy:
+      windows:
+        shell: pwsh
+        run: ./scripts/smoke_realtime.ps1
+        interactive: false
+        continueOnError: true
+      posix:
+        shell: sh
+        run: ./scripts/smoke_realtime.sh
+        interactive: false
+        continueOnError: true
 pipeline:
   variables:
     - AZURE_OPENAI_SERVICE
@@ -29,6 +42,9 @@ pipeline:
     - AZURE_OPENAI_REUSE_EXISTING
     - AZURE_OPENAI_EASTUS2_ENDPOINT
     - AZURE_OPENAI_REALTIME_DEPLOYMENT
+    - AZURE_OPENAI_REALTIME_REASONING_EFFORT
+    - AZURE_OPENAI_REALTIME_REASONING_MODEL
+    - AZURE_OPENAI_REALTIME_TRANSCRIPTION_MODEL
     - AZURE_OPENAI_REALTIME_DEPLOYMENT_CAPACITY
     - AZURE_OPENAI_EMB_DEPLOYMENT_CAPACITY
     - AZURE_OPENAI_EMB_DIMENSIONS

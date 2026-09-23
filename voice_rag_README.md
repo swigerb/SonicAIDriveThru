@@ -114,7 +114,7 @@ You can run this app locally using either the Azure services you provisioned by 
    ```shell
    AZURE_OPENAI_ENDPOINT=wss://<your instance name>.openai.azure.com
    AZURE_OPENAI_REALTIME_DEPLOYMENT=gpt-realtime-2.1
-   AZURE_OPENAI_REALTIME_VOICE_CHOICE=<choose one: coral, alloy, echo, shimmer>
+   AZURE_OPENAI_REALTIME_VOICE_CHOICE=<choose one: marin (default), cedar, alloy, ash, ballad, coral, echo, sage, shimmer, verse>
    AZURE_OPENAI_API_KEY=<your api key>
    AZURE_SEARCH_ENDPOINT=https://<your service name>.search.windows.net
    AZURE_SEARCH_INDEX=<your index name>

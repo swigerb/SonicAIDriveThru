@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 
 from config_loader import get_config
 from prompt_loader import PromptLoader
-from rtmt import RTMiddleTier, create_hmac_token
+from rtmt import RTMiddleTier, configure_realtime_model, create_hmac_token
 from tools import attach_tools_rtmt
 
 # Production: INFO; override with LOG_LEVEL env var for debugging
@@ -205,14 +205,13 @@ async def create_app() -> web.Application:
         credentials=llm_credential,
         endpoint=llm_endpoint,
         deployment=llm_deployment,
-        voice_choice=os.environ.get("AZURE_OPENAI_REALTIME_VOICE_CHOICE") or model_cfg.get("default_voice", "coral"),
+        voice_choice=os.environ.get("AZURE_OPENAI_REALTIME_VOICE_CHOICE") or model_cfg.get("default_voice", "marin"),
         prompt_loader=prompt_loader,
     )
     # Generate a random secret for HMAC session tokens
     app_secret = os.urandom(32)
     rtmt.app_secret = app_secret
-    rtmt.temperature = model_cfg.get("temperature", 0.6)
-    rtmt.max_tokens = model_cfg.get("max_response_output_tokens", 4096)
+    configure_realtime_model(rtmt, model_cfg)
     rtmt.system_message = prompt_loader.get_system_prompt()
 
     attach_tools_rtmt(

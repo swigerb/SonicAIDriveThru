@@ -5,9 +5,33 @@
 model:
   temperature: 0.6
   max_response_output_tokens: 4096
-  # Soft, calm female voice for the carhop persona. `marin` and `cedar` are the
-  # newer high-fidelity GA voices; `shimmer` and `sage` are the calmer classics.
-  default_voice: "shimmer"
+  # Carhop voice. `marin` (and `cedar`) are the newest GA voices and the ones
+  # OpenAI recommends for best quality. The picker offers all ten GA voices.
+  # Env override: AZURE_OPENAI_REALTIME_VOICE_CHOICE.
+  default_voice: "marin"
+  # Guest-speech transcription model (session.audio.input.transcription.model).
+  # `whisper-1` works on Azure with no extra deployment. gpt-4o-transcribe and
+  # gpt-4o-mini-transcribe are ACCEPTED by session.update but every turn then
+  # fails with DeploymentNotFound unless you deploy that model under the same
+  # name on the resource (probed 2026-09-22).
+  # Env override: AZURE_OPENAI_REALTIME_TRANSCRIPTION_MODEL.
+  transcription_model: "whisper-1"
+  # reasoning.effort for reasoning realtime models (gpt-realtime-2 / 2.1):
+  # none | minimal | low | medium | high | xhigh. "" (empty) omits the field.
+  # Only sent when the deployment is a reasoning model (see reasoning_model):
+  # gpt-realtime-1.5 rejects `reasoning` -- the whole session.update, tools
+  # included. See scripts/benchmark_reasoning.py.
+  # Env override: AZURE_OPENAI_REALTIME_REASONING_EFFORT ("off" disables).
+  # "low": 30/30 correct, best TTFA p90 (0.98s/1.57s) on 2.1; none/minimal skip the spoken preamble (docs/customizing_deploy.md).
+  reasoning_effort: "low"
+  # Is the deployment a reasoning model? true | false | auto. "auto" infers it
+  # from the deployment name (gpt-realtime-1.5, gpt-realtime, gpt-realtime-mini,
+  # gpt-4o-* => no; anything else => yes). Set it explicitly for custom names.
+  # Env override: AZURE_OPENAI_REALTIME_REASONING_MODEL.
+  reasoning_model: "auto"
+  # parallel_tool_calls for reasoning models; null leaves the service default
+  # (2.1 already batches calls; `false` serialises them and is ~1.3s slower).
+  parallel_tool_calls: null
 
 vad:
   type: "server_vad"

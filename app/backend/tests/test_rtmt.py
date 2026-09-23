@@ -950,8 +950,9 @@ class ExtensionSetVoiceTests(unittest.TestCase):
 # GPT-REALTIME-2.1 GA SURFACE TESTS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# Built-in voices per the OpenAI Realtime reference (session.audio.output.voice),
-# unchanged between gpt-realtime-1.5 and gpt-realtime-2.1 (checked 2026-09-22).
+# Built-in voices accepted by session.audio.output.voice on gpt-realtime-2.1 --
+# probed live 2026-09-22; the service's own rejection message for fable/onyx/
+# nova lists exactly these ten.
 GA_REALTIME_VOICES = {"alloy", "ash", "ballad", "coral", "echo",
                       "sage", "shimmer", "verse", "marin", "cedar"}
 
@@ -984,14 +985,23 @@ class GARealtime21SurfaceTests(unittest.TestCase):
             self.assertNotIn("parallel_tool_calls", session)
 
     def test_voice_picker_offers_exactly_the_ga_voices(self):
-        settings = (Path(__file__).resolve().parents[2] / "frontend" / "src" / "components"
-                    / "ui" / "settings.tsx").read_text(encoding="utf-8")
-        offered = set(re.findall(r'<option value="([a-z]+)"', settings))
-        self.assertEqual(offered, GA_REALTIME_VOICES)
+        voices = (Path(__file__).resolve().parents[2] / "frontend" / "src" / "lib"
+                  / "voices.ts").read_text(encoding="utf-8")
+        offered = re.findall(r'\{ value: "([a-z]+)"', voices)
+        self.assertEqual(set(offered), GA_REALTIME_VOICES)
+        self.assertEqual(len(offered), len(GA_REALTIME_VOICES), "duplicate voice in the picker")
 
     def test_default_voice_is_a_ga_voice(self):
         from app import get_config
         self.assertIn(get_config()["model"]["default_voice"], GA_REALTIME_VOICES)
+
+    def test_frontend_and_backend_default_voice_agree(self):
+        from app import get_config
+        voices = (Path(__file__).resolve().parents[2] / "frontend" / "src" / "lib"
+                  / "voices.ts").read_text(encoding="utf-8")
+        frontend_default = re.search(r'DEFAULT_VOICE = "([a-z]+)"', voices).group(1)
+        self.assertEqual(frontend_default, "marin")
+        self.assertEqual(get_config()["model"]["default_voice"], frontend_default)
 
 
 if __name__ == "__main__":

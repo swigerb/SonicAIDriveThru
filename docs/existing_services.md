@@ -85,7 +85,7 @@ Alternatively, you can first test the solution locally with the `azure-search-op
 AZURE_TENANT_ID=<YOUR-TENANT-ID>
 AZURE_OPENAI_EASTUS2_ENDPOINT=https://<YOUR_OPENAI_ENDPOINT>.openai.azure.com
 AZURE_OPENAI_REALTIME_DEPLOYMENT=gpt-realtime-2.1
-AZURE_OPENAI_REALTIME_VOICE_CHOICE=<choose one: coral, alloy, echo, shimmer>
+AZURE_OPENAI_REALTIME_VOICE_CHOICE=<choose one: marin (default), cedar, alloy, ash, ballad, coral, echo, sage, shimmer, verse>
 AZURE_SEARCH_ENDPOINT=https://<YOUR_SEARCH_SERVICE>.search.windows.net
 AZURE_SEARCH_INDEX=gptkbindex
 AZURE_SEARCH_SEMANTIC_CONFIGURATION=default

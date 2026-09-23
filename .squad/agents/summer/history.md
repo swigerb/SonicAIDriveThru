@@ -119,3 +119,31 @@ Detailed technical learnings from demo readiness, debugging, and prompt external
   - **Idle close:** `session_manager.IDLE_CLOSE_CODE = 4000`, `IDLE_CLOSE_REASON = "idle_timeout"`. It is application-range, so the browser can tell it apart from 1002/1006/1011.
   - **Tests:** `tests/test_ws_transport.py` (5), all mutation-checked. Reverting `compress` reproduces the production 1002 in the test.
   - **Heads-up:** gunicorn runs `--workers 2` with per-process `order_state` and `app_secret`. That matters for order resume (Part B plan) and for `require_session_token`.
+### 2026-09-22 — Realtime model config plumbing (with Unity)
+- `configure_realtime_model(rtmt, model_cfg, environ)` in `rtmt.py` is now the single place that applies the `config.yaml` `model:` settings. app.py and `scripts/smoke_realtime.py` both call it, so the smoke check sends exactly what the app sends. It applies:
+  - temperature and max_tokens;
+  - `transcription_model`, with env `AZURE_OPENAI_REALTIME_TRANSCRIPTION_MODEL`;
+  - `reasoning_effort`, with env `AZURE_OPENAI_REALTIME_REASONING_EFFORT`;
+  - `parallel_tool_calls`.
+- Env precedence: an empty env value falls back to `config.yaml`, and `off` disables. Watch out: YAML parses an unquoted `off` as `False`, and `normalize_reasoning_effort` treats that as disabled.
+- The `infra/main.bicep` container env gains optional `AZURE_OPENAI_REALTIME_REASONING_EFFORT` / `AZURE_OPENAI_REALTIME_TRANSCRIPTION_MODEL`:
+  - they are added via `union()` only when set, so the default deploy is unchanged;
+  - `main.parameters.json` maps them from azd env;
+  - the voice default is now `${AZURE_OPENAI_REALTIME_VOICE_CHOICE=marin}`.
+- **Gotcha:** an azd env value beats the parameters-file default. The `sonic-demo` env had `shimmer` pinned and was updated with `azd env set AZURE_OPENAI_REALTIME_VOICE_CHOICE marin`. That file is gitignored, so other existing environments need the same command.
+- azure.yaml has a new **non-fatal** `postdeploy` hook, `scripts/smoke_realtime.ps1` / `.sh`:
+  - `continueOnError: true` and `interactive: false`;
+  - the wrapper always exits 0 and prints a loud warning on failure or when the check could not run;
+  - it skips if there is no venv, or if `SONIC_SKIP_REALTIME_SMOKE=true`.
+
+## 2026-09-22 — feat/voice-reasoning: explicit reasoning_model switch
+
+- Added `model.reasoning_model` (`auto` | `true` | `false`), overridable by env `AZURE_OPENAI_REALTIME_REASONING_MODEL`. It is plumbed through `main.bicep`, `main.parameters.json` and the `azure.yaml` pipeline vars.
+  - Precedence: runtime rejection > explicit switch > deployment-name check (the safe default for 1.5 and older).
+- The fallback in `rtmt.py` was audited and is correct:
+  - Every `session.update` has an `event_id`.
+  - A correlated error triggers exactly one minimal resend (type, instructions, tools, tool_choice).
+  - There is no loop, unrelated errors are ignored, and the error reaches the browser only if the fallback is also rejected.
+  - 1.5's reasoning rejection has no `event_id`, so the in-flight heuristic is required.
+- `azure.yaml` adds a non-fatal postdeploy smoke hook. The service is still named `backend`.
+- `config.yaml`: `reasoning_effort: low` is now validated by the benchmark. `parallel_tool_calls: null` is kept.

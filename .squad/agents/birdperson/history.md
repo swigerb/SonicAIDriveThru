@@ -65,3 +65,40 @@
     - Stale token on reconnect → 1 fails.
     - `StatusMessage` ignores the notice → 2 fail.
   - The heartbeat test patched to 0.2s passed 10/10 in a flake loop.
+### 2026-09-22 — session.update self-healing tests + mutation check
+- `tests/test_session_bootstrap.py`: `FakeGARealtime` can now reject updates in configurable ways:
+  - `reject_keys`: reject any update carrying the given GA session keys;
+  - `reject_every_update`;
+  - `echo_event_id=False`, which mimics gpt-realtime-1.5 rejecting `reasoning` with `event_id=None` and `param=None`;
+  - it also rejects two unrelated client events: `conversation.item.delete` (echoes the event_id, `param=item_id`) and `input_audio_buffer.commit` (no event_id).
+- New `SessionUpdateFallbackTests`, run end to end through the real middle tier:
+  - every session.update carries a unique event_id;
+  - (a) a rejected bootstrap gets exactly ONE fallback whose session keys are exactly {type, instructions, tools, tool_choice}. Tools are registered, the browser never sees the error, and the next VAD response has the tools;
+  - the no-event_id variant of (a) also sets `_reasoning_rejected`, so later updates omit `reasoning`;
+  - (b) the fallback being rejected too causes no loop, with and without an echoed event_id. There are exactly 2 updates, and the fallback's error reaches the browser once. A new original gets its own single fallback;
+  - (c) the unrelated errors trigger no fallback and are forwarded.
+- New `SessionUpdateGuardTests` cover the correlation rules and one-fallback-per-original.
+- New `ReasoningAndTranscriptionConfigTests` cover:
+  - reasoning is sent only when configured and only on reasoning deployments, and never on 1.5, gpt-realtime, the dated snapshot, mini, or 4o;
+  - a client cannot inject `reasoning`;
+  - the env/config precedence matrix;
+  - the shipped `config.yaml` is rollback-safe.
+- **Mutation check:**
+  - `_recover_rejected_session_update` returning False fails 4 tests. They are (a) ×2 and (b) ×2, and all time out waiting for a fallback.
+  - Removing the one-fallback loop guard fails both (b) tests with `187 != 2` / `180 != 2` updates, i.e. a runaway loop.
+  - (c) is the negative control and correctly still passes.
+- Backend: 431 passed (baseline 412).
+
+## 2026-09-22 — feat/voice-reasoning verification
+
+- Fallback mutation checks, run on `test_session_bootstrap.py`:
+  - Fallback disabled: 4 failed (bootstrap minimal fallback, no-loop, no-loop without event_id, no-event_id recovery).
+  - Loop guard removed: 2 failed.
+  - Foreign event_id correlated: 2 failed.
+  - Reasoning switch ignored: 6 failed.
+  - Everything restored: all pass.
+- `smoke_realtime.py`: 1.5 answered the TTS phrase instead of reading it aloud. The instructions are now firmer and an empty transcript fails. PASS on 2.1 and 1.5.
+- `benchmark_reasoning.py`:
+  - Repaired: stub search with the real result format, real order tools, stricter add counts, and realistic size-change history.
+  - New: median/p90 output, a `--summarize` mode, and `--resume` for chunked runs.
+- Final gate: pytest 434 passed; ruff clean; frontend build OK with 16/16 tests; `az bicep build` 0 errors.

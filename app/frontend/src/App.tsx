@@ -24,6 +24,7 @@ import { ThemeProvider, useTheme } from "./context/theme-context";
 import { DummyDataProvider, useDummyDataContext } from "@/context/dummy-data-context";
 import { AzureSpeechProvider, useAzureSpeechOnContext } from "@/context/azure-speech-context";
 import { AuthProvider, useAuth } from "@/context/auth-context";
+import { resolveVoice } from "@/lib/voices";
 
 import dummyTranscriptsData from "@/data/dummyTranscripts.json";
 import dummyOrderData from "@/data/dummyOrder.json";
@@ -103,7 +104,7 @@ function SonicApp() {
         return localStorage.getItem("verboseLogToFile") === "true";
     });
     const [voiceChoice, setVoiceChoice] = useState<string>(() => {
-        return localStorage.getItem("voiceChoice") || "shimmer";
+        return resolveVoice(localStorage.getItem("voiceChoice"));
     });
 
     useEffect(() => {
