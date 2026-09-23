@@ -227,11 +227,64 @@ public sealed record SessionUpdateValidationResult(bool IsAccepted, string? Code
 }
 
 /// <summary>Per-connection state the validator and response scripting need: current voice lock,
-/// whether assistant audio has gone out yet, and the last conversation item id (for GA's
-/// `previous_item_id` chaining across responses on the same connection).</summary>
+/// whether assistant audio has gone out yet, the last conversation item id (for GA's
+/// `previous_item_id` chaining across responses on the same connection), and the accumulated
+/// effective session (PR #22 review item 9: `session.updated` must echo the full merged session,
+/// not a stub, since GA's `session.update` is a partial patch — each accepted update merges its
+/// keys into whatever was already in effect, it doesn't replace the whole session).</summary>
 public sealed class RealtimeSessionState
 {
     public string? CurrentVoice { get; set; }
     public bool AssistantAudioSeen { get; set; }
     public string? LastConversationItemId { get; set; }
+
+    /// <summary>The full session as GA would report it in `session.updated`, accumulated across
+    /// every accepted `session.update` on this connection. Top-level keys from each update
+    /// overwrite the corresponding key here; `audio.input`/`audio.output` are merged one level
+    /// deeper (so setting `audio.output.voice` alone doesn't drop a previously-set
+    /// `audio.input.format`), matching GA's documented partial-update semantics.</summary>
+    public System.Text.Json.Nodes.JsonObject EffectiveSession { get; } = new();
+
+    /// <summary>Merges an accepted `session.update`'s `session` object into
+    /// <see cref="EffectiveSession"/> using GA's partial-patch semantics.</summary>
+    public void MergeSessionUpdate(JsonElement session)
+    {
+        foreach (var prop in session.EnumerateObject())
+        {
+            if (prop.NameEquals("audio") && prop.Value.ValueKind == JsonValueKind.Object)
+            {
+                var audio = EffectiveSession.TryGetPropertyValue("audio", out var existingAudioNode) &&
+                    existingAudioNode is System.Text.Json.Nodes.JsonObject existingAudio
+                    ? existingAudio
+                    : new System.Text.Json.Nodes.JsonObject();
+                EffectiveSession["audio"] = audio;
+
+                foreach (var audioProp in prop.Value.EnumerateObject())
+                {
+                    if ((audioProp.NameEquals("input") || audioProp.NameEquals("output")) &&
+                        audioProp.Value.ValueKind == JsonValueKind.Object)
+                    {
+                        var side = audio.TryGetPropertyValue(audioProp.Name, out var existingSideNode) &&
+                            existingSideNode is System.Text.Json.Nodes.JsonObject existingSide
+                            ? existingSide
+                            : new System.Text.Json.Nodes.JsonObject();
+                        audio[audioProp.Name] = side;
+
+                        foreach (var sideProp in audioProp.Value.EnumerateObject())
+                        {
+                            side[sideProp.Name] = System.Text.Json.Nodes.JsonNode.Parse(sideProp.Value.GetRawText());
+                        }
+                    }
+                    else
+                    {
+                        audio[audioProp.Name] = System.Text.Json.Nodes.JsonNode.Parse(audioProp.Value.GetRawText());
+                    }
+                }
+            }
+            else
+            {
+                EffectiveSession[prop.Name] = System.Text.Json.Nodes.JsonNode.Parse(prop.Value.GetRawText());
+            }
+        }
+    }
 }

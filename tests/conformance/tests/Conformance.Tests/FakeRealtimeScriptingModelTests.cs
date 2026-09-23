@@ -379,5 +379,68 @@ public sealed class FakeRealtimeScriptingModelTests
 
         await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
     }
+
+    // --- PR #22 review item 10: session.updated must echo the full effective session (GA's
+    // session.update is a partial patch that accumulates, it doesn't replace the whole session).
+
+    [Fact]
+    public async Task Session_updated_echoes_the_full_accumulated_effective_session_across_updates()
+    {
+        await using var fake = new FakeRealtimeUpstreamServer();
+        await fake.StartAsync(TestContext.Current.CancellationToken);
+
+        using var socket = new ClientWebSocket();
+        var wsUri = new Uri($"ws://{fake.BaseUri.Host}:{fake.BaseUri.Port}/openai/v1/realtime?model=gpt-realtime-test");
+        await socket.ConnectAsync(wsUri, TestContext.Current.CancellationToken);
+        Assert.NotNull(await ReceiveJsonWithTimeoutAsync(socket, TestContext.Current.CancellationToken)); // session.created
+
+        // First update sets instructions/tools/tool_choice and audio.output.voice.
+        await WebSocketJson.SendAsync(socket, new JsonObject
+        {
+            ["type"] = "session.update",
+            ["event_id"] = "evt_first",
+            ["session"] = new JsonObject
+            {
+                ["type"] = "realtime",
+                ["instructions"] = "You are a drive-thru order taker.",
+                ["tool_choice"] = "auto",
+                ["tools"] = new JsonArray(new JsonObject { ["type"] = "function", ["name"] = "update_order" }),
+                ["audio"] = new JsonObject { ["output"] = new JsonObject { ["voice"] = "marin" } },
+            },
+        }, TestContext.Current.CancellationToken);
+        var firstUpdated = await ReceiveJsonWithTimeoutAsync(socket, TestContext.Current.CancellationToken);
+        Assert.NotNull(firstUpdated);
+        var firstSession = firstUpdated!.Value.GetProperty("session");
+        Assert.Equal("You are a drive-thru order taker.", firstSession.GetProperty("instructions").GetString());
+        Assert.Equal("marin", firstSession.GetProperty("audio").GetProperty("output").GetProperty("voice").GetString());
+
+        // Second update only touches audio.input.format -- must not drop instructions/tools/voice
+        // accumulated from the first update (GA's partial-patch semantics).
+        await WebSocketJson.SendAsync(socket, new JsonObject
+        {
+            ["type"] = "session.update",
+            ["event_id"] = "evt_second",
+            ["session"] = new JsonObject
+            {
+                ["type"] = "realtime",
+                ["audio"] = new JsonObject { ["input"] = new JsonObject { ["format"] = new JsonObject { ["type"] = "audio/pcm" } } },
+            },
+        }, TestContext.Current.CancellationToken);
+        var secondUpdated = await ReceiveJsonWithTimeoutAsync(socket, TestContext.Current.CancellationToken);
+        Assert.NotNull(secondUpdated);
+        var secondSession = secondUpdated!.Value.GetProperty("session");
+
+        Assert.Equal("You are a drive-thru order taker.", secondSession.GetProperty("instructions").GetString());
+        Assert.Equal("auto", secondSession.GetProperty("tool_choice").GetString());
+        Assert.Equal(1, secondSession.GetProperty("tools").GetArrayLength());
+        var audio = secondSession.GetProperty("audio");
+        Assert.Equal("marin", audio.GetProperty("output").GetProperty("voice").GetString());
+        Assert.Equal("audio/pcm", audio.GetProperty("input").GetProperty("format").GetProperty("type").GetString());
+        // Server-assigned fields are always present and reflect this connection.
+        Assert.Equal("sess_fake", secondSession.GetProperty("id").GetString());
+        Assert.Equal("gpt-realtime-test", secondSession.GetProperty("model").GetString());
+
+        await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
+    }
 }
 

@@ -277,18 +277,24 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
             {
                 state.CurrentVoice = voice;
             }
+
+            // PR #22 review item 10: session.updated must echo the full effective session (GA's
+            // session.update is a partial patch, so this accumulates rather than replaces).
+            state.MergeSessionUpdate(session);
         }
+
+        // id/object/model are server-assigned and always reflect this connection, regardless of
+        // whatever the client's session.update body happened to include for them.
+        var effective = JsonNode.Parse(state.EffectiveSession.ToJsonString())!.AsObject();
+        effective["id"] = "sess_fake";
+        effective["object"] = "realtime.session";
+        effective["model"] = deployment;
 
         var updated = new JsonObject
         {
             ["type"] = "session.updated",
             ["event_id"] = FakeRealtimeConnection.NewEventId(),
-            ["session"] = new JsonObject
-            {
-                ["id"] = "sess_fake",
-                ["object"] = "realtime.session",
-                ["model"] = deployment,
-            },
+            ["session"] = effective,
         };
         await connection.SendAsync(updated, ct).ConfigureAwait(false);
     }
