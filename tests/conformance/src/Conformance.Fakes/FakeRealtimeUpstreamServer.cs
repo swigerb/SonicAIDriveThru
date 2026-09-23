@@ -81,7 +81,7 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
     /// (and never set the header) keep working unchanged — opt in per test/fixture instead of
     /// forcing every caller to authenticate. <c>ConformanceFixture</c> turns this on for the
     /// shared instance the real Python backend connects through, since rtmt.py always sends
-    /// `api-key` for key auth (see BackendEnvironment.OpenAiApiKey), so real end-to-end
+    /// `api-key` for key auth (see BackendContract.OpenAiApiKey), so real end-to-end
     /// scenarios exercise this path with zero risk of a false failure.
     /// </summary>
     public bool RequireApiKey { get; set; }

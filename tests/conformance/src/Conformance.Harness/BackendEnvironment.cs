@@ -2,18 +2,14 @@ using System.Security.Cryptography;
 
 namespace Conformance.Harness;
 
-/// <summary>Knobs a test can set before launching the Python backend under test.</summary>
+/// <summary>
+/// Python-launcher-specific extras layered on top of the neutral <see cref="BackendContract"/> —
+/// knobs that only make sense for *this* launcher (env var overrides for CONFORMANCE_TEST_HOOKS).
+/// A future .NET launcher (S2) would have its own equivalent options type instead of reusing this
+/// one, while both share the same <see cref="BackendContract"/>.
+/// </summary>
 public sealed class PythonBackendOptions
 {
-    public required Uri RealtimeBaseUri { get; init; }
-    public required Uri SearchBaseUri { get; init; }
-    public required int Port { get; init; }
-
-    public string Deployment { get; init; } = "gpt-realtime-2.1-conformance";
-    public string Voice { get; init; } = "marin";
-    public string SearchIndex { get; init; } = "menu-index";
-    public string StoreTimeZone { get; init; } = "America/Chicago";
-
     /// <summary>
     /// Extra environment variables layered on top of the defaults — used to enable
     /// CONFORMANCE_TEST_HOOKS=1 plus its overrides (fixed clock, short timers) for scenarios
@@ -32,52 +28,42 @@ public sealed class PythonBackendOptions
 /// </summary>
 public static class BackendEnvironment
 {
-    /// <summary>
-    /// The fixed `AZURE_OPENAI_EASTUS2_API_KEY` value the Python backend sends as the `api-key`
-    /// header on every upstream realtime connection (rtmt.py: `headers = {"api-key": self.key}`
-    /// under key auth). Exposed so <c>ConformanceFixture</c> can configure
-    /// <c>FakeRealtimeUpstreamServer.ExpectedApiKey</c> to the exact same value instead of
-    /// duplicating the literal.
-    /// </summary>
-    public const string OpenAiApiKey = "conformance-test-openai-key";
-
-    /// <summary>The fixed `AZURE_SEARCH_API_KEY` value, analogous to <see cref="OpenAiApiKey"/>.</summary>
-    public const string SearchApiKey = "conformance-test-search-key";
-
-    public static Dictionary<string, string> Build(PythonBackendOptions options)
+    public static Dictionary<string, string> Build(BackendContract contract, PythonBackendOptions options)
     {
         var env = new Dictionary<string, string>(StringComparer.Ordinal)
         {
+            // ── Neutral BackendContract: any backend implementation needs these. ──
+            ["HOST"] = BackendContract.Host,
+            ["PORT"] = contract.Port.ToString(),
+
+            // Key auth (never DefaultAzureCredential/AzureDeveloperCliCredential in CI).
+            ["AZURE_OPENAI_EASTUS2_API_KEY"] = BackendContract.OpenAiApiKey,
+            ["AZURE_SEARCH_API_KEY"] = BackendContract.SearchApiKey,
+
+            // Point straight at the fakes.
+            ["AZURE_OPENAI_EASTUS2_ENDPOINT"] = contract.RealtimeBaseUri.ToString().TrimEnd('/'),
+            ["AZURE_OPENAI_REALTIME_DEPLOYMENT"] = contract.Deployment,
+            ["AZURE_OPENAI_REALTIME_VOICE_CHOICE"] = contract.Voice,
+            ["AZURE_SEARCH_ENDPOINT"] = contract.SearchBaseUri.ToString().TrimEnd('/'),
+            ["AZURE_SEARCH_INDEX"] = contract.SearchIndex,
+            ["AZURE_SEARCH_SEMANTIC_CONFIGURATION"] = BackendContract.SearchSemanticConfiguration,
+            ["AZURE_SEARCH_IDENTIFIER_FIELD"] = BackendContract.SearchIdentifierField,
+            ["AZURE_SEARCH_CONTENT_FIELD"] = BackendContract.SearchContentField,
+            ["AZURE_SEARCH_EMBEDDING_FIELD"] = BackendContract.SearchEmbeddingField,
+            ["AZURE_SEARCH_TITLE_FIELD"] = BackendContract.SearchTitleField,
+            ["AZURE_SEARCH_USE_VECTOR_QUERY"] = BackendContract.SearchUseVectorQuery ? "true" : "false",
+            ["AZURE_SEARCH_SEMANTIC_RANKER"] = BackendContract.SearchSemanticRanker,
+            ["STORE_TIMEZONE"] = contract.StoreTimeZone,
+
+            // ── Python-launcher-specific extras: quirks of this particular process, not part
+            // of the neutral contract a future .NET launcher would also need to satisfy. ──
             ["RUNNING_IN_PRODUCTION"] = "true",
-            ["HOST"] = "127.0.0.1",
-            ["PORT"] = options.Port.ToString(),
             ["LOG_LEVEL"] = "INFO",
             ["PYTHONUNBUFFERED"] = "1",
             ["PYTHONUTF8"] = "1",
-
-            // Key auth (never DefaultAzureCredential/AzureDeveloperCliCredential in CI).
-            ["AZURE_OPENAI_EASTUS2_API_KEY"] = OpenAiApiKey,
-            ["AZURE_SEARCH_API_KEY"] = SearchApiKey,
-
-            // Point straight at the fakes.
-            ["AZURE_OPENAI_EASTUS2_ENDPOINT"] = options.RealtimeBaseUri.ToString().TrimEnd('/'),
-            ["AZURE_OPENAI_REALTIME_DEPLOYMENT"] = options.Deployment,
-            ["AZURE_OPENAI_REALTIME_VOICE_CHOICE"] = options.Voice,
-            ["AZURE_SEARCH_ENDPOINT"] = options.SearchBaseUri.ToString().TrimEnd('/'),
-            ["AZURE_SEARCH_INDEX"] = options.SearchIndex,
-            ["AZURE_SEARCH_SEMANTIC_CONFIGURATION"] = "menuSemanticConfig",
-            ["AZURE_SEARCH_IDENTIFIER_FIELD"] = "id",
-            ["AZURE_SEARCH_CONTENT_FIELD"] = "description",
-            ["AZURE_SEARCH_EMBEDDING_FIELD"] = "embedding",
-            ["AZURE_SEARCH_TITLE_FIELD"] = "name",
-            ["AZURE_SEARCH_USE_VECTOR_QUERY"] = "true",
-            ["AZURE_SEARCH_SEMANTIC_RANKER"] = "standard",
-
             // Single-process HMAC secret; random per launch is fine since only this process
             // ever needs to validate tokens it issued itself.
             ["APP_SESSION_SECRET"] = RandomSecret(),
-
-            ["STORE_TIMEZONE"] = options.StoreTimeZone,
             ["RATE_LIMIT_RECOVERY_ENABLED"] = "true",
         };
 

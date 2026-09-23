@@ -27,18 +27,15 @@ public static class BackendLauncherFactory
         }
 
         var target = (Environment.GetEnvironmentVariable("CONFORMANCE_BACKEND") ?? "python").Trim().ToLowerInvariant();
+        var contract = BackendContract.ForPort(realtimeBaseUri, searchBaseUri, port, deployment);
         var options = new PythonBackendOptions
         {
-            RealtimeBaseUri = realtimeBaseUri,
-            SearchBaseUri = searchBaseUri,
-            Port = port,
             ExtraEnvironment = extraEnvironment ?? new Dictionary<string, string>(),
-            Deployment = deployment ?? "gpt-realtime-2.1-conformance",
         };
 
         return target switch
         {
-            "python" => await PythonBackendLauncher.StartAsync(options, cancellationToken).ConfigureAwait(false),
+            "python" => await PythonBackendLauncher.StartAsync(contract, options, cancellationToken).ConfigureAwait(false),
             "dotnet" => throw new ConformanceBackendNotImplementedException(
                 "CONFORMANCE_BACKEND=dotnet is a placeholder until the S2 .NET backend exists (see issue #7). " +
                 "Skipping — set CONFORMANCE_BACKEND=python (default) or CONFORMANCE_BACKEND_URL to run this suite."),

@@ -13,7 +13,8 @@ public static class PythonBackendLauncher
     private static readonly TimeSpan HealthTimeout = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan HealthPollInterval = TimeSpan.FromMilliseconds(250);
 
-    public static async Task<IBackendUnderTest> StartAsync(PythonBackendOptions options, CancellationToken cancellationToken = default)
+    public static async Task<IBackendUnderTest> StartAsync(
+        BackendContract contract, PythonBackendOptions options, CancellationToken cancellationToken = default)
     {
         var repoRoot = RepoPaths.FindRepoRoot();
         var backendDir = RepoPaths.BackendDirectory(repoRoot);
@@ -37,7 +38,7 @@ public static class PythonBackendLauncher
                 "\"backend exited early\" failure.");
         }
 
-        var env = BackendEnvironment.Build(options);
+        var env = BackendEnvironment.Build(contract, options);
         var startInfo = new ProcessStartInfo(pythonExe, "app.py")
         {
             WorkingDirectory = backendDir,
@@ -46,6 +47,16 @@ public static class PythonBackendLauncher
             UseShellExecute = false,
             CreateNoWindow = true,
         };
+
+        // startInfo.Environment starts out as a *copy of this test process's own environment*
+        // (not a blank slate) -- so anything ambient in the dev machine's or CI runner's shell
+        // (leftover CONFORMANCE_* from a prior manual run, AZURE_* from an unrelated az-cli
+        // session, corporate *_PROXY vars used by the NuGet/npm/pip proxy) would otherwise leak
+        // straight into the Python child process unmodified, on top of whatever we explicitly
+        // set below. Strip those categories first so every var the backend sees in these
+        // categories either comes from `env` (explicit, known-good) or wasn't set at all.
+        InheritedEnvironmentFilter.Apply(startInfo);
+
         foreach (var (key, value) in env)
         {
             startInfo.Environment[key] = value;
@@ -62,7 +73,7 @@ public static class PythonBackendLauncher
         process.BeginOutputReadLine();
         process.BeginErrorReadLine();
 
-        var baseUri = new Uri($"http://127.0.0.1:{options.Port}/");
+        var baseUri = new Uri($"http://{BackendContract.Host}:{contract.Port}/");
 
         try
         {

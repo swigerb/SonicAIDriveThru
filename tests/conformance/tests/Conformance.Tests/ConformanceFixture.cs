@@ -33,9 +33,9 @@ public class ConformanceFixture : IAsyncLifetime
         // Real end-to-end scenarios always go through the Python backend, which always sends
         // the `api-key` header under key auth (rtmt.py) — so requiring it here exercises PR #22
         // review item 9's "401 on bad/missing api-key" fidelity check on every real scenario for
-        // free, with no risk of a false failure (see BackendEnvironment.OpenAiApiKey).
+        // free, with no risk of a false failure (see BackendContract.OpenAiApiKey).
         Realtime.RequireApiKey = true;
-        Realtime.ExpectedApiKey = BackendEnvironment.OpenAiApiKey;
+        Realtime.ExpectedApiKey = BackendContract.OpenAiApiKey;
         await Realtime.StartAsync().ConfigureAwait(false);
 
         var repoRoot = RepoPaths.FindRepoRoot();

@@ -5,9 +5,101 @@ Black-box, language-neutral conformance harness for the Sonic AI Drive-Thru real
 CI: [#11](https://github.com/swigerb/SonicAIDriveThru/issues/11)). Talks to a backend only over
 HTTP and WebSocket; never imports backend source.
 
-> This file will grow a full `BackendContract` table (every env var, `/health` body shape, shared
-> files) as part of a later Stage B item. This section documents the GA realtime protocol
-> validation fidelity work (PR #22 review item 9).
+> This file documents the GA realtime protocol validation fidelity work (PR #22 review item 9)
+> and the neutral `BackendContract` (PR #22 review item 13).
+
+## BackendContract — the neutral contract every backend under test must satisfy
+
+`Conformance.Harness.BackendContract` (`src/Conformance.Harness/BackendContract.cs`) is the
+language-agnostic set of facts *any* backend implementation needs to run against the fakes —
+Python today, the future .NET backend once S2 exists (issue #7). Per-launcher classes (today just
+`PythonBackendOptions` / `PythonBackendLauncher`) layer their own language-specific extras (env
+var names, process-start mechanics) on top of this same contract, so a future .NET launcher can
+reuse the identical `BackendContract` values without duplicating the "what does a conforming
+backend need" knowledge.
+
+### Every environment variable the harness sets on the Python backend process
+
+All of these are set explicitly by `BackendEnvironment.Build` — the backend is launched with
+`RUNNING_IN_PRODUCTION=true` specifically so it never calls `load_dotenv()` and never picks up a
+developer's local `.env`; every value below is authoritative for the launched process.
+
+| Variable | Value | Source / why |
+|---|---|---|
+| `HOST` | `127.0.0.1` | `BackendContract.Host` — loopback only, never reachable off-box. |
+| `PORT` | a free TCP port picked per test run | `NetworkUtils.GetFreeTcpPort()`. |
+| `AZURE_OPENAI_EASTUS2_API_KEY` | `conformance-test-openai-key` | `BackendContract.OpenAiApiKey` — fixed key-auth value; `FakeRealtimeUpstreamServer.ExpectedApiKey` is set to the exact same constant. |
+| `AZURE_SEARCH_API_KEY` | `conformance-test-search-key` | `BackendContract.SearchApiKey`, analogous to the OpenAI key above. |
+| `AZURE_OPENAI_EASTUS2_ENDPOINT` | `FakeRealtimeUpstreamServer.BaseUri` | Points the backend's realtime client straight at the fake instead of the real Azure OpenAI GA service. |
+| `AZURE_OPENAI_REALTIME_DEPLOYMENT` | `gpt-realtime-2.1-conformance` (default; overridable per contract) | Echoed back on the upstream `?model=` query string; also drives the `reasoning`-rejection-on-`1.5`-style-deployment-name validation rule. |
+| `AZURE_OPENAI_REALTIME_VOICE_CHOICE` | `marin` | Sent in the bootstrap `session.update`. |
+| `AZURE_SEARCH_ENDPOINT` | `FakeSearchServer.BaseUri` | Points the backend's `azure-search-documents` client at the fake instead of the real Azure AI Search service. |
+| `AZURE_SEARCH_INDEX` | `menu-index` | Must match what the backend's search client sends as the index name in its REST path. |
+| `AZURE_SEARCH_SEMANTIC_CONFIGURATION` | `menuSemanticConfig` | Echoed in the search request body's semantic query options; `FakeSearch` accepts and ignores the value (any well-formed request is answered). |
+| `AZURE_SEARCH_IDENTIFIER_FIELD` | `id` | Field-shape config the backend's search client applies when building the request. |
+| `AZURE_SEARCH_CONTENT_FIELD` | `description` | ″ |
+| `AZURE_SEARCH_EMBEDDING_FIELD` | `embedding` | ″ — drives the vector-query part of the request body. |
+| `AZURE_SEARCH_TITLE_FIELD` | `name` | ″ |
+| `AZURE_SEARCH_USE_VECTOR_QUERY` | `true` | Backend includes a `vectorQueries[]` array in the search request body when set. |
+| `AZURE_SEARCH_SEMANTIC_RANKER` | `standard` | Backend includes `queryType: "semantic"` plus the semantic configuration when set. |
+| `STORE_TIMEZONE` | `America/Chicago` (default; overridable per contract) | Drives happy-hour and time-based pricing logic together with a fixed clock (`BackendProfiles.FixedClock`). |
+| `RUNNING_IN_PRODUCTION` | `true` | Prevents `load_dotenv()` from loading a developer's local `.env` over these values. |
+| `LOG_LEVEL` | `INFO` | Consistent backend log verbosity across every launch. |
+| `PYTHONUNBUFFERED` | `1` | Ensures `CapturedProcessOutput` sees stdout/stderr promptly instead of buffered, so failure diagnostics are complete. |
+| `PYTHONUTF8` | `1` | Deterministic encoding regardless of the launching machine's default. |
+| `APP_SESSION_SECRET` | random 256-bit hex, generated fresh per launch | Only this one process ever needs to validate tokens it issued itself. |
+| `RATE_LIMIT_RECOVERY_ENABLED` | `true` | Matches production behaviour for the rate-limit-with-hints scenarios. |
+| `CONFORMANCE_TEST_HOOKS` and its overrides (`CONFORMANCE_FIXED_NOW`, timer overrides, etc) | set only by `BackendProfiles.ShortTimers` / `.FixedClock(instant)` | See "Test hooks" below — **never** set for the default profile, so most scenarios exercise real production timing. |
+
+### Environment stripping (PR #22 review item 13)
+
+`new ProcessStartInfo(...).Environment` is pre-populated with a **copy of the current process's
+entire environment**, not a blank slate — so without an explicit stripping step, anything ambient
+in the coordinator's or CI runner's shell would silently leak into the launched backend process on
+top of the explicit values above: a leftover `CONFORMANCE_TEST_HOOKS=1` from a prior manual run, an
+`AZURE_SUBSCRIPTION_ID` from an unrelated `az account set`, or the corporate `HTTP_PROXY` /
+`HTTPS_PROXY` the NuGet/npm/pip proxy setup relies on.
+
+`Conformance.Harness.InheritedEnvironmentFilter.Apply(startInfo)` (called by
+`PythonBackendLauncher` before layering the explicit values above on top) removes any *inherited*
+variable matching, case-insensitively:
+
+- `CONFORMANCE_*` (prefix)
+- `AZURE_*` (prefix)
+- `VERBOSE_*` (prefix)
+- `*_PROXY` (suffix — catches `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`, lowercase variants, etc)
+
+...then pins `NO_PROXY` / `no_proxy` to `127.0.0.1,localhost`, since the backend under test only
+ever needs to reach the fakes and itself, both on loopback — an inherited corporate forward proxy
+must never see that traffic. Because the strip runs *before* the explicit values are applied, any
+`AZURE_*` value the harness deliberately wants set (the endpoint/key/deployment/etc above) still
+wins; only variables the harness does **not** explicitly set are removed. Unit-tested and
+mutation-checked in `InheritedEnvironmentFilterTests.cs` (pure, process-free — no backend or fakes
+needed to exercise this policy).
+
+### `/health` response shape
+
+`GET /health` (`app/backend/app.py`'s `_health_handler`) always returns:
+
+```json
+{
+  "status": "healthy",
+  "version": "<app version string>",
+  "checks": { "...": "per-startup-check booleans" }
+}
+```
+
+`status` is `"healthy"` (HTTP 200) once every startup check passes, or `"unhealthy"` (HTTP 503)
+otherwise. `PythonBackendLauncher.WaitForHealthAsync` polls this endpoint until it returns 200 (or
+the backend process exits early, in which case captured stdout/stderr is included in the
+failure).
+
+### Shared files
+
+| File | Consumed by | Purpose |
+|---|---|---|
+| `app/frontend/src/data/menuItems.json` | `FakeSearchServer` | Source data for every fake Azure AI Search response — the same menu data the real backend's search client would otherwise be querying against the real index. |
+| `app/backend/static/index.html` (gitignored; built via `npm run build`) | Python backend startup | aiohttp's `add_static` raises at app-creation time without this directory existing — `PythonBackendLauncher` checks for it explicitly and fails with a clear message instead of the opaque "backend exited early" (PR #22 review item 1). |
 
 ## GA validation fidelity — live-probe evidence
 
