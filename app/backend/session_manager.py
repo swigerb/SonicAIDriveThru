@@ -30,7 +30,7 @@ from dataclasses import dataclass
 
 from aiohttp import web
 
-import test_hooks
+import conformance_hooks
 from config_loader import get_config
 from order_state import SessionIdentifiers, order_state_singleton
 
@@ -48,25 +48,27 @@ _CTX_CRITICAL_PCT = _context_cfg.get("critical_threshold_pct", 95)
 
 # ── Session Limits ──
 _MAX_CONCURRENT_SESSIONS = _security_cfg.get("max_concurrent_sessions", 10)
-_IDLE_TIMEOUT_SECONDS = test_hooks.seconds(
+_IDLE_TIMEOUT_SECONDS = conformance_hooks.seconds(
     "CONFORMANCE_IDLE_TIMEOUT_SECONDS", _security_cfg.get("idle_timeout_seconds", 300)
 )
 
 # ── Resume (grace hold after a transport drop) ──
 _RESUME_ENABLED = bool(_resume_cfg.get("enabled", True))
-_RESUME_GRACE_SECONDS = test_hooks.seconds(
+_RESUME_GRACE_SECONDS = conformance_hooks.seconds(
     "CONFORMANCE_GRACE_SECONDS", float(_resume_cfg.get("grace_seconds", 120))
 )
 _RESUME_MAX_DETACHED = int(_resume_cfg.get("max_detached", 20))
 _RESUME_HISTORY_TURNS = int(_resume_cfg.get("history_turns", 6))
 _RESUME_HISTORY_CHARS = int(_resume_cfg.get("history_chars", 2000))
-_RESUME_NUDGE_AFTER_SECONDS = test_hooks.seconds(
+_RESUME_NUDGE_AFTER_SECONDS = conformance_hooks.seconds(
     "CONFORMANCE_NUDGE_AFTER_SECONDS", float(_resume_cfg.get("nudge_after_seconds", 30))
 )
-_RESUME_FIRST_FRAME_TIMEOUT_SECONDS = test_hooks.seconds(
+_RESUME_FIRST_FRAME_TIMEOUT_SECONDS = conformance_hooks.seconds(
     "CONFORMANCE_FIRST_FRAME_TIMEOUT_SECONDS", float(_resume_cfg.get("first_frame_timeout_seconds", 2.0))
 )
-_RESUME_SWEEP_INTERVAL_SECONDS = float(_resume_cfg.get("sweep_interval_seconds", 15))
+_RESUME_SWEEP_INTERVAL_SECONDS = conformance_hooks.seconds(
+    "CONFORMANCE_SWEEP_INTERVAL_SECONDS", float(_resume_cfg.get("sweep_interval_seconds", 15))
+)
 
 # Close code for an intentional idle close. Application-range (4000-4999) so the
 # browser can tell it apart from transport errors (1002/1006/1011) and must not

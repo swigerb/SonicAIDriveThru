@@ -19,7 +19,7 @@ from aiohttp import web
 from azure.core.credentials import AzureKeyCredential
 from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 
-import test_hooks
+import conformance_hooks
 from audio_pipeline import (
     _GA_TO_LEGACY_EVENTS,
     _PASSTHROUGH_CLIENT_TYPES,
@@ -248,7 +248,7 @@ _BOOTSTRAP_CLIENT_SESSION: dict = {
 }
 
 # How long the greeting waits for the server to confirm the session config.
-_SESSION_CONFIGURED_TIMEOUT_SEC = test_hooks.seconds("CONFORMANCE_GREETING_TIMEOUT_SECONDS", 5.0)
+_SESSION_CONFIGURED_TIMEOUT_SEC = conformance_hooks.seconds("CONFORMANCE_GREETING_TIMEOUT_SECONDS", 5.0)
 
 # Fire-and-forget tasks (e.g. closing a superseded socket) kept alive until done.
 _BACKGROUND_TASKS: set[asyncio.Task] = set()

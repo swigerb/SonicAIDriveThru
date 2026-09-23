@@ -5,8 +5,9 @@ namespace Conformance.Harness;
 /// (via <see cref="PythonBackendOptions.ExtraEnvironment"/>), letting different test collections
 /// launch the Python backend under a different test-hook configuration. See
 /// tests/conformance/README.md's BackendContract section for the full list of CONFORMANCE_*
-/// variables app/backend/test_hooks.py understands, and app/backend/test_hooks.py itself for the
-/// authoritative gating (CONFORMANCE_TEST_HOOKS=1 required; everything here is inert without it).
+/// variables app/backend/conformance_hooks.py understands, and app/backend/conformance_hooks.py
+/// itself for the authoritative gating (CONFORMANCE_TEST_HOOKS=1 required; everything here is
+/// inert without it).
 /// </summary>
 public sealed record BackendProfile(string Name, IReadOnlyDictionary<string, string> ExtraEnvironment)
 {
