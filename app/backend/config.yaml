@@ -5,9 +5,33 @@
 model:
   temperature: 0.6
   max_response_output_tokens: 4096
-  # Soft, calm female voice for the carhop persona. `marin` and `cedar` are the
-  # newer high-fidelity GA voices; `shimmer` and `sage` are the calmer classics.
-  default_voice: "shimmer"
+  # Carhop voice. `marin` (and `cedar`) are the newest GA voices and the ones
+  # OpenAI recommends for best quality. The picker offers all ten GA voices.
+  # Env override: AZURE_OPENAI_REALTIME_VOICE_CHOICE.
+  default_voice: "marin"
+  # Guest-speech transcription model (session.audio.input.transcription.model).
+  # `whisper-1` works on Azure with no extra deployment. gpt-4o-transcribe and
+  # gpt-4o-mini-transcribe are ACCEPTED by session.update but every turn then
+  # fails with DeploymentNotFound unless you deploy that model under the same
+  # name on the resource (probed 2026-09-22).
+  # Env override: AZURE_OPENAI_REALTIME_TRANSCRIPTION_MODEL.
+  transcription_model: "whisper-1"
+  # reasoning.effort for reasoning realtime models (gpt-realtime-2 / 2.1):
+  # none | minimal | low | medium | high | xhigh. "" (empty) omits the field.
+  # Only sent when the deployment is a reasoning model (see reasoning_model):
+  # gpt-realtime-1.5 rejects `reasoning` -- the whole session.update, tools
+  # included. See scripts/benchmark_reasoning.py.
+  # Env override: AZURE_OPENAI_REALTIME_REASONING_EFFORT ("off" disables).
+  # "low": 30/30 correct, best TTFA p90 (0.98s/1.57s) on 2.1; none/minimal skip the spoken preamble (docs/customizing_deploy.md).
+  reasoning_effort: "low"
+  # Is the deployment a reasoning model? true | false | auto. "auto" infers it
+  # from the deployment name (gpt-realtime-1.5, gpt-realtime, gpt-realtime-mini,
+  # gpt-4o-* => no; anything else => yes). Set it explicitly for custom names.
+  # Env override: AZURE_OPENAI_REALTIME_REASONING_MODEL.
+  reasoning_model: "auto"
+  # parallel_tool_calls for reasoning models; null leaves the service default
+  # (2.1 already batches calls; `false` serialises them and is ~1.3s slower).
+  parallel_tool_calls: null
 
 vad:
   type: "server_vad"
@@ -37,6 +61,11 @@ search:
 
 connection:
   ws_heartbeat_seconds: 15.0
+  # permessage-deflate on the browser websocket. Keep false: aiohttp 3.14.2/3.14.3
+  # reject the first compressed frame after an initial PONG (aio-libs/aiohttp#13274),
+  # and base64 PCM only deflates ~33% for ~5x the socket CPU. Revisit once a fixed
+  # aiohttp release ships.
+  ws_compression: false
   ws_connect_timeout_total: 30
   ws_connect_timeout_connect: 10
   client_max_size_bytes: 4194304
@@ -62,3 +91,31 @@ security:
   idle_timeout_seconds: 300
   allowed_origins: []  # empty = same-origin only; add URLs for cross-origin
   require_session_token: false  # set true to require HMAC session tokens
+
+# Order resume after a transport drop (Wi-Fi blip, LB reset, heartbeat miss).
+# An idle close (4000) is never resumable, and the idle clock
+# (security.idle_timeout_seconds) keeps running while the guest is disconnected,
+# so the hold is min(grace_seconds, remaining idle budget).
+resume:
+  enabled: true
+  grace_seconds: 120            # how long a dropped session's order is held
+  max_detached: 20              # LRU cap on held sessions per worker
+  history_turns: 6              # transcript turns replayed into the new upstream
+  history_chars: 2000           # char cap on the replayed transcript
+  nudge_after_seconds: 30       # silent-guest nudge after a resume; 0 disables
+  first_frame_timeout_seconds: 2.0  # wait for extension.resume before starting fresh
+  sweep_interval_seconds: 15    # how often idle/grace expiry is checked
+
+# What the carhop does when a model response is rate-limited (the three demos
+# share one Azure OpenAI quota). Per failed response: one silent retry after
+# retry_delay_seconds; if that also fails the browser plays a pre-recorded
+# "Sorry, give me just a second." clip and a second retry follows after
+# second_retry_delay_seconds; if that fails the guest is asked to say it again.
+# A "try again in X s" hint from the service replaces the delay, clamped to
+# [0.5, 5] s for the first retry and [2, 8] s for the second. See docs/rate_limit_recovery.md.
+resilience:
+  rate_limit:
+    enabled: true               # env override: RATE_LIMIT_RECOVERY_ENABLED=true|false
+    retry_delay_seconds: 1.5
+    second_retry_delay_seconds: 4
+    max_retries: 2

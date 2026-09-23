@@ -35,9 +35,9 @@
 
 ## Model
 
-- **Preferred:** claude-opus-4.6
-- **Rationale:** Rick is the lead architect and deep thinker — always uses Claude Opus 4.6 for maximum reasoning quality
-- **Fallback:** claude-opus-4.6 (no fallback — always Opus)
+- **Preferred:** claude-opus-5.5
+- **Rationale:** Rick is the lead architect and deep thinker — always uses Claude Opus 5.5 for maximum reasoning quality
+- **Fallback:** claude-opus-5.5 (no fallback — always Opus)
 
 ## Collaboration
 

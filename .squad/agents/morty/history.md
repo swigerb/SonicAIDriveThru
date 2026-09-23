@@ -157,3 +157,61 @@ Fixed `useAzureSpeech.tsx`: (1) `onReceivedToolResponse` parameter was declared 
 - All rows now have consistent height with no crowding or overlapping
 
 **Verified:** Build green, 13/13 tests pass, no purple in CSS output, `bg-primary` resolves to `rgb(230,0,73)` (light) / `rgb(255,26,98)` (dark) — both Sonic brand red. Public API unchanged (checked, onCheckedChange, size variants, id, ref forwarding). Accessibility preserved (sr-only input, label association, aria-label). No new dependencies.
+
+- **Realtime socket lifecycle hardening (2026-09-22, `fix/ws-transport`)**
+  - `useRealtime.tsx`:
+    - Waits for the `/api/auth/session` fetch before opening the socket. Previously a first socket was torn down and replaced the moment the token arrived.
+    - `shouldReconnect` is false for close 4000 (`WS_CLOSE_IDLE_TIMEOUT`), and `connect` is flipped off after it. `onReconnectStop` also turns connect off.
+    - New `reconnect()` fetches a fresh token and reconnects. New `onConnectionLost({code, reason, idle})` and `isConnected`.
+    - **Audio append, buffer clear and `response.cancel` now use `sendJsonMessage(msg, false)`.** react-use-websocket queues messages (keep=true) while the socket isn't OPEN and replays them onto the *next* socket; that is how mic audio reached a fresh upstream ahead of `session.update`.
+  - `App.tsx`:
+    - Any close during a conversation stops it (mic off, player stopped). The mic is never auto-resumed.
+    - The notice reads "Session ended after inactivity…" for 4000, or "Connection lost…" otherwise. The latter appears only if the conversation was active or the ticket had items.
+    - The next tap resets the ticket (the server order is gone), reconnects if the socket is down, and the queued `session.update` flushes on open.
+  - `StatusMessage` gained a `notice` prop; i18n added in en/es/fr/ja.
+  - Verified in real Chromium against the built app plus the real middle tier:
+    - 4000 → notice shown, no reconnect.
+    - Tap → exactly one new session, then the greeting.
+    - 1011 mid-conversation → mic stops, "Connection lost" shows, a background reconnect happens, and only the server bootstrap reaches the new upstream.
+### 2026-09-22 — Voice picker: single source of truth, marin default
+- New `app/frontend/src/lib/voices.ts` holds the picker's voice data:
+  - `VOICE_OPTIONS`: the ten voices `gpt-realtime-2.1` accepts (verified live by Unity).
+  - `DEFAULT_VOICE = "marin"`.
+  - `resolveVoice()`.
+- `settings.tsx` renders its `<option>`s from `VOICE_OPTIONS` instead of hard-coding them.
+- marin and cedar are listed first, with "(recommended)" in the label. That needed no layout change: it is the same `<select>`.
+- `App.tsx` initialises `voiceChoice` via `resolveVoice(localStorage.voiceChoice)`:
+  - a returning guest keeps a valid stored voice;
+  - a missing or unknown value, e.g. a retired `nova`, falls back to marin instead of being sent upstream and rejected.
+- New test `src/components/ui/__tests__/voice-picker.test.tsx`, 3 tests:
+  - it renders the real Settings dialog inside `AzureSpeechProvider` and `DummyDataProvider`, then opens it;
+  - it asserts all 10 voices with no duplicates, the marin default, the recommended markers, and `resolveVoice` fallbacks.
+- The backend test `test_voice_picker_offers_exactly_the_ga_voices` now parses `voices.ts`. A new `test_frontend_and_backend_default_voice_agree` checks it against `config.yaml`.
+- Websocket and reconnect code was not touched; a concurrent transport branch owns it.
+- **Verified:** `npm run build` green; `npm test` 16/16 (was 13). No `npm install`, so the lockfile is unchanged.
+
+- **Order resume — Stage 2 frontend (2026-09-22, `feat/order-resume`)**
+  - `useRealtime`:
+    - Owns its outgoing queue. Every send is `keep=false`; while closed, only `session.update` and extension frames are held.
+    - `onOpen` sends `extension.resume` first if `sessionStorage['sonic.resumeId']` is set, then the queue.
+    - `classifyClose()`: transport → reconnect + resume. idle (4000), superseded (4002) and ended (1000 `session_ended`) are final; 4000 and ended clear the id, 4002 keeps it. The 4001/"expired" refresh path is unchanged.
+    - `session_resumed` stores the rotated `resume_id`; `resume_rejected` clears the id.
+    - `endSession()` sends `extension.end_session`, holds later frames, and after the 1000 close opens a fresh socket with a new token.
+  - `App.tsx`:
+    - A drop pauses the mic and shows "Reconnecting".
+    - Resumed → ticket from `order_summary`, re-send `session.update` and verbose flags, auto-restart the mic, "Reconnected — your order is still here".
+    - If the mic refuses, fall back to "Tap the mic to continue". That tap skips the greeting wait.
+    - Rejected → clear the ticket and show the notice. Idle, superseded and gave-up each get their own notice.
+    - A "Start a new order" button appears once the ticket has items.
+  - `Recorder.start()` returns a boolean, with a 1.5s timeout on resuming a suspended AudioContext. It now releases the getUserMedia stream on failure (previously the mic indicator stayed on).
+  - i18n keys added in en/es/fr/ja.
+  - Gesture finding (Edge 153): the first-tap AudioContext stays running across a drop, so the mic auto-restarts even under a strict autoplay policy. A reload's new document starts suspended, so a reload asks for a tap.
+  - vitest 65 (was 24). `npm run build` green. No `npm install`; lockfile unchanged.
+
+## 2026-09-23 — feat/round3
+
+- **R1 frontend:** `onReceivedRateLimited` in `useRealtime`; `App.tsx` handles attempt 1 (notice "One moment, please…", mute mic, play `/audio/apology-<lang>.wav` with en fallback, 5 s cap, unmute unless the carhop is talking) and `final` ("We're a little busy — please say that again."). Notice clears on guest speech, a transcript or stop. `src/lib/apology.ts`; keys in en/es/fr/ja.
+- **R3 (template-leftover sweep):** es/fr/ja `app.title` was still "Talk to your data" and the footer still credited "Azure AI Search + Azure OpenAI"; fixed to Sonic wording and the English services list. Added missing `menu.title`. `DEPLOY.md` contoso UPN → placeholder; VoiceRAG naming out of `customizing_deploy.md` / `existing_services.md`.
+  - Guard: `src/locales/__tests__/locales.test.ts` (23 tests) scans every locale value plus user-visible source and `index.html` for Contoso, Mercer, VoiceRAG, "Talk to your data" (4 langs), the old footer, Dunkin, coffee-chat; also key parity, no empties, Sonic title, footer services.
+  - `Array.prototype.at` isn't in the tsconfig lib; use `slice(-2)[0]` in tests.
+- vitest 65 → 116. Build green. No `npm install`; lockfile unchanged.

@@ -31,3 +31,114 @@
 - **Combo conversion mods regression tests (2026-03-25):** Added 7 tests to `test_order_state.py` covering the mod-in-combo-name bug. Key insight: `combo_base` must strip parenthesized mods before comparison with `existing_base` (which already strips via `.split("(")[0]`). Tests cover: (1) combo arrives with mods in name, (2) no-mods regression, (3) different mods on standalone vs combo, (4) mod carry-forward from standalone, (5) multiple standalones with selective removal, (6) quantity>1 decrement, (7) ® symbol normalization. Summer's fix (stripping parens from combo_base before comparison) was already applied — all 7 pass. Total suite: 354 tests.
 - **Flaky time-dependent test fix (2026-08-06):** `test_extras_rules.py::test_allow_extra_when_slush_present` and `test_tool_calling.py::test_tax_on_multiple_items` failed daily 14:00–16:00 CDT because `is_happy_hour()` applied a 50% drink discount during that window, making hardcoded total assertions wrong. Fix: patched `order_state.is_happy_hour` to `False` in `setUp`/`tearDown` for classes with price assertions involving drink items (`ExtrasRuleTests`, `TaxCalculationTests`). Added explicit `HappyHourPricingTests` class (5 tests) and `test_tax_on_multiple_items_during_happy_hour` for positive coverage of the discount path — both discounted and non-discounted totals are now deterministically tested. Verified patch bites by confirming discounted vs full-price totals under each state. Full audit: no other tests in the suite depend on wall-clock time for pricing (combo tests use non-drink items or absorbed items with $0 contribution; `test_performance.py` uses `time.perf_counter()` for benchmarks only; `test_security.py` uses `time.time()` for token expiry logic, not pricing). Suite: 360 passed (354 + 6 new), ruff clean, deterministic under both HH=True and HH=False global patches.
 - **Guard test false-negative fix (2026-08-06):** Found and fixed a defect in my own `test_rebrand_verification.py`. Root cause: `EXCLUDED_DIRS` was over-broad — it excluded `.devcontainer`, `.github`, `.vscode`, and `.copilot` from scanning, which meant `.devcontainer/devcontainer.json` containing `"name": "Coffee Chat"` (the old pre-rebrand repo name) survived undetected while the test reported green. This is the exact failure mode the guard test exists to prevent. Fix: (1) narrowed `EXCLUDED_DIRS` to only `.git`, `node_modules`, `__pycache__`, `.venv`/`venv`/`env`, and `.squad` (the latter kept deliberately since it holds legitimate historical rebrand records — added a comment explaining why); (2) removed `.devcontainer`, `.github`, `.vscode`, `.copilot` from exclusions so config/CI dirs are now scanned; (3) fixed the `devcontainer.json` violation (`"Coffee Chat"` → `"Sonic AI Drive-Thru"`, Node `"20"` → `"22"` to match Dockerfile and CI); (4) added `.sh` to `SCAN_EXTENSIONS` and `SCAN_FILENAMES = {"Dockerfile"}` for extensionless file coverage — this surfaced real violations in `deploy.sh` and `docker-build.sh` (`coffee-chat-app`/`coffee-chat-assistant` references), which were also fixed; (5) verified `.ipynb` not worth scanning (too noisy — outputs are generated artifacts, not authored code; team handles notebook cleanup separately). Proof-of-failure test: reintroduced `"Coffee Chat"` into `devcontainer.json`, confirmed test now fails with `[coffee-chat (old repo name)] .devcontainer\devcontainer.json:4`, then restored the fix and confirmed 12/12 pass. Lesson: guard tests are only as good as their scan scope — over-excluding directories defeats the purpose. Full verification: backend 354 pass, frontend build + 13/13 tests pass, `squad doctor` 11/0. Docker build blocked by corporate SSL proxy (environment issue, not code — `node:22-slim` stage started successfully confirming Node upgrade works).
+- **Silent tool-call regression test (2026-09-22):** Added `tests/test_session_bootstrap.py` for the $0.00 Carhop Ticket incident.
+  - It drives the real middle tier end to end against a fake GA realtime server. The fake enforces the two service rules involved:
+    - server VAD auto-responds to mic audio;
+    - a `session.update` with a different voice after assistant audio is rejected *wholesale* (`cannot_update_voice`).
+  - Key insight: the earlier suite only unit-tested payload shape, and the payload was valid. The bug was *ordering*: browser audio reached an unconfigured session. Only an end-to-end fake with real service semantics can catch that.
+  - Mutation-checked:
+    - reverting rtmt.py fails 6;
+    - removing the bootstrap fails 5;
+    - removing the voice strip fails 3;
+    - an unconditional picker send fails 1.
+  - Also added `GARealtime21SurfaceTests`: reasoning fields pass through but are never sent by default, and the picker offers exactly the 10 documented GA voices (allow-list mutation fails 1).
+  - Watch-out: `test_rebrand_verification` flags the sibling brand's name in source comments, so refer to that repo generically.
+
+- **WS transport regression tests (2026-09-22, `fix/ws-transport`)**
+  - Backend `tests/test_ws_transport.py`:
+    - The handshake does not negotiate permessage-deflate.
+    - The exact production framing (server PING → client PONG → deflated data frame) keeps the session alive and the `session.update` reaches the upstream.
+    - Idle close delivers 4000/"idle_timeout" and deletes the order session.
+    - The config default is off.
+    - The upstream `ws_connect` passes `compress=0`.
+  - Frontend `hooks/__tests__/useRealtime.test.tsx` (6) mocks `react-use-websocket` and captures the url/options/connect arguments; `status-message` gained 2 tests.
+  - Mutations, each of which fails at least one test:
+    - Drop `compress=` → 2 fail, with the real 1002.
+    - Drop upstream `compress=0` → 1 fails.
+    - Idle `ws.close()` default → `1000 != 4000`.
+    - Config set to true → 3 fail.
+    - `shouldReconnect: () => true` → 1 fails.
+    - No `setShouldConnect(false)` on idle → 2 fail.
+    - Keep=true on audio → 1 fails.
+    - No token gating → 1 fails.
+    - No `onReconnectStop` → 1 fails.
+    - Stale token on reconnect → 1 fails.
+    - `StatusMessage` ignores the notice → 2 fail.
+  - The heartbeat test patched to 0.2s passed 10/10 in a flake loop.
+### 2026-09-22 — session.update self-healing tests + mutation check
+- `tests/test_session_bootstrap.py`: `FakeGARealtime` can now reject updates in configurable ways:
+  - `reject_keys`: reject any update carrying the given GA session keys;
+  - `reject_every_update`;
+  - `echo_event_id=False`, which mimics gpt-realtime-1.5 rejecting `reasoning` with `event_id=None` and `param=None`;
+  - it also rejects two unrelated client events: `conversation.item.delete` (echoes the event_id, `param=item_id`) and `input_audio_buffer.commit` (no event_id).
+- New `SessionUpdateFallbackTests`, run end to end through the real middle tier:
+  - every session.update carries a unique event_id;
+  - (a) a rejected bootstrap gets exactly ONE fallback whose session keys are exactly {type, instructions, tools, tool_choice}. Tools are registered, the browser never sees the error, and the next VAD response has the tools;
+  - the no-event_id variant of (a) also sets `_reasoning_rejected`, so later updates omit `reasoning`;
+  - (b) the fallback being rejected too causes no loop, with and without an echoed event_id. There are exactly 2 updates, and the fallback's error reaches the browser once. A new original gets its own single fallback;
+  - (c) the unrelated errors trigger no fallback and are forwarded.
+- New `SessionUpdateGuardTests` cover the correlation rules and one-fallback-per-original.
+- New `ReasoningAndTranscriptionConfigTests` cover:
+  - reasoning is sent only when configured and only on reasoning deployments, and never on 1.5, gpt-realtime, the dated snapshot, mini, or 4o;
+  - a client cannot inject `reasoning`;
+  - the env/config precedence matrix;
+  - the shipped `config.yaml` is rollback-safe.
+- **Mutation check:**
+  - `_recover_rejected_session_update` returning False fails 4 tests. They are (a) ×2 and (b) ×2, and all time out waiting for a fallback.
+  - Removing the one-fallback loop guard fails both (b) tests with `187 != 2` / `180 != 2` updates, i.e. a runaway loop.
+  - (c) is the negative control and correctly still passes.
+- Backend: 431 passed (baseline 412).
+
+## 2026-09-22 — feat/voice-reasoning verification
+
+- Fallback mutation checks, run on `test_session_bootstrap.py`:
+  - Fallback disabled: 4 failed (bootstrap minimal fallback, no-loop, no-loop without event_id, no-event_id recovery).
+  - Loop guard removed: 2 failed.
+  - Foreign event_id correlated: 2 failed.
+  - Reasoning switch ignored: 6 failed.
+  - Everything restored: all pass.
+- `smoke_realtime.py`: 1.5 answered the TTS phrase instead of reading it aloud. The instructions are now firmer and an empty transcript fails. PASS on 2.1 and 1.5.
+- `benchmark_reasoning.py`:
+  - Repaired: stub search with the real result format, real order tools, stricter add counts, and realistic size-change history.
+  - New: median/p90 output, a `--summarize` mode, and `--resume` for chunked runs.
+- Final gate: pytest 434 passed; ruff clean; frontend build OK with 16/16 tests; `az bicep build` 0 errors.
+
+- **Order resume Stage 1 tests (2026-09-22, `feat/order-resume`)**
+  - `tests/test_order_resume.py` (42 tests) and `tests/test_infra_resume.py`.
+  - They use a FakeClock plus a per-connection fake GA upstream, reusing the `_RealtimeHarness` `fake_class` hook, with no real sleeps over 1s.
+  - Coverage:
+    - Grace-then-delete; idle deletes immediately and a later resume is rejected; grace capped by the idle budget.
+    - LRU cap; the concurrency cap ignores detached sessions.
+    - Valid resume keeps the same sid and order; wrong, expired, reused and malformed ids are rejected, and the guest gets a fresh session.
+    - Resume is honoured as the first frame only; 4002 goes to the stale socket.
+    - Upstream order: bootstrap → rehydration (with the order) → no greeting.
+    - The nudge fires once and only after session.updated; it is cancelled by speech, a transcript, or a guest response; 0 disables it.
+    - The resume id never appears in logs (caplog at DEBUG plus verbose logging).
+  - Mutation checks: 51 mutations (steps 0–3), all killed. Three step-2 survivors were killed after adding tests.
+  - Final: pytest 496 passed (baseline 442), ruff clean.
+
+- **Order resume — Stage 2 tests (2026-09-22)**
+  - vitest suites:
+    - `useRealtime.test.tsx`, 25 tests: resume first frame and never queued, id storage and rotation, each close code's reconnect/clear semantics, end_session plus the fresh socket.
+    - `App.resume.test.tsx`, 12 tests: resumed → ticket, mic restart, no reset; gesture fallback; rejected; idle; superseded; gave-up; New order; a fast tap after New order; a tap on a resumed session never waits for a greeting.
+    - `recorder.test.ts`, 3 tests, and the StatusMessage notices.
+  - Mutations: 16 on the hook, 31 on the app/recorder/notices/ending, and 8 on the e2e. All killed, except two equivalents (`shouldReconnect` duplicated by `setShouldConnect`; an `ended` branch unreachable after the refactor). Survivors A14, A18 and X3 were killed after adding tests; A18 also needed a fix.
+  - `scripts/e2e_order_resume.py`:
+    - Setup: headless Edge, built frontend, the real RTMiddleTier and real order tools, and a fake GA upstream. 42/42 checks in ~37s.
+    - Scenarios: 1011 drop → same ticket and sid, bootstrap → rehydration → no greeting, auto mic, one nudge after the shortened 4s. Also the gesture fallback, a tap while reconnecting, a reload, idle 4000, strict autoplay, and resume ids absent from URLs and logs.
+
+## 2026-09-23 — feat/round3
+
+- Mutation checks (all scripts kept outside the repo):
+
+  | item | mutants | killed |
+  |---|---|---|
+  | R1 backend | 20 + 4 follow-ups | all; M10 killed after adding a `silent` fake mode; M11/M21/M22 were dead code and removed; M17 killed via `RecoveryUnitTests` |
+  | R1 frontend | 15 | 15 |
+  | R1 clips | 11 | 11 |
+  | R2 smoke | 27 | 27 (a 0.97 threshold first survived; added ~0.95 cases) |
+  | R3 locales | 17 | 17 |
+  | dz | 5 | 5 |
+
+- Counts: backend 496 → 568 (+61 subtests); vitest 65 → 116.
+- `ResumeInteractionTests` covers retry vs nudge (no double response either way), retry not refreshing idle, and detach cancelling a pending retry.

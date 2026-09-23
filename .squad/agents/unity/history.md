@@ -126,5 +126,94 @@ Since `app/frontend/` is off-limits, the middleware (`rtmt.py` + `audio_pipeline
 - Which exact event names appear on the wire from `gpt-realtime-1.5`?
 - Which voices does `gpt-realtime-1.5` actually support? (docs don't enumerate per-model)
 
+### 2026-09-22: $0.00 Carhop Ticket — Unconfigured Upstream Session + GA Voice Lock; gpt-realtime-2.1
+
+**Problem:** On the deployed demo the Carhop Ticket stayed at $0.00 for the whole conversation. The assistant sounded in character but never called a tool. Its first reply was generic ("Hey there! Sounds like you're just warming up..."). No application code had changed since the verified August deploy.
+
+**Root Cause (confirmed in prod Log Analytics + a local repro against the real endpoint):**
+- The browser sends `session.update` only from `startSession()`, i.e. when the mic is pressed. It does not send one when react-use-websocket auto-reconnects.
+- Prod sequence:
+  - 21:02:30 — the idle checker closed the session.
+  - 21:03:15 — `Received frame with non-zero reserved bits` killed the new socket. It auto-reconnected with the mic live.
+  - The fresh upstream session ran on service defaults: no tools, generic instructions, voice alloy, server VAD auto-responding.
+  - 21:03:24 — the model answered the mic audio; that was the generic line.
+  - 21:03:30 — the browser's `session.update` (4 tools, `tool_choice=auto`, voice shimmer) was **rejected** with `invalid_request_error` / `cannot_update_voice`.
+- GA rejects the *whole* event, so tools and instructions were never applied. The "persona" came only from the greeting item text.
+- Two premises were wrong. There *was* an error event, and the instructions were *not* reaching the model.
+- `tool_choice` was never "none": `self.tools` is populated synchronously before `attach_to_app`.
+- Voice lock, verified live on gpt-realtime-1.5:
+  - Sending the same voice after audio is accepted.
+  - Sending a different voice after audio rejects the whole event.
+  - Omitting the voice is accepted.
+
+**Fix (`rtmt.py`):**
+- A server-authoritative bootstrap `session.update` is now the first upstream frame after `ws_connect`. It carries tools, instructions, voice, and the browser's VAD/transcription values (`_BOOTSTRAP_CLIENT_SESSION`).
+- A per-connection `assistant_audio_seen` flag tracks when the model has spoken.
+  - Once it is set, `_build_session(voice_locked=True)` strips `audio.output.voice`.
+  - `extension.set_voice` is deferred once it is set. The picker's voice is process-wide, so another tab can change it mid-call.
+- The greeting waits for `session.updated` (5 s timeout). This is the same fix as the sibling brand repo's `ba8c94d`.
+- The greeting is triggered by the client `session.update`, not the bootstrap, so the page never greets unprompted.
+- The server-override logic moved into `_build_session()`, so the bootstrap and the client update share one path.
+
+**Validation:**
+- Local repro (reconnect scenario, real AOAI):
+  - Before the fix: `cannot_update_voice`, `update_order_calls=0`, total $0.00.
+  - After the fix: no error, `update_order_calls=2`, total $10.13.
+- `tests/test_session_bootstrap.py` has 10 tests. Mutation-checked:
+  - reverting rtmt.py fails 6;
+  - removing the bootstrap fails 5;
+  - removing the voice strip fails 3;
+  - an unconditional picker send fails 1.
+- 412 backend tests pass; ruff is clean.
+
+**gpt-realtime-2.1 (GA 2026-07-07, retires 2027-07-31):**
+- `infra/main.bicep` → `gpt-realtime-2.1` / `2026-07-07` / `GlobalStandard`.
+  - The deployment name changes, so ARM's incremental mode leaves the old 1.5 deployment in place for rollback.
+- The GA surface is unchanged vs 1.5: same URL, session shape, event names, and 10 voices.
+- The only additions are `reasoning.effort` and `parallel_tool_calls`, for reasoning models only.
+  - `_to_ga_session` allows both through, but nothing sends them by default.
+  - On a non-reasoning model an unsupported field would reject the update, and the tools with it.
+- Learn still labels 2.1 "preview"; the resource model catalog says GenerallyAvailable.
+- Voices: OpenAI recommends marin/cedar for best quality.
+  - Recommended carhop default: **marin**.
+  - `shimmer` is left in place pending Brian's ear test, because the voice set did not change.
+
+**Needs Live Verification:**
+- Whether 2.1 accepts the bootstrap payload, including `input_audio_transcription.model=whisper-1`. Learn notes an Azure deviation that requires a deployment name in that field.
+- `reasoning.effort` latency tuning.
+- The cause of the reserved-bits websocket error.
+
 <!-- Older detailed sections archived above for space. Current learnings focused on Phase 3 integration. -->
 
+
+## 2026-09-22 — feat/voice-reasoning finalize (reasoning effort benchmark)
+
+- Live probes, 2.1:
+  - Accepts `reasoning.effort` none, minimal, low, medium, high and xhigh.
+  - Accepts `parallel_tool_calls` true and false, but does not echo it.
+  - Accepts exactly 10 voices (fable, onyx and nova are rejected).
+- Live probes, 1.5:
+  - Rejects `reasoning` at every level (`invalid_value`, with NO `error.event_id`).
+  - Rejects `parallel_tool_calls: true` and accepts `false`.
+- Transcription: `whisper-1` is the only model that works without an extra deployment. `gpt-4o-(mini-)transcribe` pass `session.update`, but every turn then fails with `DeploymentNotFound`.
+- Benchmark (2.1, real prompt and tools, text in, audio out; 18–30 trials per effort):
+  - All efforts from `none` to `xhigh` have a TTFA median of 0.87–1.01 s (jitter).
+  - `none` and `minimal` call tools before speaking (7/30 and 11/18 trials), so their p90 is a silent gap of 2.1 s / 5.3 s.
+  - **Chose `low`**: 30/30 correct, TTFA p90 1.57 s, first tool call at 2.04 s.
+  - `parallel_tool_calls` false serialises search→add, is about 1.3 s slower and uses about 2× the tokens. Keep `null`.
+- Results table: `docs/customizing_deploy.md`.
+- Raw JSONL: in the session `bench/` directory.
+
+## 2026-09-23 — feat/round3
+
+- **R1 backend (rate-limit recovery):** `app/backend/rate_limit.py` (`RateLimitRecovery`), wired in `rtmt.py`.
+  - Detection: failed `response.done` whose `status_details.error` code/type contains `rate_limit`, or an uncorrelated `rate_limit` `error` event. Correlated session.update errors still go to the minimal-update fallback.
+  - Ladder per failed response: silent retry after 1.5 s → `extension.rate_limited {attempt:1}` + retry after 4 s → `{attempt:2, final:true}`. A "try again in X s/ms" hint is clamped to [0.5, 5] / [2, 8] s.
+  - Cancelled by speech_started, a foreign `response.created`, a browser `response.create`, or detach.
+  - Composes with resume: a retry never touches the idle clock; the nudge is gated on `recovery.busy`; an error during the nudge's response doesn't stack a retry; detach cancels.
+  - Config `resilience.rate_limit.*`; `RATE_LIMIT_RECOVERY_ENABLED` overrides (same name as the sibling demos).
+- **Apology clips:** `scripts/generate_apology_clips.py` recorded en/es/fr/ja on `gpt-realtime-2.1` / marin (phrase in `response.instructions`), each whisper-verified word for word (2.1–3.2 s, 100–152 KB).
+- **R2 (smoke check port):** `scripts/smoke_realtime.py` now fails when the transcript doesn't match the synthesised phrase (similarity ≥ 0.85), puts the phrase in `response.instructions`, and authenticates against the resource's tenant (`--tenant` / `--subscription`, env, azd; credentials tried in turn).
+  - Live probe: user-turn synthesis was verbatim 1/6 (the model answered the order); `response.instructions` 6/6.
+  - Live smoke passed on `gpt-realtime-2.1` (0.98) and `gpt-realtime-2.1-dz` (1.00).
+- **dz:** `gpt-realtime-2.1-dz` pinned as a reasoning deployment (test + docs note).

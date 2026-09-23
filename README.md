@@ -57,7 +57,7 @@ Special thanks to [John Carroll](https://github.com/john-carroll-sw) for the ori
 ## Features
 
 ### Core AI & Voice Experience
-- **Azure OpenAI GPT-4o Realtime API**: Voice-to-voice ordering powered by gpt-realtime-1.5 with optimized system prompt (bulleted format, ALL CAPS emphasis, variety rules to prevent robotic repetition).
+- **Azure OpenAI GPT-4o Realtime API**: Voice-to-voice ordering powered by gpt-realtime-2.1 with optimized system prompt (bulleted format, ALL CAPS emphasis, variety rules to prevent robotic repetition).
 - **Sonic carhop personality**: Upbeat, friendly, branded — **Coral voice** (warm, friendly female) embodies the Sonic carhop persona. Phrase variety rules prevent bot-like repetition ("Awesome choice!", "You got it!", "Great pick!", "Coming right up!").
 - **Natural turn-taking**: Server VAD tuning (threshold 0.7, prefix padding 300ms, silence duration 500ms) for seamless back-and-forth conversations.
 - **Spoken currency**: "Four dollars and nineteen cents" instead of "$4.19" — more natural, more Sonic.
@@ -151,7 +151,7 @@ This is where the intelligence lives. The `RTMiddleTier` (`rtmt.py`) acts as a W
 
 **4. Azure OpenAI Realtime API (GPT-4o)**
 
-The audio hits **Azure OpenAI's GPT-4o Realtime API** (`gpt-realtime-1.5`), which processes the guest's speech and decides what to do. It doesn't just transcribe — it *understands intent* and generates both a spoken response and structured **tool calls** as JSON function calls (the "Citation Payloads" shown in the diagram). This is the agentic core: the model autonomously decides which tools to invoke based on the conversation context.
+The audio hits **Azure OpenAI's GPT-4o Realtime API** (`gpt-realtime-2.1`), which processes the guest's speech and decides what to do. It doesn't just transcribe — it *understands intent* and generates both a spoken response and structured **tool calls** as JSON function calls (the "Citation Payloads" shown in the diagram). This is the agentic core: the model autonomously decides which tools to invoke based on the conversation context.
 
 **5. Tool Execution — The Agentic Toolkit**
 
@@ -179,7 +179,7 @@ The **Stateful Order Manager** (`order_state.py`) is where deterministic busines
 
 The response takes three parallel paths back to the guest:
 
-- **Audio** → streams through the WebSocket back to the frontend → plays through the guest's speakers (with echo suppression engaged to prevent feedback loops). The AI's **Coral voice** — warm, friendly, unmistakably Sonic — delivers the response.
+- **Audio** → streams through the WebSocket back to the frontend → plays through the guest's speakers (with echo suppression engaged to prevent feedback loops). The AI's **Marin voice** — warm, friendly, unmistakably Sonic — delivers the response.
 - **Tool results** → the frontend parses JSON payloads and updates the **Carhop Ticket** in real-time: line items, customizations, combo groupings, subtotals, tax, and the running total. The POS Ticket view shows exactly what would print at the stall.
 - **Transcript** → the guest's words and the AI's response appear in the **Guest Conversation** panel with real-time transcription (and translation, if the guest is speaking Spanish, Mandarin, or another supported language).
 
@@ -193,7 +193,11 @@ The entire round trip — guest speech → AI understanding → tool execution �
 
 > **Note:** This demo uses sample Sonic Drive-In menu data (172 items) for demonstration purposes. All prices, promotions, and machine statuses are simulated to showcase the agentic architecture capabilities.
 
-- **Voice picker**: The settings dialog exposes ten GA realtime voices (alloy, ash, ballad, coral, echo, sage, shimmer, verse, marin, cedar) with short descriptors. Changing it takes effect on the live conversation without a redeploy — the choice is persisted in the browser and sent to the middle tier, which reissues a `session.update` with the voice at `audio.output.voice`. The initial default comes from `model.default_voice` in `app/backend/config.yaml`.
+- **Voice picker**: The settings dialog exposes every built-in voice `gpt-realtime-2.1` accepts — marin and cedar (marked *recommended*, OpenAI's highest-quality voices), shimmer, sage, coral, ballad, ash, verse, alloy, echo — with short descriptors (the list lives in `app/frontend/src/lib/voices.ts`; other names such as fable/onyx/nova are rejected by the service). Changing it takes effect on the live conversation without a redeploy — the choice is persisted in the browser and sent to the middle tier, which reissues a `session.update` with the voice at `audio.output.voice`. The default is **marin**, from `model.default_voice` in `app/backend/config.yaml` (deployed default: `AZURE_OPENAI_REALTIME_VOICE_CHOICE`, see [customizing the deployment](docs/customizing_deploy.md)).
+- **Session config can't silently fail**: GA rejects a `session.update` wholesale if any one field is unsupported — tools included. Every `session.update` the middle tier sends carries an `event_id`; if the service rejects one, the middle tier logs it at ERROR and immediately resends a minimal update (instructions + tools only) so the carhop keeps its tools. `azd deploy` runs a non-fatal smoke check (`scripts/smoke_realtime.py`) that verifies the live deployment accepts the exact session config and transcribes a test phrase word for word. See [docs/customizing_deploy.md](docs/customizing_deploy.md#post-deploy-realtime-smoke-check).
+- **Order resume after a dropped connection**: after a transport drop, the order and conversation are held for up to 120 s. The hold never outlasts the 5-minute idle budget, and an idle close is never resumable. A reconnect that sends its single-use resume id as the first frame gets the same session back. The carhop stays silent, with one nudge if the guest says nothing for 30 s. The backend runs one worker behind sticky ingress. In the browser, the ticket comes straight back with "Reconnected — your order is still here". The mic restarts without a tap, or asks for one tap if the browser insists on a gesture. Reloading the tab also restores the order, and a **Start a new order** button ends the current one. See [docs/order_resume.md](docs/order_resume.md).
+- **Rate limits don't freeze the carhop**: the three demos share one Azure OpenAI quota. A rate-limited response is retried silently after 1.5 s. If that retry is rate-limited too, the browser plays a pre-recorded "Sorry, give me just a second." clip in the guest's language, with the mic muted, and the middle tier retries once more after 4 s. If that also fails, the guest is asked to say it again. Guest speech, a new response or a detach cancels a pending retry, and a retry never counts as guest activity or stacks on the resume nudge. See [docs/rate_limit_recovery.md](docs/rate_limit_recovery.md).
+
 ### Architecture Diagram
 
 The `RTClient` in the frontend receives the audio input, sends that to the Python backend which uses an `RTMiddleTier` object to interface with the Azure OpenAI Realtime API, and includes a tool for searching Azure AI Search.
@@ -216,7 +220,7 @@ The architecture implements a **WebSocket middle tier** that bridges the browser
 **Backend:**
 - Python 3.11+ with aiohttp, WebSockets
 - WebSocket middle tier (`rtmt.py`) — browser ↔ Azure OpenAI Realtime API
-- Azure OpenAI GPT-4o Realtime API (gpt-realtime-1.5)
+- Azure OpenAI GPT-4o Realtime API (gpt-realtime-2.1)
 - Demo menu data from `sonic-menu-items.json` (sample Sonic menu export, 172 items)
 
 **AI & Search:**
@@ -226,7 +230,7 @@ The architecture implements a **WebSocket middle tier** that bridges the browser
 **Infrastructure:**
 - Bicep IaC for reproducible deployments
 - Azure Container Apps with auto-scaling (20 concurrent requests/replica, max 5 replicas)
-- Gunicorn with 2 async workers, 120s timeout, 65s keep-alive
+- Gunicorn with 1 async worker (order/resume state is in-process) and sticky ingress affinity, 120s timeout, 65s keep-alive
 - Docker with layer caching for fast rebuilds
 - Health probes: startup (50s), liveness (30s), readiness (10s)
 - Azure Developer CLI (`azd`) for one-command provisioning

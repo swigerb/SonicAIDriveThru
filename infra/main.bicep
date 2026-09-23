@@ -74,6 +74,12 @@ param openAiResourceGroupName string = ''
 param openAiEndpoint string = ''
 param openAiRealtimeDeployment string = ''
 param openAiRealtimeVoiceChoice string = ''
+@description('Optional reasoning.effort override for gpt-realtime-2.x (none|minimal|low|medium|high|xhigh, or off). Empty = app/backend/config.yaml')
+param openAiRealtimeReasoningEffort string = ''
+@description('Optional: is the realtime deployment a reasoning model (true|false|auto)? Empty = app/backend/config.yaml (auto = infer from the deployment name)')
+param openAiRealtimeReasoningModel string = ''
+@description('Optional input transcription model/deployment override. Empty = app/backend/config.yaml (whisper-1)')
+param openAiRealtimeTranscriptionModel string = ''
 
 @description('Location for the OpenAI resource group')
 @allowed([
@@ -127,6 +133,19 @@ param authTenantId string = tenant().tenantId
 @secure()
 @description('Entra ID client secret. Stored as Container App secret "aad-client-secret". Provision via azd env or out-of-band — never commit to source.')
 param authClientSecret string = ''
+
+// --- HMAC session-token secret (/api/auth/session) ---
+// Every replica/restart must validate tokens minted by any other, so the secret
+// is shared via a Container App secret instead of os.urandom per process.
+@secure()
+@description('HMAC secret for /api/auth/session tokens (container env APP_SESSION_SECRET). Pin it with `azd env set APP_SESSION_SECRET <random>`; empty = a random secret generated on each provision.')
+param appSessionSecret string = ''
+
+@secure()
+@description('Do not set. Random fallback for appSessionSecret (newGuid() is only allowed as a parameter default).')
+param appSessionSecretFallback string = '${newGuid()}${newGuid()}'
+
+var effectiveAppSessionSecret = !empty(appSessionSecret) ? appSessionSecret : appSessionSecretFallback
 
 // Figure out if we're running as a user or service principal
 var principalType = empty(runningOnGh) && empty(runningOnAdo) ? 'User' : 'ServicePrincipal'
@@ -216,8 +235,21 @@ module acaBackend 'core/host/container-app-upsert.bicep' = {
     containerMaxReplicas: 5
     healthProbePath: '/health'
     enableWebSocket: true
-    secrets: enableAuth && !empty(authClientSecret) ? { 'aad-client-secret': authClientSecret } : {}
-    env: {
+    // Order state and the resume credential live in one process (gunicorn
+    // --workers 1), so a reconnecting browser must land on the same replica.
+    // The Envoy affinity cookie is set on the page load and sent on the
+    // websocket upgrade. Needs single revision mode (container-app.bicep default).
+    stickySessionsAffinity: 'sticky'
+    secrets: union(enableAuth && !empty(authClientSecret) ? { 'aad-client-secret': authClientSecret } : {}, {
+      'app-session-secret': effectiveAppSessionSecret
+    })
+    // Sending a secrets list replaces the app's secrets, so keep an
+    // out-of-band aad-client-secret alive when it isn't supplied here.
+    preserveExistingSecretNames: enableAuth && empty(authClientSecret) ? [ 'aad-client-secret' ] : []
+    secretEnv: {
+      APP_SESSION_SECRET: 'app-session-secret'
+    }
+    env: union({
       AZURE_SEARCH_ENDPOINT: reuseExistingSearch
         ? searchEndpoint
         : 'https://${searchService.outputs.name}.search.windows.net'
@@ -235,20 +267,29 @@ module acaBackend 'core/host/container-app-upsert.bicep' = {
       AZURE_OPENAI_REALTIME_DEPLOYMENT: reuseExistingOpenAi ? openAiRealtimeDeployment : openAiDeployments[0].name
       AZURE_OPENAI_REALTIME_VOICE_CHOICE: openAiRealtimeVoiceChoice
       RUNNING_IN_PRODUCTION: 'true'
+      // Changing a secret alone does not restart running replicas; a changed
+      // fingerprint changes the template, so every replica restarts on the new
+      // secret together instead of old and new replicas disagreeing.
+      APP_SESSION_SECRET_FINGERPRINT: uniqueString(effectiveAppSessionSecret)
       // For using managed identity to access Azure resources. See https://github.com/microsoft/azure-container-apps/issues/442
       AZURE_CLIENT_ID: acaIdentity.outputs.clientId
-    }
+    },
+    // Optional overrides of model.reasoning_effort / reasoning_model / transcription_model
+    // in app/backend/config.yaml; unset means the config.yaml value applies.
+    empty(openAiRealtimeReasoningEffort) ? {} : { AZURE_OPENAI_REALTIME_REASONING_EFFORT: openAiRealtimeReasoningEffort },
+    empty(openAiRealtimeReasoningModel) ? {} : { AZURE_OPENAI_REALTIME_REASONING_MODEL: openAiRealtimeReasoningModel },
+    empty(openAiRealtimeTranscriptionModel) ? {} : { AZURE_OPENAI_REALTIME_TRANSCRIPTION_MODEL: openAiRealtimeTranscriptionModel })
   }
 }
 
 var embedModel = 'text-embedding-3-large'
 var openAiDeployments = [
   {
-    name: 'gpt-realtime-1.5'
+    name: 'gpt-realtime-2.1'
     model: {
       format: 'OpenAI'
-      name: 'gpt-realtime-1.5'
-      version: '2026-02-23'
+      name: 'gpt-realtime-2.1'
+      version: '2026-07-07'
     }
     sku: {
       name: 'GlobalStandard'

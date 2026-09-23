@@ -16,3 +16,41 @@
 - **Greeting Regression Triage (2026-03-22)**: Coordinated with Summer and Morty on greeting-before-session.update debugging. Issue: AI asked for items but never called tools. Root cause: `from_client_to_server()` fired greeting before forwarding `session.update`. Solution requires reordering + fallback tool registration + diagnostic logging. Status: Resolved with Summer's fix and Morty's barge-in handler updates.
 - **Architectural Review — Prompt Externalization & Hardening (2026-03-25)**: Brian flagged prompts-in-code as tech debt. Full audit confirmed: system prompt (app.py:127-249, ~3500 chars), greeting (rtmt.py:141-150), tool schemas (tools.py), upsell hints, error messages, and combo hints all hardcoded across 4+ files. Recommended YAML-based prompt externalization under `app/backend/prompts/` with version fields. Also cataloged: 17+ hardcoded config values needing externalization (temperature, tax rate, cache TTL, quantity limits, echo cooldown, etc.) → proposed `config.py` module. Key findings: rtmt.py is a 751-line god file needing split; zero tests on rtmt.py; no CORS/auth on WebSocket; token provider has no refresh mechanism; OrderState singleton has no session limits; `azurespeech.py` and `azure_speech_gpt4o_mini.py` are dead code. Performance and infra are solid (previous sprint). 10 areas rated (2 🟢, 6 🟡, 1 🔴). Full analysis in `.squad/decisions/inbox/rick-arch-review.md`. Brian preference: prompt versioning is top priority for demo iteration velocity.
 - **Phase 4 Security Scope Review (2026-03-25T13-11)**: Analyzed Phase 4 demo-safe security scope. Confirmed no app registration needed — demo doesn't authenticate users, just protects WebSocket server from abuse. Proposed 4-tier strategy: (1) async token refresh every 5 min (eliminates ~200-500ms per-connection blocking), (2) session limits 10 max concurrent + 5 min idle timeout (prevents runaway), (3) origin validation (CSRF prevention), (4) HMAC session tokens disabled by default (can be enabled for production without code changes). Demo impact: zero until `require_session_token: true` is set. All decisions documented in decisions.md (Decisions #29-33). Commit 348da2d.
+
+- **Order resume after reconnect: plan only (2026-09-22)**
+  - Plan written to the session-state `order-resume-plan.md`, outside the repo.
+  - **Design:**
+    - Detach instead of delete, with a grace TTL (120s) and an LRU cap.
+    - A server-minted, rotating 256-bit resume id delivered over the websocket and kept in sessionStorage. It is sent as the first frame `extension.resume`, never in the URL, and bound to the EasyAuth principal.
+    - Re-attach the order, push it to the ticket, and rehydrate the new upstream with one system `conversation.item.create` (order JSON plus the last N transcript turns). Suppress the greeting; an optional welcome-back goes through the existing `session.updated` gate.
+    - Idle closes default to *not* resumable.
+  - **Hard prerequisite:** gunicorn `--workers 1` plus ACA sticky sessions. Today 2 workers × up to 5 replicas with no affinity would defeat any in-memory resume. Redis was rejected for the demo.
+  - Estimate: ~5.5–6 dev-days. 8 open decisions for Brian.
+
+- **Order resume — Stage 1 architecture sign-off (2026-09-22, `feat/order-resume`)**
+  - Brian's decisions replaced parts of the plan:
+    - Idle closes are never resumable, and the idle clock keeps running while the guest is detached (hold = min(120s, remaining idle)).
+    - No principal binding and no `sid` claim in the HMAC token.
+    - No welcome-back line: the carhop stays silent, with one 30s nudge through the `session.updated` gate.
+    - One worker plus sticky ingress; maxReplicas unchanged.
+  - The wire protocol for Stage 2 is in `docs/order_resume.md`: `extension.resume` is the first frame; the replies are `extension.session_resumed` / `extension.resume_rejected` (always followed by metadata); `extension.end_session` closes with 1000; stale sockets get 4002; 4000 is final.
+  - Metadata is now deferred until the resume decision (first frame, or 2s). Old frontends see it up to 2s later.
+  - The known limit is that resume only works within one replica. A lost replica means a fresh order, which is acceptable for the demo.
+
+- **Order resume — Stage 2 review (2026-09-22)**
+  - Protocol is as documented, with two deliberate browser-side additions:
+    - After the 1000 `session_ended` close, the hook opens a FRESH socket, not a resume. Frames sent between `endSession()` and that close go to the new session.
+    - After a resume the browser re-sends its `session.update`, which restores its VAD 0.7/500. The backend's `greeting_sent` gate keeps it silent.
+  - The hook no longer uses react-use-websocket's keep=true queue at all, which removes the "queued ahead of resume" hazard structurally.
+  - Known limits:
+    - A reload restores the ticket but needs a tap for the mic, because a new document's AudioContext starts suspended.
+    - A duplicated tab shares the id; whichever resumes first wins, and the other gets 4002 or a rejection and starts fresh.
+
+## 2026-09-23 — feat/round3
+
+- **Round 3 review:**
+  - R1 composes with resume without a shared mutable flag: the nudge asks `recovery.busy`, the retry bypasses the idle clock, detach cancels. One failure is never handled twice (in-flight errors defer to that response's `response.done`).
+  - R2's strict transcript check is the real value: the old smoke passed while the model was answering instead of echoing.
+  - R3 guard scans source as well as locales, so a leftover can't come back through a component.
+  - Left alone deliberately: the internal `voicerag` logger name in `setup_search_index.py`, the VoiceRAG attribution in README / `voice_rag_README.md`, unused `groundingFiles.*` keys.
+  - Deploy-only: real Azure rate-limit error shape and retry hint; a live retry regenerating the answer; clip autoplay on devices; the postdeploy smoke hook under azd.

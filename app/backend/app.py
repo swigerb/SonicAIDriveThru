@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 
 from config_loader import get_config
 from prompt_loader import PromptLoader
-from rtmt import RTMiddleTier, create_hmac_token
+from rtmt import RTMiddleTier, configure_realtime_model, create_hmac_token
 from tools import attach_tools_rtmt
 
 # Production: INFO; override with LOG_LEVEL env var for debugging
@@ -58,6 +58,26 @@ def _get_bool_env(variable_name: str, default: bool = False) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def load_app_secret(environ=None) -> bytes:
+    """HMAC secret for /api/auth/session tokens.
+
+    APP_SESSION_SECRET (a Container App secret in Azure, see infra/main.bicep)
+    is shared by every replica and survives restarts, so a token minted by one
+    process validates in another. Without it (local dev) a random per-process
+    secret is used, which is only safe with a single process.
+    """
+    env = os.environ if environ is None else environ
+    configured = (env.get("APP_SESSION_SECRET") or "").strip()
+    if configured:
+        if len(configured) < 32:
+            logger.warning("APP_SESSION_SECRET is shorter than 32 characters; use a longer random value")
+        return configured.encode("utf-8")
+    if (env.get("RUNNING_IN_PRODUCTION") or "").strip().lower() in {"1", "true", "yes", "on"}:
+        logger.warning("APP_SESSION_SECRET is not set; using a per-process random secret, so session tokens "
+                       "will not validate across replicas or restarts")
+    return os.urandom(32)
 
 
 # ---------------------------------------------------------------------------
@@ -205,14 +225,13 @@ async def create_app() -> web.Application:
         credentials=llm_credential,
         endpoint=llm_endpoint,
         deployment=llm_deployment,
-        voice_choice=os.environ.get("AZURE_OPENAI_REALTIME_VOICE_CHOICE") or model_cfg.get("default_voice", "coral"),
+        voice_choice=os.environ.get("AZURE_OPENAI_REALTIME_VOICE_CHOICE") or model_cfg.get("default_voice", "marin"),
         prompt_loader=prompt_loader,
     )
-    # Generate a random secret for HMAC session tokens
-    app_secret = os.urandom(32)
+    # Shared HMAC secret for session tokens (APP_SESSION_SECRET; random for local dev)
+    app_secret = load_app_secret()
     rtmt.app_secret = app_secret
-    rtmt.temperature = model_cfg.get("temperature", 0.6)
-    rtmt.max_tokens = model_cfg.get("max_response_output_tokens", 4096)
+    configure_realtime_model(rtmt, model_cfg)
     rtmt.system_message = prompt_loader.get_system_prompt()
 
     attach_tools_rtmt(

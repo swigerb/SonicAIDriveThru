@@ -79,7 +79,7 @@ _VERBOSE_RESULT_TRUNCATE = _config.get("logging", {}).get("verbose_result_trunca
 # High-frequency server message types that never need middleware modification.
 # Includes both GA (v1) and legacy (2024-10-01-preview) event names.
 _PASSTHROUGH_SERVER_TYPES = frozenset({
-    # GA event names (gpt-realtime-1.5 via /openai/v1/realtime)
+    # GA event names (gpt-realtime-2.1 via /openai/v1/realtime)
     "response.output_audio.delta",
     "response.output_audio.done",
     "response.output_audio_transcript.delta",
@@ -141,6 +141,10 @@ MARKER_RESPONSE_CANCEL = '"response.cancel"'
 MARKER_VERBOSE_LOGGING = '"extension.set_verbose_logging"'
 MARKER_LOG_TO_FILE = '"extension.set_log_to_file"'
 MARKER_SET_VOICE = '"extension.set_voice"'
+MARKER_TRANSCRIPTION_COMPLETED = '"conversation.item.input_audio_transcription.completed"'
+MARKER_RESPONSE_CREATE = '"response.create"'
+MARKER_RESUME = '"extension.resume"'
+MARKER_END_SESSION = '"extension.end_session"'
 # Legacy markers for backward compatibility
 MARKER_AUDIO_DELTA_LEGACY = '"response.audio.delta"'
 MARKER_AUDIO_DONE_LEGACY = '"response.audio.done"'

@@ -101,7 +101,7 @@ az ad sp update --id $APP_ID --set appRoleAssignmentRequired=true
 > SP_OBJECT_ID=$(az ad sp show --id $APP_ID --query id -o tsv)
 >
 > # Get the user's object ID
-> USER_OBJECT_ID=$(az ad user show --id user@contoso.com --query id -o tsv)
+> USER_OBJECT_ID=$(az ad user show --id "<user-principal-name>" --query id -o tsv)
 >
 > # Assign the user (default app role — empty GUID)
 > az rest --method POST \

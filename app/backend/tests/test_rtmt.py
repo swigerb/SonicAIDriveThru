@@ -7,6 +7,7 @@ and error recovery — all with mocked external services (no real OpenAI/Azure c
 
 import asyncio
 import json
+import re
 import sys
 import time
 import unittest
@@ -16,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from aiohttp import web
+from azure.core.credentials import AzureKeyCredential
 
 from audio_pipeline import (
     _GA_TO_LEGACY_EVENTS,
@@ -925,7 +927,7 @@ class ExtensionSetVoiceTests(unittest.TestCase):
     def _make_rtmt(self):
         cred = MagicMock()
         cred.get_token.return_value = MagicMock(token="tok", expires_on=9999999999)
-        return RTMiddleTier("https://fake.openai.azure.com", "gpt-realtime-1.5", cred)
+        return RTMiddleTier("https://fake.openai.azure.com", "gpt-realtime-2.1", cred)
 
     def test_build_voice_update_is_ga_shaped(self):
         rtmt = self._make_rtmt()
@@ -942,6 +944,64 @@ class ExtensionSetVoiceTests(unittest.TestCase):
             session = json.loads(rtmt.build_voice_update(v))["session"]
             self.assertEqual(session["audio"]["output"]["voice"], v)
             self.assertNotIn("voice", session)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# GPT-REALTIME-2.1 GA SURFACE TESTS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Built-in voices accepted by session.audio.output.voice on gpt-realtime-2.1 --
+# probed live 2026-09-22; the service's own rejection message for fable/onyx/
+# nova lists exactly these ten.
+GA_REALTIME_VOICES = {"alloy", "ash", "ballad", "coral", "echo",
+                      "sage", "shimmer", "verse", "marin", "cedar"}
+
+
+class GARealtime21SurfaceTests(unittest.TestCase):
+    """gpt-realtime-2.1 adds optional reasoning-model session fields; nothing else moved."""
+
+    def _make_rtmt(self):
+        rtmt = RTMiddleTier("https://fake.openai.azure.com", "gpt-realtime-2.1",
+                            AzureKeyCredential("k"), voice_choice="shimmer")
+        rtmt.system_message = "sys"
+        return rtmt
+
+    def test_reasoning_model_fields_survive_ga_translation(self):
+        session = _to_ga_session({"reasoning": {"effort": "low"}, "parallel_tool_calls": False,
+                                  "temperature": 0.6})
+        self.assertEqual(session["reasoning"], {"effort": "low"})
+        self.assertIs(session["parallel_tool_calls"], False)
+        self.assertNotIn("temperature", session)
+
+    def test_reasoning_fields_are_not_sent_by_default(self):
+        # A session.update the model rejects drops the tools with it, so the
+        # default payload must stay valid on non-reasoning models (1.5) too.
+        rtmt = self._make_rtmt()
+        payloads = [json.loads(rtmt.build_bootstrap_session_update())["session"],
+                    rtmt._build_session({}),
+                    json.loads(rtmt.build_voice_update("marin"))["session"]]
+        for session in payloads:
+            self.assertNotIn("reasoning", session)
+            self.assertNotIn("parallel_tool_calls", session)
+
+    def test_voice_picker_offers_exactly_the_ga_voices(self):
+        voices = (Path(__file__).resolve().parents[2] / "frontend" / "src" / "lib"
+                  / "voices.ts").read_text(encoding="utf-8")
+        offered = re.findall(r'\{ value: "([a-z]+)"', voices)
+        self.assertEqual(set(offered), GA_REALTIME_VOICES)
+        self.assertEqual(len(offered), len(GA_REALTIME_VOICES), "duplicate voice in the picker")
+
+    def test_default_voice_is_a_ga_voice(self):
+        from app import get_config
+        self.assertIn(get_config()["model"]["default_voice"], GA_REALTIME_VOICES)
+
+    def test_frontend_and_backend_default_voice_agree(self):
+        from app import get_config
+        voices = (Path(__file__).resolve().parents[2] / "frontend" / "src" / "lib"
+                  / "voices.ts").read_text(encoding="utf-8")
+        frontend_default = re.search(r'DEFAULT_VOICE = "([a-z]+)"', voices).group(1)
+        self.assertEqual(frontend_default, "marin")
+        self.assertEqual(get_config()["model"]["default_voice"], frontend_default)
 
 
 if __name__ == "__main__":

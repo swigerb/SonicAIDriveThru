@@ -101,3 +101,76 @@ Detailed technical learnings from demo readiness, debugging, and prompt external
 - **Search index ingestion architecture**: Three notebooks in `scripts/`: (1) `sonic_menu_ingestion_search.ipynb` — reads from `sonic-menu-items.json` (1334 products, nested Sonic API format), the original production ingestion. (2) `menu_ingestion_search_json.ipynb` — reads from `menuItems.json` (flat 50-item format), simpler and correct for current use. (3) `menu_ingestion_search_pdf.ipynb` — PDF-based ingestion (not relevant). The JSON notebook is the one to use going forward — it reads `menuItems.json`, generates 3072-dim embeddings, and uploads in batches of 15 to the index named in `AZURE_SEARCH_INDEX` env var. The `structured_menu_items` file at repo root is a reference snapshot — the notebook reads directly from `menuItems.json`, not from it.
 - **rtmt.py Code Organization (Phase 3)**: Broke 766-line god file into 3 focused modules: `session_manager.py` (154 lines — SessionManager class for session lifecycle, greeting state, ContextMonitor for token tracking), `audio_pipeline.py` (199 lines — EchoSuppressor class, verbose logging infrastructure, audio constants/markers), and `rtmt.py` (586 lines — thin orchestrator, RTMiddleTier, WebSocket routing, message processing). Public API unchanged — `from rtmt import RTMiddleTier, ToolResult, ToolResultDirection, Tool, RTToolCall` still works. No circular imports. EchoSuppressor encapsulates the ai_speaking/cooldown_end/greeting_in_progress state machine with clean methods (should_suppress_audio, on_audio_delta, on_audio_done, on_speech_started, on_barge_in). SessionManager owns _session_map, _sent_greeting, and _context_monitors dicts — single point of cleanup in cleanup_session().
 - **Context Window Monitoring**: Added ContextMonitor class in session_manager.py. Tracks estimated token usage per session using ~4 chars/token heuristic. Logs WARNING at 80% and CRITICAL at 95% of configurable max_tokens (128K default). Tracks: system message, tool schemas, tool call args/results, AI response content, user transcriptions, greeting text. Config in config.yaml under `context:` key. No truncation — monitoring only. Warns once per threshold per session (no spam).
+
+- **WS transport: "Received frame with non-zero reserved bits" root-caused and fixed (2026-09-22, `fix/ws-transport`)**
+  - **Which path fired:** the aiohttp reader check `elif rsv1:`, i.e. RSV1 on what it thinks is a continuation frame. In 3.14.2/3.14.3 (`_websocket/reader_py.py` ~402), control frames update `_compressed` but not `_frame_fin`. On a fresh socket whose *first client frame is a PONG*, `_compressed` gets pinned to FALSE, so the next deflated data frame is rejected with 1002.
+    - Upstream: aio-libs/aiohttp#13274, introduced by #12988, fixed by #13302. The fix is merged but **unreleased**; 3.14.3 is the latest on GitHub and on the proxy feed.
+  - **Reproduction:**
+    - The real `RTMiddleTier` plus FakeGARealtime, with a client that offers deflate, idles past one heartbeat (so it autopongs), then sends `session.update` → close 1002. The same thing happens in real Chromium (Edge 153).
+    - No failure with `compress=False`, or when the client sends data before the first heartbeat.
+    - Production matches: socket 09ccb306 sat ~40s after the idle-close auto-reconnect, so its first client frames were PONGs, and the mic press then died.
+  - **Fix:**
+    - `web.WebSocketResponse(..., compress=_WS_COMPRESS)`, with `connection.ws_compression: false` in config.yaml.
+    - Upstream `ws_connect(..., compress=0)`. Azure OpenAI already declines deflate, so this just makes it explicit.
+  - **Trade-off measured:** real aiohttp on loopback, 60s of 24kHz PCM16 as base64 JSON at 10 msg/s.
+    - Deflate saves ~33% of bytes (63→42 KiB/s up, 86→58 KiB/s down).
+    - It costs ~5× the socket CPU (62ms → ~300ms per minute) and adds ~0.7ms p50 / 1.9ms p95 echo latency.
+    - Not worth it for the demo.
+  - **Idle close:** `session_manager.IDLE_CLOSE_CODE = 4000`, `IDLE_CLOSE_REASON = "idle_timeout"`. It is application-range, so the browser can tell it apart from 1002/1006/1011.
+  - **Tests:** `tests/test_ws_transport.py` (5), all mutation-checked. Reverting `compress` reproduces the production 1002 in the test.
+  - **Heads-up:** gunicorn runs `--workers 2` with per-process `order_state` and `app_secret`. That matters for order resume (Part B plan) and for `require_session_token`.
+### 2026-09-22 — Realtime model config plumbing (with Unity)
+- `configure_realtime_model(rtmt, model_cfg, environ)` in `rtmt.py` is now the single place that applies the `config.yaml` `model:` settings. app.py and `scripts/smoke_realtime.py` both call it, so the smoke check sends exactly what the app sends. It applies:
+  - temperature and max_tokens;
+  - `transcription_model`, with env `AZURE_OPENAI_REALTIME_TRANSCRIPTION_MODEL`;
+  - `reasoning_effort`, with env `AZURE_OPENAI_REALTIME_REASONING_EFFORT`;
+  - `parallel_tool_calls`.
+- Env precedence: an empty env value falls back to `config.yaml`, and `off` disables. Watch out: YAML parses an unquoted `off` as `False`, and `normalize_reasoning_effort` treats that as disabled.
+- The `infra/main.bicep` container env gains optional `AZURE_OPENAI_REALTIME_REASONING_EFFORT` / `AZURE_OPENAI_REALTIME_TRANSCRIPTION_MODEL`:
+  - they are added via `union()` only when set, so the default deploy is unchanged;
+  - `main.parameters.json` maps them from azd env;
+  - the voice default is now `${AZURE_OPENAI_REALTIME_VOICE_CHOICE=marin}`.
+- **Gotcha:** an azd env value beats the parameters-file default. The `sonic-demo` env had `shimmer` pinned and was updated with `azd env set AZURE_OPENAI_REALTIME_VOICE_CHOICE marin`. That file is gitignored, so other existing environments need the same command.
+- azure.yaml has a new **non-fatal** `postdeploy` hook, `scripts/smoke_realtime.ps1` / `.sh`:
+  - `continueOnError: true` and `interactive: false`;
+  - the wrapper always exits 0 and prints a loud warning on failure or when the check could not run;
+  - it skips if there is no venv, or if `SONIC_SKIP_REALTIME_SMOKE=true`.
+
+## 2026-09-22 — feat/voice-reasoning: explicit reasoning_model switch
+
+- Added `model.reasoning_model` (`auto` | `true` | `false`), overridable by env `AZURE_OPENAI_REALTIME_REASONING_MODEL`. It is plumbed through `main.bicep`, `main.parameters.json` and the `azure.yaml` pipeline vars.
+  - Precedence: runtime rejection > explicit switch > deployment-name check (the safe default for 1.5 and older).
+- The fallback in `rtmt.py` was audited and is correct:
+  - Every `session.update` has an `event_id`.
+  - A correlated error triggers exactly one minimal resend (type, instructions, tools, tool_choice).
+  - There is no loop, unrelated errors are ignored, and the error reaches the browser only if the fallback is also rejected.
+  - 1.5's reasoning rejection has no `event_id`, so the in-flight heuristic is required.
+- `azure.yaml` adds a non-fatal postdeploy smoke hook. The service is still named `backend`.
+- `config.yaml`: `reasoning_effort: low` is now validated by the benchmark. `parallel_tool_calls: null` is kept.
+
+## 2026-09-22 — feat/order-resume Stage 1 (backend)
+
+- `session_manager.py`: attached/detached/ended lifecycle with an injectable clock.
+  - Grace hold capped by the remaining idle budget; idle close ends the session before closing 4000.
+  - LRU cap on detached sessions and a 15s sweep. The concurrency cap counts attached sessions only.
+  - The mic append stream is no longer guest activity; speech_started and transcription are.
+- Resume credential: `token_urlsafe(32)`. Only its sha256 is stored, the compare is constant-time, and it is single-use and rotated on every success. Logs show sha256[:8] only.
+- `rtmt.py` first-frame handshake:
+  - Metadata is deferred until the decision.
+  - A late resume gets `not_first_frame` and a re-announce.
+  - A stale socket is closed 4002. `extension.end_session` closes 1000.
+  - The handler's `finally` detaches, which fixes a mapping leak when the upstream connect fails.
+- Rehydration:
+  - A transcript ring buffer per session (`history_turns` / `history_chars`).
+  - One system `conversation.item.create` (order JSON plus recent turns) after the bootstrap session.update, with the greeting suppressed.
+  - A never-greeted resume greets normally.
+- Nudge: `resume.nudge_after_seconds` (30), once, gated on `session_configured`. Cancelled by speech_started, a transcript, or a guest `response.create`. It is not guest activity.
+- `app.py load_app_secret`: `APP_SESSION_SECRET` env, falling back to urandom for local dev.
+
+## 2026-09-23 — feat/round3
+
+- Reviewed R1's backend integration with the order-resume session layer:
+  - Retries go straight to the upstream socket, so `touch()`/idle clock is never refreshed by a retry (not guest activity).
+  - The 30 s nudge checks `RateLimitRecovery.busy` before firing; the handler's `finally` detach cancels a pending retry, so nothing fires into a held session.
+  - The session.update fallback keeps its correlated-error path; `scripts/benchmark_reasoning.py` unaffected.
+- `resilience.rate_limit` block added to `config.yaml`; env override `RATE_LIMIT_RECOVERY_ENABLED` (empty keeps config).
