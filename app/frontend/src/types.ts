@@ -90,6 +90,35 @@ export type ExtensionSessionMetadata = {
     sessionToken: string;
     roundTripIndex: number;
     roundTripToken: string;
+    /** Single-use resume credential for this tab; absent when resume is disabled server-side. */
+    resumeId?: string;
+};
+
+// Same shape the ticket renders from JSON.parse(tool_result).
+export type OrderSummaryWire = {
+    items: { item: string; size: string; quantity: number; price: number; display: string }[];
+    total: number;
+    tax: number;
+    finalTotal: number;
+};
+
+// Reply to extension.resume: the dropped session (and its order) is back.
+export type ExtensionSessionResumed = {
+    type: "extension.session_resumed";
+    order_summary: OrderSummaryWire;
+    session_token: string;
+    round_trip_index: number;
+    round_trip_token: string;
+    /** Rotated credential; the one just presented is spent. */
+    resume_id: string;
+};
+
+export type ResumeRejectReason = "unknown" | "expired" | "malformed" | "disabled" | "not_first_frame";
+
+// Reply to extension.resume: a fresh session follows (extension.session_metadata).
+export type ExtensionResumeRejected = {
+    type: "extension.resume_rejected";
+    reason: ResumeRejectReason | string;
 };
 
 export type ExtensionRoundTripToken = {

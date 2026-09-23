@@ -1,7 +1,7 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import useRealTime, { WS_CLOSE_IDLE_TIMEOUT } from "../useRealtime";
+import useRealTime, { RESUME_STORAGE_KEY, WS_CLOSE_IDLE_TIMEOUT, WS_CLOSE_SUPERSEDED } from "../useRealtime";
 
 const ws = vi.hoisted(() => ({
     calls: [] as Array<{ url: string | null; options: any; connect: boolean }>,
@@ -19,6 +19,10 @@ vi.mock("react-use-websocket", () => ({
 
 const last = () => ws.calls[ws.calls.length - 1];
 const closeEvent = (code: number, reason = "") => ({ code, reason, wasClean: true }) as CloseEvent;
+const sent = () => ws.send.mock.calls.map(([msg]) => msg);
+const sentTypes = () => sent().map(msg => msg.type);
+const serverSays = (message: object) => last().options.onMessage({ data: JSON.stringify(message) } as MessageEvent);
+const storedId = () => sessionStorage.getItem(RESUME_STORAGE_KEY);
 
 let tokenCounter = 0;
 
@@ -26,6 +30,7 @@ beforeEach(() => {
     ws.calls = [];
     ws.readyState = 1;
     ws.send.mockReset();
+    sessionStorage.clear();
     tokenCounter = 0;
     vi.stubGlobal(
         "fetch",
@@ -33,11 +38,14 @@ beforeEach(() => {
     );
 });
 
-async function renderConnected(onConnectionLost = vi.fn()) {
-    const hook = renderHook(() => useRealTime({ enableInputAudioTranscription: true, onConnectionLost }));
+async function renderConnected(extra: Record<string, any> = {}) {
+    const onConnectionLost = extra.onConnectionLost ?? vi.fn();
+    const hook = renderHook(() => useRealTime({ enableInputAudioTranscription: true, ...extra, onConnectionLost }));
     await waitFor(() => expect(last().url).toBe("/realtime?token=tok1"));
     return { ...hook, onConnectionLost };
 }
+
+const open = () => act(() => last().options.onOpen(new Event("open")));
 
 describe("useRealTime connection lifecycle", () => {
     it("does not open a socket until the session token fetch settles", async () => {
@@ -53,7 +61,7 @@ describe("useRealTime connection lifecycle", () => {
         act(() => last().options.onClose(closeEvent(WS_CLOSE_IDLE_TIMEOUT, "idle_timeout")));
 
         expect(last().connect).toBe(false);
-        expect(onConnectionLost).toHaveBeenCalledWith({ code: 4000, reason: "idle_timeout", idle: true });
+        expect(onConnectionLost).toHaveBeenCalledWith({ code: 4000, reason: "idle_timeout", idle: true, kind: "idle", resuming: false });
     });
 
     it("reconnects with a fresh token only when the guest asks to", async () => {
@@ -77,13 +85,15 @@ describe("useRealTime connection lifecycle", () => {
         act(() => last().options.onClose(closeEvent(1006)));
 
         expect(last().connect).toBe(true);
-        expect(onConnectionLost).toHaveBeenCalledWith({ code: 1006, reason: "", idle: false });
+        expect(onConnectionLost).toHaveBeenCalledWith({ code: 1006, reason: "", idle: false, kind: "transport", resuming: false });
     });
 
     it("stops connecting once retries are exhausted so a tap can restart it", async () => {
-        await renderConnected();
+        const onReconnectGaveUp = vi.fn();
+        await renderConnected({ onReconnectGaveUp });
         act(() => last().options.onReconnectStop(10));
         expect(last().connect).toBe(false);
+        expect(onReconnectGaveUp).toHaveBeenCalledTimes(1);
     });
 
     it("never queues realtime audio or cancels for a future socket", async () => {
@@ -92,12 +102,154 @@ describe("useRealTime connection lifecycle", () => {
         result.current.inputAudioBufferClear();
         result.current.cancelResponse();
         result.current.startSession();
+        expect(ws.send).not.toHaveBeenCalled();
 
-        const byType = (t: string) => ws.send.mock.calls.find(([msg]) => msg.type === t)!;
-        expect(byType("input_audio_buffer.append")[1]).toBe(false);
-        expect(byType("input_audio_buffer.clear")[1]).toBe(false);
-        expect(byType("response.cancel")[1]).toBe(false);
+        open();
         // session.update is the one message that must survive into the next socket.
-        expect(byType("session.update")[1]).not.toBe(false);
+        expect(sentTypes()).toEqual(["session.update"]);
+    });
+
+    it("keeps the 4001 / expired token-refresh path", async () => {
+        await renderConnected();
+        expect(last().options.shouldReconnect(closeEvent(4001, "token expired"))).toBe(true);
+        act(() => last().options.onClose(closeEvent(4001, "token expired")));
+        await waitFor(() => expect(last().url).toBe("/realtime?token=tok2"));
+        expect(last().connect).toBe(true);
+    });
+});
+
+describe("useRealTime order resume", () => {
+    it("sends extension.resume as the literal first frame, ahead of anything queued", async () => {
+        sessionStorage.setItem(RESUME_STORAGE_KEY, "RID-1");
+        const { result } = await renderConnected();
+        result.current.startSession();
+        result.current.sendVoiceChoice("cedar");
+        expect(ws.send).not.toHaveBeenCalled();
+
+        open();
+
+        expect(sent()[0]).toEqual({ type: "extension.resume", resume_id: "RID-1" });
+        expect(sentTypes()).toEqual(["extension.resume", "session.update", "extension.set_voice"]);
+    });
+
+    it("never hands a frame to react-use-websocket's own queue", async () => {
+        sessionStorage.setItem(RESUME_STORAGE_KEY, "RID-1");
+        const { result } = await renderConnected();
+        result.current.startSession();
+        result.current.sendVerboseLogging(true);
+        open();
+        result.current.sendLogToFile(true);
+        result.current.addUserAudio("AAAA");
+        act(() => serverSays({ type: "response.created" }));
+
+        expect(ws.send.mock.calls.length).toBe(6);
+        expect(ws.send.mock.calls.every(([, keep]) => keep === false)).toBe(true);
+    });
+
+    it("sends no resume frame when the tab holds no id", async () => {
+        const { result } = await renderConnected();
+        result.current.startSession();
+        open();
+        expect(sentTypes()).toEqual(["session.update"]);
+    });
+
+    it("stores resumeId from session_metadata and presents it on the next open", async () => {
+        const onReceivedSessionMetadata = vi.fn();
+        await renderConnected({ onReceivedSessionMetadata });
+        open();
+        act(() => serverSays({ type: "extension.session_metadata", sessionToken: "S", roundTripIndex: 0, roundTripToken: "T", resumeId: "RID-A" }));
+        expect(storedId()).toBe("RID-A");
+        expect(onReceivedSessionMetadata).toHaveBeenCalledTimes(1);
+
+        act(() => last().options.onClose(closeEvent(1011)));
+        ws.send.mockReset();
+        open();
+        expect(sent()[0]).toEqual({ type: "extension.resume", resume_id: "RID-A" });
+    });
+
+    it("session_resumed stores the rotated id and hands the order to the app", async () => {
+        sessionStorage.setItem(RESUME_STORAGE_KEY, "RID-OLD");
+        const onReceivedSessionResumed = vi.fn();
+        await renderConnected({ onReceivedSessionResumed });
+        open();
+        const resumed = {
+            type: "extension.session_resumed",
+            order_summary: { items: [{ item: "Tots", size: "Large", quantity: 1, price: 2.99, display: "Large Tots" }], total: 2.99, tax: 0.24, finalTotal: 3.23 },
+            session_token: "S",
+            round_trip_index: 2,
+            round_trip_token: "T",
+            resume_id: "RID-NEW"
+        };
+        act(() => serverSays(resumed));
+        expect(storedId()).toBe("RID-NEW");
+        expect(onReceivedSessionResumed).toHaveBeenCalledWith(resumed);
+    });
+
+    it("resume_rejected clears the stored id; the following metadata stores the new one", async () => {
+        sessionStorage.setItem(RESUME_STORAGE_KEY, "RID-OLD");
+        const onReceivedResumeRejected = vi.fn();
+        await renderConnected({ onReceivedResumeRejected });
+        open();
+        act(() => serverSays({ type: "extension.resume_rejected", reason: "expired" }));
+        expect(storedId()).toBeNull();
+        expect(onReceivedResumeRejected).toHaveBeenCalledWith({ type: "extension.resume_rejected", reason: "expired" });
+
+        act(() => serverSays({ type: "extension.session_metadata", sessionToken: "S2", roundTripIndex: 0, roundTripToken: "T", resumeId: "RID-FRESH" }));
+        expect(storedId()).toBe("RID-FRESH");
+    });
+
+    it.each([1001, 1002, 1006, 1011])("transport close %i reconnects and keeps the id to resume", async code => {
+        sessionStorage.setItem(RESUME_STORAGE_KEY, "RID-1");
+        const { onConnectionLost } = await renderConnected();
+        open();
+        expect(last().options.shouldReconnect(closeEvent(code))).toBe(true);
+        act(() => last().options.onClose(closeEvent(code)));
+        expect(last().connect).toBe(true);
+        expect(storedId()).toBe("RID-1");
+        expect(onConnectionLost).toHaveBeenCalledWith(expect.objectContaining({ kind: "transport", resuming: true }));
+    });
+
+    it.each([
+        ["idle 4000", WS_CLOSE_IDLE_TIMEOUT, "idle_timeout", "idle", null],
+        ["session_ended 1000", 1000, "session_ended", "ended", null],
+        ["superseded 4002", WS_CLOSE_SUPERSEDED, "superseded", "superseded", "RID-1"]
+    ])("%s: no reconnect; id afterwards = %s", async (_label, code, reason, kind, idAfter) => {
+        sessionStorage.setItem(RESUME_STORAGE_KEY, "RID-1");
+        const { onConnectionLost } = await renderConnected();
+        open();
+        expect(last().options.shouldReconnect(closeEvent(code as number, reason as string))).toBe(false);
+        act(() => last().options.onClose(closeEvent(code as number, reason as string)));
+        expect(last().connect).toBe(false);
+        expect(storedId()).toBe(idAfter);
+        expect(onConnectionLost).toHaveBeenCalledWith(expect.objectContaining({ kind, resuming: false }));
+    });
+
+    it("a plain 1000 close (not session_ended) still reconnects", async () => {
+        await renderConnected();
+        expect(last().options.shouldReconnect(closeEvent(1000, ""))).toBe(true);
+    });
+
+    it("frames queued for an ended session never reach the next one", async () => {
+        const { result } = await renderConnected();
+        act(() => last().options.onClose(closeEvent(WS_CLOSE_IDLE_TIMEOUT, "idle_timeout")));
+        result.current.sendVoiceChoice("cedar");
+        act(() => last().options.onClose(closeEvent(1000, "session_ended")));
+        open();
+        expect(ws.send).not.toHaveBeenCalled();
+    });
+
+    it("endSession sends extension.end_session and forgets the id", async () => {
+        sessionStorage.setItem(RESUME_STORAGE_KEY, "RID-1");
+        const { result } = await renderConnected();
+        open();
+        ws.send.mockReset();
+        result.current.endSession();
+        expect(sent()).toEqual([{ type: "extension.end_session" }]);
+        expect(storedId()).toBeNull();
+
+        act(() => last().options.onClose(closeEvent(1000, "session_ended")));
+        ws.send.mockReset();
+        open();
+        expect(sentTypes()).not.toContain("extension.resume");
     });
 });
