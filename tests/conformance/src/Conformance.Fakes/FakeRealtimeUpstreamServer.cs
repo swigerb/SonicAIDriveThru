@@ -131,7 +131,7 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
             case "response.create":
                 if (Script.AutoRespond)
                 {
-                    await RespondAsync(socket, ct).ConfigureAwait(false);
+                    await RespondAsync(socket, state, ct).ConfigureAwait(false);
                 }
                 break;
         }
@@ -185,7 +185,7 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
         await WebSocketJson.SendAsync(socket, updated, ct).ConfigureAwait(false);
     }
 
-    private async Task RespondAsync(WebSocket socket, CancellationToken ct)
+    private async Task RespondAsync(WebSocket socket, RealtimeSessionState state, CancellationToken ct)
     {
         var script = Script.QueuedResponses.Count > 0 ? Script.QueuedResponses.Dequeue() : ResponseScript.Default;
         var responseId = $"resp_{Guid.NewGuid():N}";
@@ -207,6 +207,11 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
                         ["response_id"] = responseId,
                         ["delta"] = audio.Base64Delta,
                     }, ct).ConfigureAwait(false);
+                    // GA rejects session.update's `voice` field once any assistant audio has been
+                    // sent on the session (cannot_update_voice) — this is the one and only place
+                    // the fake actually emits audio, so it is the one and only place that must
+                    // flip the flag GaSessionValidator checks.
+                    state.AssistantAudioSeen = true;
                     break;
 
                 case FunctionCallEvent call:

@@ -98,4 +98,55 @@ public sealed class FakeRealtimeScriptingTests
 
         await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
     }
+
+    /// <summary>
+    /// Self-test for the fake's own GA fidelity (item 4 of PR #22's review): `cannot_update_voice`
+    /// is only real if something actually sets <c>RealtimeSessionState.AssistantAudioSeen</c> once
+    /// audio has gone out — prove the flag flips by driving a real response through the default
+    /// script (which emits an audio delta) rather than setting it directly.
+    /// </summary>
+    [Fact]
+    public async Task Voice_cannot_be_changed_after_assistant_audio_has_been_sent()
+    {
+        await using var fake = new FakeRealtimeUpstreamServer();
+        await fake.StartAsync(TestContext.Current.CancellationToken);
+
+        using var socket = new ClientWebSocket();
+        var wsUri = new Uri($"ws://{fake.BaseUri.Host}:{fake.BaseUri.Port}/openai/v1/realtime?model=gpt-realtime-test");
+        await socket.ConnectAsync(wsUri, TestContext.Current.CancellationToken);
+        Assert.NotNull(await WebSocketJson.ReceiveJsonAsync(socket, TestContext.Current.CancellationToken)); // session.created
+
+        // Setting a voice before any audio has been sent must be accepted.
+        await WebSocketJson.SendAsync(socket, new JsonObject
+        {
+            ["type"] = "session.update",
+            ["event_id"] = "evt_voice_1",
+            ["session"] = new JsonObject { ["audio"] = new JsonObject { ["output"] = new JsonObject { ["voice"] = "alloy" } } },
+        }, TestContext.Current.CancellationToken);
+        var accepted = await WebSocketJson.ReceiveJsonAsync(socket, TestContext.Current.CancellationToken);
+        Assert.NotNull(accepted);
+        Assert.Equal("session.updated", accepted!.Value.GetProperty("type").GetString());
+
+        // response.create with no queued script uses ResponseScript.Default, which emits one
+        // audio delta then response.done — this is what must flip AssistantAudioSeen.
+        await WebSocketJson.SendAsync(socket, new JsonObject { ["type"] = "response.create" }, TestContext.Current.CancellationToken);
+        Assert.NotNull(await WebSocketJson.ReceiveJsonAsync(socket, TestContext.Current.CancellationToken)); // response.created
+        Assert.NotNull(await WebSocketJson.ReceiveJsonAsync(socket, TestContext.Current.CancellationToken)); // response.output_audio.delta
+        Assert.NotNull(await WebSocketJson.ReceiveJsonAsync(socket, TestContext.Current.CancellationToken)); // response.done
+
+        // Now changing the voice must be rejected.
+        await WebSocketJson.SendAsync(socket, new JsonObject
+        {
+            ["type"] = "session.update",
+            ["event_id"] = "evt_voice_2",
+            ["session"] = new JsonObject { ["audio"] = new JsonObject { ["output"] = new JsonObject { ["voice"] = "verse" } } },
+        }, TestContext.Current.CancellationToken);
+        var rejected = await WebSocketJson.ReceiveJsonAsync(socket, TestContext.Current.CancellationToken);
+        Assert.NotNull(rejected);
+        Assert.Equal("error", rejected!.Value.GetProperty("type").GetString());
+        Assert.Equal("cannot_update_voice", rejected.Value.GetProperty("error").GetProperty("code").GetString());
+        Assert.Equal("evt_voice_2", rejected.Value.GetProperty("error").GetProperty("event_id").GetString());
+
+        await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
+    }
 }
