@@ -511,6 +511,25 @@ class ReasoningAndTranscriptionConfigTests(unittest.TestCase):
                      "gpt-realtime-mini-2025-10-06", "gpt-4o-realtime-preview"):
             self.assertFalse(deployment_supports_reasoning(name), name)
 
+    def test_data_zone_deployment_name_is_a_reasoning_deployment(self):
+        """The DataZoneStandard deployment (`gpt-realtime-2.1-dz`, selected with
+        `azd env set AZURE_OPENAI_REALTIME_DEPLOYMENT gpt-realtime-2.1-dz`) is the
+        same 2.1 model: `auto` must still send `reasoning`, while a data-zone 1.5
+        rollback must not."""
+        from rtmt import configure_realtime_model, deployment_supports_reasoning
+        for name in ("gpt-realtime-2.1-dz", "GPT-Realtime-2.1-DZ", "gpt-realtime-2-dz"):
+            self.assertTrue(deployment_supports_reasoning(name), name)
+        for name in ("gpt-realtime-1.5-dz", "gpt-realtime-mini-dz"):
+            self.assertFalse(deployment_supports_reasoning(name), name)
+        rtmt = configure_realtime_model(
+            self._rtmt("gpt-realtime-2.1-dz"),
+            {"reasoning_effort": "low", "parallel_tool_calls": False, "reasoning_model": "auto"}, environ={})
+        session = self._bootstrap(rtmt)
+        self.assertTrue(rtmt.reasoning_enabled())
+        self.assertEqual(session["reasoning"], {"effort": "low"})
+        self.assertIs(session["parallel_tool_calls"], False)
+        self.assertEqual(session["tools"][0]["name"], "update_order")
+
     def test_client_cannot_inject_reasoning(self):
         rtmt = self._rtmt("gpt-realtime-1.5")
         session = rtmt._build_session({"reasoning": {"effort": "high"}, "parallel_tool_calls": True})

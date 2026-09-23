@@ -30,6 +30,14 @@ If you've already run `azd up` and want to first preview the voice with the deve
 (`gpt-realtime-1.5`, `gpt-realtime`, `gpt-realtime-mini`, `gpt-4o-*` are treated as non-reasoning). If the service still
 rejects the session, the backend resends a minimal update (instructions + tools only), so tools always register.
 
+The deployment name is configuration, not code. `infra/main.bicep` creates `gpt-realtime-2.1` (GlobalStandard); to
+run on another deployment of the same model, such as a DataZoneStandard `gpt-realtime-2.1-dz` for data-residency
+requirements, point the app at it with `AZURE_OPENAI_REALTIME_DEPLOYMENT` (the `azd env set` flow in the
+[existing services guide](./existing_services.md), or `app/backend/.env` locally). With `reasoning_model: auto`,
+any name outside the non-reasoning list above, including `gpt-realtime-2.1-dz`, is treated as a reasoning
+deployment, so it gets the same `reasoning` settings as `gpt-realtime-2.1`; `gpt-realtime-1.5-dz` still does not.
+Check it with `python scripts/smoke_realtime.py --deployment gpt-realtime-2.1-dz`.
+
 Probed on `gpt-realtime-2.1` and `gpt-realtime-1.5`:
 
 - 2.1 accepts `none`, `minimal`, `low`, `medium`, `high` and `xhigh`. 1.5 rejects `reasoning` at every level. That
