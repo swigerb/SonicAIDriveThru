@@ -16,13 +16,16 @@ export class Recorder {
     // that a user speaking clearly at drive-thru distance does.
     private static readonly BARGE_IN_THRESHOLD = 0.15;
     private static readonly BARGE_IN_CHECK_MS = 100;
+    // A suspended AudioContext only resumes after a user gesture; don't hang on it.
+    private static readonly RESUME_TIMEOUT_MS = 1500;
 
     public constructor(onDataAvailable: (buffer: Iterable<number>) => void, onBargeIn?: () => void) {
         this.onDataAvailable = onDataAvailable;
         this.onBargeIn = onBargeIn ?? null;
     }
 
-    async start(stream: MediaStream) {
+    /** Resolves true when capture is running; false (mic released) otherwise. */
+    async start(stream: MediaStream): Promise<boolean> {
         try {
             // Reuse existing AudioContext instead of recreating (expensive operation)
             if (!this.audioContext || this.audioContext.state === "closed") {
@@ -31,7 +34,13 @@ export class Recorder {
             }
 
             if (this.audioContext.state === "suspended") {
-                await this.audioContext.resume();
+                await Promise.race([
+                    this.audioContext.resume(),
+                    new Promise(resolve => setTimeout(resolve, Recorder.RESUME_TIMEOUT_MS))
+                ]);
+                if ((this.audioContext.state as AudioContextState) !== "running") {
+                    throw new Error("AudioContext is suspended until a user gesture");
+                }
             }
 
             if (!this.workletReady) {
@@ -64,8 +73,11 @@ export class Recorder {
             this.gainNode.connect(this.workletNode);
 
             this.startBargeInMonitor();
+            return true;
         } catch (error) {
             this.stop();
+            stream.getTracks().forEach(track => track.stop());
+            return false;
         }
     }
 

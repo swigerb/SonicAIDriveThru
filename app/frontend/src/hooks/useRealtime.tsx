@@ -181,6 +181,9 @@ export default function useRealTime({
     // ahead of extension.resume, which the server honours only as the first frame.
     const openRef = useRef(false);
     const pendingRef = useRef<object[]>([]);
+    // Set by endSession(): the coming 1000 session_ended close is ours, and frames
+    // sent after it (e.g. a fast tap) belong to the fresh session that replaces it.
+    const endingRef = useRef(false);
     const send = useCallback((msg: object, keep = true) => {
         if (openRef.current) {
             sendJsonMessageRef.current(msg, false);
@@ -282,7 +285,21 @@ export default function useRealTime({
         onClose: (event) => {
             openRef.current = false;
             const kind = classifyClose(event);
-            if (kind !== "transport") {
+            if (kind === "ended") {
+                // Explicit new order: open a fresh session straight away, as a page load would.
+                if (!endingRef.current) pendingRef.current = [];
+                endingRef.current = false;
+                resumeStore.clear();
+                setShouldConnect(false);
+                if (useDirectAoaiApi) {
+                    setShouldConnect(true);
+                } else {
+                    fetchSessionToken().then(token => {
+                        setSessionToken(token);
+                        setShouldConnect(true);
+                    });
+                }
+            } else if (kind !== "transport") {
                 // Final for this session: no background reconnect, and nothing
                 // queued for it may leak into the next one.
                 setShouldConnect(false);
@@ -386,11 +403,16 @@ export default function useRealTime({
     };
 
     // Explicit new order: the server deletes the order and closes 1000
-    // session_ended. The id is dropped either way so no later open resumes it.
+    // session_ended, after which a fresh socket opens. The id is dropped either
+    // way so no later open resumes it; frames sent from here on wait for the new socket.
     const endSession = () => {
-        if (!useDirectAoaiApi) send({ type: "extension.end_session" }, false);
         resumeStore.clear();
         pendingRef.current = [];
+        if (!useDirectAoaiApi && openRef.current) {
+            send({ type: "extension.end_session" }, false);
+            endingRef.current = true;
+            openRef.current = false;
+        }
     };
 
     return {

@@ -211,7 +211,6 @@ describe("useRealTime order resume", () => {
 
     it.each([
         ["idle 4000", WS_CLOSE_IDLE_TIMEOUT, "idle_timeout", "idle", null],
-        ["session_ended 1000", 1000, "session_ended", "ended", null],
         ["superseded 4002", WS_CLOSE_SUPERSEDED, "superseded", "superseded", "RID-1"]
     ])("%s: no reconnect; id afterwards = %s", async (_label, code, reason, kind, idAfter) => {
         sessionStorage.setItem(RESUME_STORAGE_KEY, "RID-1");
@@ -229,13 +228,56 @@ describe("useRealTime order resume", () => {
         expect(last().options.shouldReconnect(closeEvent(1000, ""))).toBe(true);
     });
 
-    it("frames queued for an ended session never reach the next one", async () => {
+    it("frames queued for a session that then ends (idle) never reach the next one", async () => {
         const { result } = await renderConnected();
+        open();
+        act(() => last().options.onClose(closeEvent(1006)));
+        result.current.sendVoiceChoice("cedar"); // queued while reconnecting
         act(() => last().options.onClose(closeEvent(WS_CLOSE_IDLE_TIMEOUT, "idle_timeout")));
-        result.current.sendVoiceChoice("cedar");
-        act(() => last().options.onClose(closeEvent(1000, "session_ended")));
+        ws.readyState = 3;
+        await act(async () => {
+            await result.current.reconnect();
+        });
+        ws.send.mockReset();
         open();
         expect(ws.send).not.toHaveBeenCalled();
+    });
+
+    it("session_ended 1000: no background reconnect, id cleared, a fresh socket opens with a new token", async () => {
+        sessionStorage.setItem(RESUME_STORAGE_KEY, "RID-1");
+        const { onConnectionLost } = await renderConnected();
+        open();
+        expect(last().options.shouldReconnect(closeEvent(1000, "session_ended"))).toBe(false);
+        act(() => last().options.onClose(closeEvent(1000, "session_ended")));
+        expect(storedId()).toBeNull();
+        expect(onConnectionLost).toHaveBeenCalledWith(expect.objectContaining({ kind: "ended", resuming: false }));
+        await waitFor(() => expect(last().url).toBe("/realtime?token=tok2"));
+        expect(last().connect).toBe(true);
+    });
+
+    it("a tap right after endSession is held for the fresh session, never sent to the ending one", async () => {
+        sessionStorage.setItem(RESUME_STORAGE_KEY, "RID-1");
+        const { result } = await renderConnected();
+        open();
+        ws.send.mockReset();
+        result.current.endSession();
+        result.current.startSession();
+        result.current.addUserAudio("AAAA");
+        expect(sentTypes()).toEqual(["extension.end_session"]);
+
+        act(() => last().options.onClose(closeEvent(1000, "session_ended")));
+        await waitFor(() => expect(last().url).toBe("/realtime?token=tok2"));
+        ws.send.mockReset();
+        open();
+        expect(sentTypes()).toEqual(["session.update"]);
+    });
+
+    it("endSession on a socket that is not open sends nothing but still forgets the id", async () => {
+        sessionStorage.setItem(RESUME_STORAGE_KEY, "RID-1");
+        const { result } = await renderConnected();
+        result.current.endSession();
+        expect(ws.send).not.toHaveBeenCalled();
+        expect(storedId()).toBeNull();
     });
 
     it("endSession sends extension.end_session and forgets the id", async () => {
