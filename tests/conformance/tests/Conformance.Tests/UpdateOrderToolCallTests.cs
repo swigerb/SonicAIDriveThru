@@ -51,7 +51,7 @@ public sealed class UpdateOrderToolCallTests(ConformanceFixture fixture)
         // rtmt.py never handles a raw client response.create specially — it passes straight
         // through to the upstream socket unchanged, exactly like a server-VAD-triggered turn
         // would, without needing to simulate real audio timing.
-        await browser.SendAsync(new System.Text.Json.Nodes.JsonObject { ["type"] = "response.create" }, ct);
+        await browser.SendResponseCreateAsync(ct);
 
         var functionCallOutput = await connection!.ReceivedFrames.WaitForAsync(
             f => f.Type == "conversation.item.create" &&
