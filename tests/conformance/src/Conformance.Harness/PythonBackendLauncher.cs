@@ -3,9 +3,23 @@ using System.Net.Http;
 
 namespace Conformance.Harness;
 
-/// <summary>Thrown by <see cref="BackendLauncherFactory"/> for CONFORMANCE_BACKEND=dotnet — a
-/// placeholder until the S2 .NET backend exists. Callers should skip, not fail, the test.</summary>
+/// <summary>Thrown by <see cref="BackendLauncherFactory"/> for CONFORMANCE_BACKEND=dotnet when
+/// <see cref="DotnetPlaceholderPolicy.ShouldSkip"/> allows skipping (PR #22 review item 15:
+/// CONFORMANCE_ALLOW_SKIP=1 and not CI) — a placeholder until the S2 .NET backend exists.
+/// <see cref="ConformanceFixture"/> catches only this specific type and turns it into a skip; any
+/// other exception type (see <see cref="ConformanceBackendUnavailableException"/>) fails the
+/// suite normally.</summary>
 public sealed class ConformanceBackendNotImplementedException(string message) : Exception(message);
+
+/// <summary>Thrown by <see cref="BackendLauncherFactory"/> for CONFORMANCE_BACKEND=dotnet when
+/// <see cref="DotnetPlaceholderPolicy.ShouldSkip"/> does not allow skipping (the default, and
+/// always in CI) -- deliberately a *different* type than
+/// <see cref="ConformanceBackendNotImplementedException"/> so <see cref="ConformanceFixture"/>'s
+/// narrow catch clause never accidentally swallows it: it propagates out of
+/// <c>InitializeAsync</c> and fails every test in the collection (PR #22 review item 15 --
+/// CI must never silently skip real backend coverage just because the S2 .NET backend doesn't
+/// exist yet).</summary>
+public sealed class ConformanceBackendUnavailableException(string message) : Exception(message);
 
 /// <summary>Starts the Python backend (app/backend, via .venv) on a free port, pointed at the fakes.</summary>
 public static class PythonBackendLauncher

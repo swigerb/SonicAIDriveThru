@@ -8,6 +8,21 @@ HTTP and WebSocket; never imports backend source.
 > This file documents the GA realtime protocol validation fidelity work (PR #22 review item 9)
 > and the neutral `BackendContract` (PR #22 review item 13).
 
+## Choosing a backend: `CONFORMANCE_BACKEND` / `CONFORMANCE_BACKEND_URL`
+
+`BackendLauncherFactory` (`src/Conformance.Harness/BackendLauncherFactory.cs`) picks the backend
+under test:
+
+- `CONFORMANCE_BACKEND_URL=<uri>` — talk to an already-running backend at a fixed URL; the harness
+  starts and cleans up nothing (external mode).
+- `CONFORMANCE_BACKEND=python` (the default) — launch `app/backend` via `.venv`.
+- `CONFORMANCE_BACKEND=dotnet` — the S2 .NET backend placeholder (issue #7; the backend doesn't
+  exist yet). **This FAILS the suite by default** (PR #22 review item 15) — CI must never silently
+  skip real backend coverage just because the S2 backend isn't built yet. Set
+  `CONFORMANCE_ALLOW_SKIP=1` on your own machine to turn that failure into a skip instead; this
+  opt-in is always ignored when `GITHUB_ACTIONS=true` or `CI=true` is set (see
+  `CiEnvironment.IsCi` / `DotnetPlaceholderPolicy`), so there is no way to make CI skip it.
+
 ## BackendContract — the neutral contract every backend under test must satisfy
 
 `Conformance.Harness.BackendContract` (`src/Conformance.Harness/BackendContract.cs`) is the

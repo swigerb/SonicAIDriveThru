@@ -10,7 +10,10 @@ internal sealed class ExternalBackend(Uri baseUri) : IBackendUnderTest
 
 /// <summary>
 /// Chooses which backend implementation the conformance suite talks to, per `CONFORMANCE_BACKEND`
-/// (python|dotnet) or an explicit `CONFORMANCE_BACKEND_URL` override.
+/// (python|dotnet) or an explicit `CONFORMANCE_BACKEND_URL` override. `dotnet` is an S2 placeholder
+/// (issue #7): it FAILS the suite by default (PR #22 review item 15) so CI can never silently skip
+/// real backend coverage, and only skips when a developer opts in locally via
+/// CONFORMANCE_ALLOW_SKIP=1 (see <see cref="DotnetPlaceholderPolicy"/> -- ignored in CI even then).
 /// </summary>
 public static class BackendLauncherFactory
 {
@@ -36,9 +39,8 @@ public static class BackendLauncherFactory
         return target switch
         {
             "python" => await PythonBackendLauncher.StartAsync(contract, options, cancellationToken).ConfigureAwait(false),
-            "dotnet" => throw new ConformanceBackendNotImplementedException(
-                "CONFORMANCE_BACKEND=dotnet is a placeholder until the S2 .NET backend exists (see issue #7). " +
-                "Skipping — set CONFORMANCE_BACKEND=python (default) or CONFORMANCE_BACKEND_URL to run this suite."),
+            "dotnet" => throw DotnetPlaceholderPolicy.BuildException(
+                Environment.GetEnvironmentVariable("CONFORMANCE_ALLOW_SKIP"), CiEnvironment.IsCi),
             _ => throw new InvalidOperationException(
                 $"Unknown CONFORMANCE_BACKEND '{target}' — expected 'python' or 'dotnet'."),
         };

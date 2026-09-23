@@ -22,10 +22,15 @@ public class ConformanceFixture : IAsyncLifetime
     public FakeRealtimeUpstreamServer Realtime { get; } = new();
     public FakeSearchServer Search { get; private set; } = null!;
 
-    /// <summary>Non-null once startup succeeds. Null (with <see cref="SkipReason"/> set) for CONFORMANCE_BACKEND=dotnet.</summary>
+    /// <summary>Non-null once startup succeeds. Null (with <see cref="SkipReason"/> set) only when
+    /// CONFORMANCE_BACKEND=dotnet and <see cref="DotnetPlaceholderPolicy.ShouldSkip"/> allows a skip
+    /// (PR #22 review item 15); otherwise a dotnet placeholder run fails <see cref="InitializeAsync"/>
+    /// outright instead of reaching this point.</summary>
     public IBackendUnderTest? Backend { get; private set; }
 
-    /// <summary>Set when the whole suite should skip (e.g. CONFORMANCE_BACKEND=dotnet, S2 placeholder). Tests must check this first.</summary>
+    /// <summary>Set only when CONFORMANCE_BACKEND=dotnet and CONFORMANCE_ALLOW_SKIP=1 outside CI
+    /// explicitly opted in (PR #22 review item 15, S2 placeholder for issue #7). Tests must check
+    /// this first.</summary>
     public string? SkipReason { get; private set; }
 
     public async ValueTask InitializeAsync()
