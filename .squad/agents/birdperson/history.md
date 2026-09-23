@@ -116,3 +116,13 @@
     - The resume id never appears in logs (caplog at DEBUG plus verbose logging).
   - Mutation checks: 51 mutations (steps 0–3), all killed. Three step-2 survivors were killed after adding tests.
   - Final: pytest 496 passed (baseline 442), ruff clean.
+
+- **Order resume — Stage 2 tests (2026-09-22)**
+  - vitest suites:
+    - `useRealtime.test.tsx`, 25 tests: resume first frame and never queued, id storage and rotation, each close code's reconnect/clear semantics, end_session plus the fresh socket.
+    - `App.resume.test.tsx`, 12 tests: resumed → ticket, mic restart, no reset; gesture fallback; rejected; idle; superseded; gave-up; New order; a fast tap after New order; a tap on a resumed session never waits for a greeting.
+    - `recorder.test.ts`, 3 tests, and the StatusMessage notices.
+  - Mutations: 16 on the hook, 31 on the app/recorder/notices/ending, and 8 on the e2e. All killed, except two equivalents (`shouldReconnect` duplicated by `setShouldConnect`; an `ended` branch unreachable after the refactor). Survivors A14, A18 and X3 were killed after adding tests; A18 also needed a fix.
+  - `scripts/e2e_order_resume.py`:
+    - Setup: headless Edge, built frontend, the real RTMiddleTier and real order tools, and a fake GA upstream. 42/42 checks in ~37s.
+    - Scenarios: 1011 drop → same ticket and sid, bootstrap → rehydration → no greeting, auto mic, one nudge after the shortened 4s. Also the gesture fallback, a tap while reconnecting, a reload, idle 4000, strict autoplay, and resume ids absent from URLs and logs.

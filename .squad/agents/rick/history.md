@@ -36,3 +36,12 @@
   - The wire protocol for Stage 2 is in `docs/order_resume.md`: `extension.resume` is the first frame; the replies are `extension.session_resumed` / `extension.resume_rejected` (always followed by metadata); `extension.end_session` closes with 1000; stale sockets get 4002; 4000 is final.
   - Metadata is now deferred until the resume decision (first frame, or 2s). Old frontends see it up to 2s later.
   - The known limit is that resume only works within one replica. A lost replica means a fresh order, which is acceptable for the demo.
+
+- **Order resume — Stage 2 review (2026-09-22)**
+  - Protocol is as documented, with two deliberate browser-side additions:
+    - After the 1000 `session_ended` close, the hook opens a FRESH socket, not a resume. Frames sent between `endSession()` and that close go to the new session.
+    - After a resume the browser re-sends its `session.update`, which restores its VAD 0.7/500. The backend's `greeting_sent` gate keeps it silent.
+  - The hook no longer uses react-use-websocket's keep=true queue at all, which removes the "queued ahead of resume" hazard structurally.
+  - Known limits:
+    - A reload restores the ticket but needs a tap for the mic, because a new document's AudioContext starts suspended.
+    - A duplicated tab shares the id; whichever resumes first wins, and the other gets 4002 or a rejection and starts fresh.
