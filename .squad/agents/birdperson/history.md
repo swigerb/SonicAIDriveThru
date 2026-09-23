@@ -142,3 +142,12 @@
 
 - Counts: backend 496 → 568 (+61 subtests); vitest 65 → 116.
 - `ResumeInteractionTests` covers retry vs nudge (no double response either way), retry not refreshing idle, and detach cancelling a pending retry.
+
+## 2026-09-23 — feat/conformance-harness (#7)
+
+- Designed and stood up `tests/conformance/`: a black-box, language-neutral .NET 11 xUnit v3 suite (`Conformance.slnx`, hand-authored — `dotnet sln add` has a CLI bug on `.slnx` this SDK build) talking to the backend only over HTTP/WebSocket. Three projects: `Conformance.Fakes` (FakeRealtimeUpstreamServer with GaSessionValidator/FrameLog/RealtimeScript; FakeSearchServer answering from `menuItems.json`), `Conformance.Harness` (PythonBackendLauncher, BackendEnvironment, BackendLauncherFactory, RealtimeBrowserClient, RepoPaths, NetworkUtils), `Conformance.Tests` (5 test classes, 8 tests).
+- Scenarios: smoke (bootstrap `session.update` first frame, 4 tools + `tool_choice=auto`, greeting waits for `session.updated`), `/health` 200 (JSON-parsed, not substring), `/api/auth/session` token, deflate not negotiated, plus 3 fake-only scripting tests (audio deltas, function calls, rate-limited `response.done`).
+- Mutation-checked the smoke scenario against `rtmt.py`: removing the bootstrap send fails both smoke tests with clear timeout messages ("Bootstrap session.update never arrived"); restoring is green again (8/8).
+- Green 3× in a row at three points in the work (initial, after Summer's test-hook changes, after Beth's cross-platform fix) — deterministic, no sleeps, `FrameLog.WaitForAsync`-style timeout waits throughout.
+- `CONFORMANCE_BACKEND=dotnet` (S2 placeholder) skips cleanly: 5 skip, 3 fake-only pass, 0 fail.
+- Decision logged: `.squad/decisions/inbox/birdperson-conformance-suite-design.md`.

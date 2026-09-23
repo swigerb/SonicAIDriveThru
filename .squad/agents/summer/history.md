@@ -174,3 +174,12 @@ Detailed technical learnings from demo readiness, debugging, and prompt external
   - The 30 s nudge checks `RateLimitRecovery.busy` before firing; the handler's `finally` detach cancels a pending retry, so nothing fires into a held session.
   - The session.update fallback keeps its correlated-error path; `scripts/benchmark_reasoning.py` unaffected.
 - `resilience.rate_limit` block added to `config.yaml`; env override `RATE_LIMIT_RECOVERY_ENABLED` (empty keeps config).
+
+## 2026-09-23 — feat/conformance-harness (#7)
+
+- Built `app/backend/test_hooks.py`: gated by `CONFORMANCE_TEST_HOOKS=1` (literal `"1"` only), `HOOKS_ENABLED` read once at import time, `now(tz)` (fixed instant from `CONFORMANCE_FIXED_NOW`, requires an explicit offset/zone, converts into caller's `tz`), `seconds(env_var, default)` (parsed override or silent fallback to `default`).
+- Wired into 4 sites / 7 env vars: `order_state.is_happy_hour()` (`CONFORMANCE_FIXED_NOW`), `session_manager.py`'s idle/grace/nudge/first-frame-timeout constants, `rtmt.py`'s `_SESSION_CONFIGURED_TIMEOUT_SEC` (greeting timeout), `rate_limit.py`'s `RateLimitSettings.from_config()` retry delays. Never touched bicep or the Dockerfile.
+- `tests/test_test_hooks.py`: 18 new tests, mutation-checked (hardcoding `HOOKS_ENABLED = True` fails 8/18; restoring is green).
+- Found and fixed a genuine pre-existing flaky test directly in the domain the hooks address: `test_combo_orders.py::test_combo_plus_standalone_drink_at_full_price` never patched `is_happy_hour()` unlike its siblings, so it failed whenever run during the real happy-hour window.
+- `pytest app/backend/tests -q`: 586 passed, 61 subtests (568 baseline + 18 new). `ruff check .` clean.
+- Decision logged: `.squad/decisions/inbox/summer-test-hooks.md`.
