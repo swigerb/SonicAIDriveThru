@@ -74,3 +74,34 @@ Why `low` is the default:
 
 `false` serialises search→add pairs and uses about 2× the tokens. Leaving it unset (`null`) already batches calls on 2.1
 and is safe on 1.5, so `null` is the default.
+
+## Scaling, session affinity and the session-token secret
+
+Order state, the resume credential and the reconnect grace hold live in the
+backend process's memory. Two rules follow from that:
+
+- **One worker per replica.** `app/Dockerfile` runs gunicorn with `--workers 1`. With two workers, a reconnect has
+  about a 50% chance of reaching a process that doesn't have the order. aiohttp is async, so one worker easily carries
+  the per-replica session cap (`security.max_concurrent_sessions`).
+- **Sticky ingress.** `infra/main.bicep` sets `stickySessionsAffinity: 'sticky'` on the backend Container App
+  (`ingress.stickySessions.affinity`). Envoy sets an affinity cookie on the page load, and the browser sends it on the
+  websocket upgrade, so a reconnect lands on the same replica. Sticky sessions need single revision mode, which is the
+  default in `infra/core/host/container-app.bicep`. Min/max replicas are unchanged (1/5). A resume still fails, and
+  falls back to a fresh order, when that replica is gone (scale-in, restart, redeploy).
+
+`/api/auth/session` signs its HMAC tokens with `APP_SESSION_SECRET`. The value is a Container App secret
+(`app-session-secret`), so every replica and restart validates every other's tokens. That is required before
+`security.require_session_token` can be turned on.
+
+- By default each `azd provision` generates a random value (`newGuid()` twice).
+- To keep one value across provisions, pin it in the azd environment:
+
+  ```shell
+  azd env set APP_SESSION_SECRET "$(openssl rand -base64 48)"
+  ```
+
+- A changed secret changes `APP_SESSION_SECRET_FINGERPRINT` in the template. That rolls a new revision, so all replicas
+  restart on the new value together.
+- Locally, when `APP_SESSION_SECRET` is unset, the app falls back to a random per-process secret.
+- Because sending a secrets list replaces the app's secrets, an `aad-client-secret` that was set out-of-band (EasyAuth
+  with `AZURE_AUTH_CLIENT_SECRET` empty) is read back and re-sent on each provision.

@@ -227,7 +227,7 @@ The architecture implements a **WebSocket middle tier** that bridges the browser
 **Infrastructure:**
 - Bicep IaC for reproducible deployments
 - Azure Container Apps with auto-scaling (20 concurrent requests/replica, max 5 replicas)
-- Gunicorn with 2 async workers, 120s timeout, 65s keep-alive
+- Gunicorn with 1 async worker (order/resume state is in-process) and sticky ingress affinity, 120s timeout, 65s keep-alive
 - Docker with layer caching for fast rebuilds
 - Health probes: startup (50s), liveness (30s), readiness (10s)
 - Azure Developer CLI (`azd`) for one-command provisioning

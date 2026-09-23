@@ -133,6 +133,9 @@
     },
     "authClientSecret": {
       "value": "${AZURE_AUTH_CLIENT_SECRET=}"
+    },
+    "appSessionSecret": {
+      "value": "${APP_SESSION_SECRET=}"
     }
   }
 }

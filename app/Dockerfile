@@ -51,14 +51,17 @@ HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
   CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
 
 # Production gunicorn config:
-# - 2 aiohttp workers (async I/O, so fewer workers needed)
+# - ONE aiohttp worker. Order state, the resume credential and the detached-session
+#   grace hold are in-process memory; a second worker would own a different copy,
+#   so a reconnect could land where the order doesn't exist. Ingress affinity is
+#   sticky (infra/main.bicep) so the replica is stable too.
 # - 120s timeout for long-lived WebSocket upgrades
 # - 65s keep-alive to outlast Azure LB idle timeout (60s)
 # - Graceful 30s shutdown window
 CMD ["python3", "-m", "gunicorn", "app:create_app", \
      "-b", "0.0.0.0:8000", \
      "--worker-class", "aiohttp.GunicornWebWorker", \
-     "--workers", "2", \
+     "--workers", "1", \
      "--timeout", "120", \
      "--keep-alive", "65", \
      "--graceful-timeout", "30", \

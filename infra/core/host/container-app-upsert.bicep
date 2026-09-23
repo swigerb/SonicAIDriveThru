@@ -67,6 +67,13 @@ param keyvaultIdentities object = {}
 @description('The environment variables for the container in key value pairs')
 param env object = {}
 
+@description('Environment variables sourced from Container App secrets: { ENV_VAR_NAME: \'secret-name\' }')
+#disable-next-line secure-secrets-in-params // env var name -> secret NAME, never a secret value
+param secretEnv object = {}
+
+@description('Names of secrets that already exist on the app (e.g. set out-of-band with `az containerapp secret set`) and must survive this deployment when `secrets` does not supply them.')
+param preserveExistingSecretNames array = []
+
 @description('Specifies if the resource ingress is exposed externally')
 param external bool = true
 
@@ -81,6 +88,10 @@ param healthProbePath string = ''
 
 @description('Enable WebSocket transport for the container app ingress')
 param enableWebSocket bool = false
+
+@description('Ingress session affinity: none | sticky (sticky requires single revision mode)')
+@allowed(['none', 'sticky'])
+param stickySessionsAffinity string = 'none'
 
 @allowed(['Consumption', 'D4', 'D8', 'D16', 'D32', 'E4', 'E8', 'E16', 'E32', 'NC24-A100', 'NC48-A100', 'NC96-A100'])
 param workloadProfile string = 'Consumption'
@@ -112,20 +123,28 @@ module app 'container-app.bicep' = {
     daprEnabled: daprEnabled
     daprAppId: daprAppId
     daprAppProtocol: daprAppProtocol
-    secrets: secrets
+    // ARM evaluates only the taken branch of the ternary, so listSecrets() never
+    // runs against an app that doesn't exist yet.
+    secrets: union(
+      exists && !empty(preserveExistingSecretNames)
+        ? toObject(
+            #disable-next-line BCP422
+            filter(existingApp.listSecrets().value, s => contains(preserveExistingSecretNames, s.name) && !contains(secrets, s.name)),
+            s => s.name,
+            s => s.value)
+        : {},
+      secrets)
     keyvaultIdentities: keyvaultIdentities
     allowedOrigins: allowedOrigins
     external: external
-    env: [
-      for key in objectKeys(env): {
-        name: key
-        value: '${env[key]}'
-      }
-    ]
+    env: concat(
+      map(objectKeys(env), key => { name: key, value: '${env[key]}' }),
+      map(objectKeys(secretEnv), key => { name: key, secretRef: secretEnv[key] }))
     imageName: !empty(imageName) ? imageName : exists ? existingApp.properties.template.containers[0].image : ''
     targetPort: targetPort
     healthProbePath: healthProbePath
     enableWebSocket: enableWebSocket
+    stickySessionsAffinity: stickySessionsAffinity
     serviceBinds: serviceBinds
   }
 }
