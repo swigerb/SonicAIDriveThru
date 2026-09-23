@@ -147,3 +147,22 @@ Detailed technical learnings from demo readiness, debugging, and prompt external
   - 1.5's reasoning rejection has no `event_id`, so the in-flight heuristic is required.
 - `azure.yaml` adds a non-fatal postdeploy smoke hook. The service is still named `backend`.
 - `config.yaml`: `reasoning_effort: low` is now validated by the benchmark. `parallel_tool_calls: null` is kept.
+
+## 2026-09-22 — feat/order-resume Stage 1 (backend)
+
+- `session_manager.py`: attached/detached/ended lifecycle with an injectable clock.
+  - Grace hold capped by the remaining idle budget; idle close ends the session before closing 4000.
+  - LRU cap on detached sessions and a 15s sweep. The concurrency cap counts attached sessions only.
+  - The mic append stream is no longer guest activity; speech_started and transcription are.
+- Resume credential: `token_urlsafe(32)`. Only its sha256 is stored, the compare is constant-time, and it is single-use and rotated on every success. Logs show sha256[:8] only.
+- `rtmt.py` first-frame handshake:
+  - Metadata is deferred until the decision.
+  - A late resume gets `not_first_frame` and a re-announce.
+  - A stale socket is closed 4002. `extension.end_session` closes 1000.
+  - The handler's `finally` detaches, which fixes a mapping leak when the upstream connect fails.
+- Rehydration:
+  - A transcript ring buffer per session (`history_turns` / `history_chars`).
+  - One system `conversation.item.create` (order JSON plus recent turns) after the bootstrap session.update, with the greeting suppressed.
+  - A never-greeted resume greets normally.
+- Nudge: `resume.nudge_after_seconds` (30), once, gated on `session_configured`. Cancelled by speech_started, a transcript, or a guest `response.create`. It is not guest activity.
+- `app.py load_app_secret`: `APP_SESSION_SECRET` env, falling back to urandom for local dev.

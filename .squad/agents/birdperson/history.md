@@ -102,3 +102,17 @@
   - Repaired: stub search with the real result format, real order tools, stricter add counts, and realistic size-change history.
   - New: median/p90 output, a `--summarize` mode, and `--resume` for chunked runs.
 - Final gate: pytest 434 passed; ruff clean; frontend build OK with 16/16 tests; `az bicep build` 0 errors.
+
+- **Order resume Stage 1 tests (2026-09-22, `feat/order-resume`)**
+  - `tests/test_order_resume.py` (42 tests) and `tests/test_infra_resume.py`.
+  - They use a FakeClock plus a per-connection fake GA upstream, reusing the `_RealtimeHarness` `fake_class` hook, with no real sleeps over 1s.
+  - Coverage:
+    - Grace-then-delete; idle deletes immediately and a later resume is rejected; grace capped by the idle budget.
+    - LRU cap; the concurrency cap ignores detached sessions.
+    - Valid resume keeps the same sid and order; wrong, expired, reused and malformed ids are rejected, and the guest gets a fresh session.
+    - Resume is honoured as the first frame only; 4002 goes to the stale socket.
+    - Upstream order: bootstrap → rehydration (with the order) → no greeting.
+    - The nudge fires once and only after session.updated; it is cancelled by speech, a transcript, or a guest response; 0 disables it.
+    - The resume id never appears in logs (caplog at DEBUG plus verbose logging).
+  - Mutation checks: 51 mutations (steps 0–3), all killed. Three step-2 survivors were killed after adding tests.
+  - Final: pytest 496 passed (baseline 442), ruff clean.

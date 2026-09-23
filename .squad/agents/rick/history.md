@@ -26,3 +26,13 @@
     - Idle closes default to *not* resumable.
   - **Hard prerequisite:** gunicorn `--workers 1` plus ACA sticky sessions. Today 2 workers × up to 5 replicas with no affinity would defeat any in-memory resume. Redis was rejected for the demo.
   - Estimate: ~5.5–6 dev-days. 8 open decisions for Brian.
+
+- **Order resume — Stage 1 architecture sign-off (2026-09-22, `feat/order-resume`)**
+  - Brian's decisions replaced parts of the plan:
+    - Idle closes are never resumable, and the idle clock keeps running while the guest is detached (hold = min(120s, remaining idle)).
+    - No principal binding and no `sid` claim in the HMAC token.
+    - No welcome-back line: the carhop stays silent, with one 30s nudge through the `session.updated` gate.
+    - One worker plus sticky ingress; maxReplicas unchanged.
+  - The wire protocol for Stage 2 is in `docs/order_resume.md`: `extension.resume` is the first frame; the replies are `extension.session_resumed` / `extension.resume_rejected` (always followed by metadata); `extension.end_session` closes with 1000; stale sockets get 4002; 4000 is final.
+  - Metadata is now deferred until the resume decision (first frame, or 2s). Old frontends see it up to 2s later.
+  - The known limit is that resume only works within one replica. A lost replica means a fresh order, which is acceptable for the demo.

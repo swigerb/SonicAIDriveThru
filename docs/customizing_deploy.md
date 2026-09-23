@@ -78,7 +78,8 @@ and is safe on 1.5, so `null` is the default.
 ## Scaling, session affinity and the session-token secret
 
 Order state, the resume credential and the reconnect grace hold live in the
-backend process's memory. Two rules follow from that:
+backend process's memory. See [order_resume.md](order_resume.md) for the protocol and the `resume:` config keys. Two
+rules follow from that:
 
 - **One worker per replica.** `app/Dockerfile` runs gunicorn with `--workers 1`. With two workers, a reconnect has
   about a 50% chance of reaching a process that doesn't have the order. aiohttp is async, so one worker easily carries
