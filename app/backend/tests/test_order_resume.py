@@ -592,6 +592,182 @@ class ResumeProtocolTests(_ResumeHarness):
         await again.close()
 
 
+class TranscriptBufferTests(unittest.TestCase):
+
+    def setUp(self):
+        self.sm = SessionManager(clock=FakeClock())
+        self.sid = self.sm.create_session(_ws())
+
+    def tearDown(self):
+        self.sm.end_session(self.sid)
+
+    def test_ring_buffer_keeps_the_last_n_turns(self):
+        self.sm.history_turns = 6
+        for i in range(10):
+            self.sm.record_turn(self.sid, "guest" if i % 2 else "carhop", f"turn {i}")
+        self.assertEqual([t for _, t in self.sm.recent_turns(self.sid)], [f"turn {i}" for i in range(4, 10)])
+
+    def test_history_is_char_capped_keeping_the_newest(self):
+        self.sm.history_chars = 50
+        for i in range(5):
+            self.sm.record_turn(self.sid, "guest", f"{i}" * 30)
+        turns = self.sm.recent_turns(self.sid)
+        self.assertLessEqual(sum(len(t) for _, t in turns), 50)
+        self.assertEqual(turns[-1][1], "4" * 30, "newest turn must survive the cap")
+
+    def test_rehydration_item_is_one_system_message_with_the_order(self):
+        order_state_singleton.handle_order_update(self.sid, "add", "Cheeseburger", "", 1, 4.49)
+        self.sm.record_turn(self.sid, "guest", "a cheeseburger please")
+        self.sm.record_turn(self.sid, "carhop", "One cheeseburger, anything else?")
+        item = json.loads(self.sm.build_rehydration_item(self.sid))
+        self.assertEqual(item["type"], "conversation.item.create")
+        self.assertEqual(item["item"]["role"], "system")
+        text = item["item"]["content"][0]["text"]
+        self.assertIn(order_state_singleton.get_order_summary_json(self.sid), text)
+        self.assertIn("Guest: a cheeseburger please", text)
+        self.assertIn("Carhop: One cheeseburger, anything else?", text)
+        self.assertIn("Do NOT greet", text)
+
+    def test_ended_session_forgets_its_transcript(self):
+        self.sm.record_turn(self.sid, "guest", "hello")
+        self.sm.end_session(self.sid)
+        self.assertEqual(self.sm.recent_turns(self.sid), [])
+
+
+NUDGE_MARKER = "quiet since their connection came back"
+
+
+class RehydrationAndNudgeTests(_ResumeHarness):
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self._idle = patch.object(session_manager_module, "_IDLE_TIMEOUT_SECONDS", IDLE)
+        self._idle.start()
+        self.sm.first_frame_timeout_seconds = 0.3
+        self.sm.nudge_after_seconds = 0
+
+    async def asyncTearDown(self):
+        self._idle.stop()
+        await super().asyncTearDown()
+
+    async def _converse_then_drop(self):
+        browser, meta, sid = await self._start_fresh()          # greeting: carhop says "hi"
+        await self.fake.upstreams[-1].send_json({
+            "type": "conversation.item.input_audio_transcription.completed",
+            "item_id": "i1", "transcript": "I'd like a cheeseburger"})
+        await self._until(lambda: any(r == "guest" for r, _ in self.sm.recent_turns(sid)))
+        order_state_singleton.handle_order_update(sid, "add", "Cheeseburger", "", 1, 4.49)
+        await self._drop(browser, sid)
+        return meta, sid
+
+    async def _resume_ok(self, resume_id):
+        browser = await self._resume(resume_id)
+        await self._until_event(browser, "extension.session_resumed")
+        return browser, self.fake.connections[-1]
+
+    @staticmethod
+    def _system_texts(upstream):
+        return [e["item"]["content"][0]["text"] for e in upstream
+                if e.get("type") == "conversation.item.create" and e["item"].get("role") == "system"]
+
+    def _nudges(self, upstream):
+        return [t for t in self._system_texts(upstream) if NUDGE_MARKER in t]
+
+    async def test_upstream_gets_bootstrap_then_rehydration_and_no_greeting(self):
+        meta, sid = await self._converse_then_drop()
+        order_json = order_state_singleton.get_order_summary_json(sid)
+        browser, upstream = await self._resume_ok(meta["resumeId"])
+        await browser.send_json(BROWSER_SESSION_UPDATE)          # the browser restarting its session
+        await self._until(lambda: sum(e["type"] == "session.update" for e in upstream) >= 2)
+        await browser.send_json(MIC_FRAME)                        # guest speaks -> VAD response
+        await self._response_done(browser)
+
+        types = [e["type"] for e in upstream]
+        self.assertEqual(types[0], "session.update", "bootstrap session.update must be first")
+        self.assertEqual([t["name"] for t in upstream[0]["session"]["tools"]], ["search", "update_order", "get_order", "reset_order"])
+        self.assertEqual(upstream[1]["type"], "conversation.item.create")
+        self.assertEqual(upstream[1]["item"]["role"], "system", "second upstream frame must be the rehydration item")
+        text = upstream[1]["item"]["content"][0]["text"]
+        self.assertIn(order_json, text)
+        self.assertIn("Guest: I'd like a cheeseburger", text)
+        self.assertIn("Carhop: hi", text)
+        self.assertEqual(len(self._system_texts(upstream)), 1, "exactly one rehydration item")
+        self.assertNotIn("response.create", types, "the carhop spoke unprompted after a resume")
+        self.assertNotIn(json.loads(self.sm.greeting_msg), upstream, "greeting repeated on resume")
+        self.assertLess(types.index("conversation.item.create"), types.index("input_audio_buffer.append"))
+        await browser.close()
+
+    async def test_resume_before_the_conversation_started_keeps_the_normal_greeting(self):
+        browser = await self.client.ws_connect("/realtime")
+        meta = await self._until_event(browser, "extension.session_metadata")   # never started talking
+        sid = self._sid_for_token(meta["sessionToken"])
+        await self._drop(browser, sid)
+        again, upstream = await self._resume_ok(meta["resumeId"])
+        await again.send_json(BROWSER_SESSION_UPDATE)
+        await self._response_done(again)
+        self.assertIn(json.loads(self.sm.greeting_msg), upstream)
+        self.assertEqual(self._system_texts(upstream), [])
+        await again.close()
+
+    async def test_nudge_fires_once_after_silence_and_only_after_session_updated(self):
+        meta, sid = await self._converse_then_drop()
+        self.sm.nudge_after_seconds = 0.2
+        self.fake.withhold_session_updated = True
+        browser, upstream = await self._resume_ok(meta["resumeId"])
+        activity = self.sm._last_activity[sid]
+        self.clock.advance(5)
+
+        await asyncio.sleep(0.5)
+        self.assertEqual(self._nudges(upstream), [], "nudged before session.updated confirmed voice/tools")
+        self.assertNotIn("response.create", [e["type"] for e in upstream])
+
+        await self.fake.release_session_updated()
+        await self._until(lambda: "response.create" in [e["type"] for e in upstream])
+        await self._response_done(browser)
+        await asyncio.sleep(0.4)
+        types = [e["type"] for e in upstream]
+        self.assertEqual(len(self._nudges(upstream)), 1, "nudge must fire exactly once")
+        self.assertEqual(types.count("response.create"), 1)
+        nudge_index = next(i for i, e in enumerate(upstream)
+                           if e.get("type") == "conversation.item.create" and NUDGE_MARKER in json.dumps(e))
+        self.assertLess(nudge_index, types.index("response.create"))
+        self.assertEqual(self.sm._last_activity[sid], activity, "the nudge counted as guest activity")
+        await browser.close()
+
+    async def _assert_nudge_cancelled_by(self, guest_action):
+        meta, sid = await self._converse_then_drop()
+        self.sm.nudge_after_seconds = 0.3
+        browser, upstream = await self._resume_ok(meta["resumeId"])
+        await guest_action(browser)
+        await asyncio.sleep(0.7)
+        self.assertEqual(self._nudges(upstream), [], "nudge fired although the guest spoke")
+        await browser.close()
+
+    async def test_nudge_cancelled_by_guest_speech(self):
+        async def speak(_browser):
+            await self.fake.upstreams[-1].send_json({"type": "input_audio_buffer.speech_started"})
+        await self._assert_nudge_cancelled_by(speak)
+
+    async def test_nudge_cancelled_by_guest_transcript(self):
+        async def transcript(_browser):
+            await self.fake.upstreams[-1].send_json({
+                "type": "conversation.item.input_audio_transcription.completed", "item_id": "i2", "transcript": "and a drink"})
+        await self._assert_nudge_cancelled_by(transcript)
+
+    async def test_nudge_cancelled_by_guest_initiated_response(self):
+        async def respond(browser):
+            await browser.send_json({"type": "response.create"})
+        await self._assert_nudge_cancelled_by(respond)
+
+    async def test_nudge_disabled_with_zero(self):
+        meta, sid = await self._converse_then_drop()
+        self.sm.nudge_after_seconds = 0
+        browser, upstream = await self._resume_ok(meta["resumeId"])
+        await asyncio.sleep(0.4)
+        self.assertEqual(self._nudges(upstream), [])
+        await browser.close()
+
+
 class _Capture(logging.Handler):
     def __init__(self):
         super().__init__(level=logging.DEBUG)

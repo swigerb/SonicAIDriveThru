@@ -34,6 +34,7 @@ from audio_pipeline import (
     MARKER_END_SESSION as _MARKER_END_SESSION,
     MARKER_LOG_TO_FILE as _MARKER_LOG_TO_FILE,
     MARKER_RESPONSE_CANCEL as _MARKER_RESPONSE_CANCEL,
+    MARKER_RESPONSE_CREATE as _MARKER_RESPONSE_CREATE,
     MARKER_RESUME as _MARKER_RESUME,
     MARKER_SESSION_UPDATE as _MARKER_SESSION_UPDATE,
     MARKER_SESSION_UPDATED as _MARKER_SESSION_UPDATED,
@@ -877,6 +878,14 @@ class RTMiddleTier:
                             for content in out_item.get("content", []):
                                 ctx_monitor.add_content(content.get("text", ""))
                                 ctx_monitor.add_content(content.get("transcript", ""))
+                    # Remember what the carhop said, for rehydrating a resumed session.
+                    if session_id is not None and "response" in message:
+                        spoken = " ".join(
+                            (content.get("transcript") or content.get("text") or "").strip()
+                            for out_item in message["response"].get("output", [])
+                            if out_item.get("type") == "message"
+                            for content in out_item.get("content", []))
+                        self._sessions.record_turn(session_id, "carhop", spoken)
 
         return updated_message
 
@@ -973,6 +982,8 @@ class RTMiddleTier:
                 resume_decided = asyncio.Event()
                 upstream_created = False
                 announced = False
+                # Silent-guest nudge after a resume (once per resume).
+                nudge_task: asyncio.Task | None = None
 
                 _vlog(verbose, "\n═══ [SESSION] Connected ═══\n"
                                "Session ID: %s\n"
@@ -1044,8 +1055,30 @@ class RTMiddleTier:
                         resume_decided.set()
                         await announce_fresh()
 
+                async def nudge_after_silence():
+                    """If the guest says nothing for nudge_after_seconds after a resume, have
+                    the carhop ask once whether they need anything else. Goes through the
+                    same session.updated gate as the greeting so voice/tools are confirmed."""
+                    await asyncio.sleep(self._sessions.nudge_after_seconds)
+                    await session_configured.wait()
+                    logger.info("Guest silent %.0fs after resume; carhop nudges (session=%s)",
+                                self._sessions.nudge_after_seconds, session_id)
+                    nudge = self._sessions.build_nudge_item()
+                    await target_ws.send_str(nudge)
+                    await target_ws.send_str(_RESPONSE_CREATE_MSG)
+                    ctx_monitor = self._sessions.get_context_monitor(session_id)
+                    if ctx_monitor:
+                        ctx_monitor.add_content(nudge)
+
+                def cancel_nudge(reason: str) -> None:
+                    nonlocal nudge_task
+                    if nudge_task is not None and not nudge_task.done():
+                        nudge_task.cancel()
+                        logger.info("Resume nudge cancelled: %s (session=%s)", reason, session_id)
+                    nudge_task = None
+
                 async def handle_resume(data: str):
-                    nonlocal session_id, announced
+                    nonlocal session_id, announced, greeting_sent, nudge_task
                     try:
                         presented = json.loads(data).get("resume_id")
                     except (ValueError, AttributeError):
@@ -1071,6 +1104,21 @@ class RTMiddleTier:
                         "round_trip_token": identifiers.round_trip_token,
                         "resume_id": outcome.resume_id,
                     })
+                    if not outcome.conversation_started:
+                        return                  # never greeted: the normal greeting still runs
+                    # Mid-conversation: no greeting, no "welcome back". Brief the new
+                    # upstream (after the bootstrap session.update, before any
+                    # response.create) and stay silent until the guest speaks.
+                    greeting_sent = True
+                    rehydration = self._sessions.build_rehydration_item(session_id)
+                    await target_ws.send_str(rehydration)
+                    ctx_monitor = self._sessions.get_context_monitor(session_id)
+                    if ctx_monitor:
+                        ctx_monitor.add_content(rehydration)
+                    logger.info("Resumed session %s rehydrated (%d recent turns); greeting suppressed",
+                                session_id, len(self._sessions.recent_turns(session_id)))
+                    if self._sessions.nudge_after_seconds > 0:
+                        nudge_task = asyncio.ensure_future(nudge_after_silence())
 
                 async def reject_late_resume(data: str):
                     nonlocal announced
@@ -1191,6 +1239,8 @@ class RTMiddleTier:
                             # Barge-in: client sent response.cancel — user wants to speak.
                             if _MARKER_RESPONSE_CANCEL in msg.data:
                                 echo.on_barge_in(verbose)
+                            if nudge_task is not None and _MARKER_RESPONSE_CREATE in msg.data:
+                                cancel_nudge("guest-initiated response")
                             # Forward client message to OpenAI.
                             new_msg = await self._process_message_to_server(msg, ws, verbose, voice_locked=assistant_audio_seen, guard=guard)
                             if new_msg is not None:
@@ -1224,8 +1274,14 @@ class RTMiddleTier:
                                 echo.on_speech_started(verbose)
                                 if session_id:
                                     self._sessions.touch_activity(session_id)
+                                cancel_nudge("guest speech")
                             elif _MARKER_TRANSCRIPTION_COMPLETED in data and session_id:
                                 self._sessions.touch_activity(session_id)
+                                cancel_nudge("guest transcript")
+                                try:
+                                    self._sessions.record_turn(session_id, "guest", json.loads(data).get("transcript"))
+                                except (ValueError, AttributeError):
+                                    pass
 
                             # The bootstrap session.updated arrives as soon as the socket
                             # opens, so it must NOT trigger the greeting -- the browser's
@@ -1270,6 +1326,7 @@ class RTMiddleTier:
                     logger.exception("Unexpected error in WebSocket forwarding")
                 finally:
                     deadline_task.cancel()
+                    cancel_nudge("socket closed")
                     _vlog(verbose, "\n═══ [SESSION] Disconnected ═══\n"
                                    "Session ID: %s\n"
                                    "══════════════════════════════", session_id or "?")
