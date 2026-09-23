@@ -106,11 +106,11 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
     public Task<bool> WaitForNoOpenConnectionsAsync(TimeSpan timeout, CancellationToken cancellationToken = default) =>
         _connections.WaitForNoneOpenAsync(timeout, cancellationToken);
 
-    public async Task StartAsync(CancellationToken cancellationToken = default)
+    public async Task StartAsync(CancellationToken cancellationToken = default, int? fixedPort = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.Logging.ClearProviders();
-        builder.WebHost.UseUrls("http://127.0.0.1:0");
+        builder.WebHost.UseUrls($"http://127.0.0.1:{fixedPort?.ToString() ?? "0"}");
         var app = builder.Build();
         app.UseWebSockets();
         app.MapGet("/", () => Results.Ok());

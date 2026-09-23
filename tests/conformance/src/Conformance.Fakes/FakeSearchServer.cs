@@ -29,13 +29,13 @@ public sealed class FakeSearchServer : IAsyncDisposable
         _menuItemsJsonPath = menuItemsJsonPath;
     }
 
-    public async Task StartAsync(CancellationToken cancellationToken = default)
+    public async Task StartAsync(CancellationToken cancellationToken = default, int? fixedPort = null)
     {
         _documents = MenuIndex.Load(_menuItemsJsonPath);
 
         var builder = WebApplication.CreateBuilder();
         builder.Logging.ClearProviders();
-        builder.WebHost.UseUrls("http://127.0.0.1:0");
+        builder.WebHost.UseUrls($"http://127.0.0.1:{fixedPort?.ToString() ?? "0"}");
         var app = builder.Build();
         app.MapGet("/", () => Results.Ok());
         app.MapPost("/indexes('{indexName}')/docs/search.post.search", HandleSearchAsync);

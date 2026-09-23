@@ -14,7 +14,14 @@ HTTP and WebSocket; never imports backend source.
 under test:
 
 - `CONFORMANCE_BACKEND_URL=<uri>` — talk to an already-running backend at a fixed URL; the harness
-  starts and cleans up nothing (external mode).
+  starts and cleans up nothing (external mode). External mode additionally requires
+  `CONFORMANCE_FAKE_REALTIME_PORT` and `CONFORMANCE_FAKE_SEARCH_PORT` (both a valid TCP port
+  1-65535) — the two Kestrel fakes normally bind to `http://127.0.0.1:0` and let the OS pick a
+  free port each run, which an already-running external backend has no way to discover after the
+  fact. Missing or invalid ports fail fast with a clear message (`ExternalModePortPolicy`, PR #22
+  review item 16) before either fake even starts, instead of silently running against ports the
+  external backend can never match. Start the external backend pointed at those same two fixed
+  ports, then run the suite with the identical env vars set.
 - `CONFORMANCE_BACKEND=python` (the default) — launch `app/backend` via `.venv`.
 - `CONFORMANCE_BACKEND=dotnet` — the S2 .NET backend placeholder (issue #7; the backend doesn't
   exist yet). **This FAILS the suite by default** (PR #22 review item 15) — CI must never silently

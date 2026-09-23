@@ -35,17 +35,26 @@ public class ConformanceFixture : IAsyncLifetime
 
     public async ValueTask InitializeAsync()
     {
+        // External mode (CONFORMANCE_BACKEND_URL) requires the two fakes to bind to fixed,
+        // known-in-advance ports -- see ExternalModePortPolicy's own docs for why -- and fails
+        // fast with a clear message here (before either fake even starts) if they're missing
+        // (PR #22 review item 16).
+        var (realtimePort, searchPort) = ExternalModePortPolicy.Resolve(
+            Environment.GetEnvironmentVariable("CONFORMANCE_BACKEND_URL"),
+            Environment.GetEnvironmentVariable(ExternalModePortPolicy.RealtimePortEnvVar),
+            Environment.GetEnvironmentVariable(ExternalModePortPolicy.SearchPortEnvVar));
+
         // Real end-to-end scenarios always go through the Python backend, which always sends
         // the `api-key` header under key auth (rtmt.py) — so requiring it here exercises PR #22
         // review item 9's "401 on bad/missing api-key" fidelity check on every real scenario for
         // free, with no risk of a false failure (see BackendContract.OpenAiApiKey).
         Realtime.RequireApiKey = true;
         Realtime.ExpectedApiKey = BackendContract.OpenAiApiKey;
-        await Realtime.StartAsync().ConfigureAwait(false);
+        await Realtime.StartAsync(fixedPort: realtimePort).ConfigureAwait(false);
 
         var repoRoot = RepoPaths.FindRepoRoot();
         Search = new FakeSearchServer(RepoPaths.MenuItemsJsonPath(repoRoot));
-        await Search.StartAsync().ConfigureAwait(false);
+        await Search.StartAsync(fixedPort: searchPort).ConfigureAwait(false);
 
         var port = NetworkUtils.GetFreeTcpPort();
         try
