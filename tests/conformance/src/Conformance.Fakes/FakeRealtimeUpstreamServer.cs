@@ -17,20 +17,32 @@ namespace Conformance.Fakes;
 public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
 {
     private WebApplication? _app;
-
-    /// <summary>Every frame received from the backend, in arrival order.</summary>
-    public FrameLog ReceivedFrames { get; } = new();
+    private readonly ConnectionRegistry _connections = new();
 
     /// <summary>Mutated by tests to control what happens when the backend creates a response.</summary>
     public RealtimeScript Script { get; } = new();
 
     public Uri BaseUri { get; private set; } = new("http://127.0.0.1:0");
 
-    /// <summary>The last `api-key` header observed on a connect request, for auth-plumbing assertions.</summary>
-    public string? LastApiKeyHeader { get; private set; }
+    /// <summary>Number of accepted upstream connections whose socket loop hasn't exited yet.</summary>
+    public int OpenConnectionCount => _connections.OpenCount;
 
-    /// <summary>The last `model` query-string value observed on a connect request.</summary>
-    public string? LastModelQueryParam { get; private set; }
+    /// <summary>
+    /// Waits for the next upstream connection accepted after this call — not one already open —
+    /// so tests can assert on a specific connection's own <see cref="FakeRealtimeConnection.ReceivedFrames"/>
+    /// instead of a server-wide log that every past and future connection shares.
+    /// </summary>
+    public Task<FakeRealtimeConnection?> WaitForNextConnectionAsync(TimeSpan timeout, CancellationToken cancellationToken = default) =>
+        _connections.WaitForNextAsync(timeout, cancellationToken);
+
+    /// <summary>
+    /// Waits until no accepted connection still has an open socket loop. Tests should call this
+    /// at the start of a scenario and fail loudly on false — a still-open connection means a
+    /// previous test leaked one, which is exactly what let "first frame" assertions pass on the
+    /// wrong test's frame before per-connection identity existed.
+    /// </summary>
+    public Task<bool> WaitForNoOpenConnectionsAsync(TimeSpan timeout, CancellationToken cancellationToken = default) =>
+        _connections.WaitForNoneOpenAsync(timeout, cancellationToken);
 
     public async Task StartAsync(CancellationToken cancellationToken = default)
     {
@@ -64,41 +76,47 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
             return;
         }
 
-        LastApiKeyHeader = context.Request.Headers["api-key"];
-        LastModelQueryParam = context.Request.Query["model"];
+        var connection = _connections.Add(context.Request.Headers["api-key"], context.Request.Query["model"]);
         var deployment = context.Request.Query["model"].ToString();
 
         using var socket = await context.WebSockets.AcceptWebSocketAsync().ConfigureAwait(false);
         var state = new RealtimeSessionState();
         var ct = context.RequestAborted;
 
-        await WebSocketJson.SendAsync(socket, BuildSessionCreated(), ct).ConfigureAwait(false);
-
-        while (socket.State == WebSocketState.Open)
+        try
         {
-            var received = await WebSocketJson.ReceiveJsonAsync(socket, ct).ConfigureAwait(false);
-            if (received is null)
+            await WebSocketJson.SendAsync(socket, BuildSessionCreated(), ct).ConfigureAwait(false);
+
+            while (socket.State == WebSocketState.Open)
             {
-                break;
+                var received = await WebSocketJson.ReceiveJsonAsync(socket, ct).ConfigureAwait(false);
+                if (received is null)
+                {
+                    break;
+                }
+
+                var frame = connection.ReceivedFrames.Add(received.Value);
+                await HandleFrameAsync(socket, frame, state, deployment, ct).ConfigureAwait(false);
             }
 
-            var frame = ReceivedFrames.Add(received.Value);
-            await HandleFrameAsync(socket, frame, state, deployment, ct).ConfigureAwait(false);
+            if (socket.State is WebSocketState.Open or WebSocketState.CloseReceived)
+            {
+                // CloseReceived means the client already sent its close frame (observed via the null
+                // return from ReceiveJsonAsync above) — we still owe it the server-side close frame
+                // to complete the handshake cleanly, otherwise the client sees an abrupt disconnect.
+                try
+                {
+                    await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None).ConfigureAwait(false);
+                }
+                catch (WebSocketException)
+                {
+                    // Client may have already torn down the connection — best-effort close.
+                }
+            }
         }
-
-        if (socket.State is WebSocketState.Open or WebSocketState.CloseReceived)
+        finally
         {
-            // CloseReceived means the client already sent its close frame (observed via the null
-            // return from ReceiveJsonAsync above) — we still owe it the server-side close frame
-            // to complete the handshake cleanly, otherwise the client sees an abrupt disconnect.
-            try
-            {
-                await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None).ConfigureAwait(false);
-            }
-            catch (WebSocketException)
-            {
-                // Client may have already torn down the connection — best-effort close.
-            }
+            _connections.NotifyClosed(connection);
         }
     }
 
