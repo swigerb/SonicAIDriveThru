@@ -105,3 +105,17 @@ resume:
   nudge_after_seconds: 30       # silent-guest nudge after a resume; 0 disables
   first_frame_timeout_seconds: 2.0  # wait for extension.resume before starting fresh
   sweep_interval_seconds: 15    # how often idle/grace expiry is checked
+
+# What the carhop does when a model response is rate-limited (the three demos
+# share one Azure OpenAI quota). Per failed response: one silent retry after
+# retry_delay_seconds; if that also fails the browser plays a pre-recorded
+# "Sorry, give me just a second." clip and a second retry follows after
+# second_retry_delay_seconds; if that fails the guest is asked to say it again.
+# A "try again in X s" hint from the service replaces the delay, clamped to
+# [0.5, 5] s for the first retry and [2, 8] s for the second. See docs/rate_limit_recovery.md.
+resilience:
+  rate_limit:
+    enabled: true               # env override: RATE_LIMIT_RECOVERY_ENABLED=true|false
+    retry_delay_seconds: 1.5
+    second_retry_delay_seconds: 4
+    max_retries: 2

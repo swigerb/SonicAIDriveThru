@@ -166,3 +166,11 @@ Detailed technical learnings from demo readiness, debugging, and prompt external
   - A never-greeted resume greets normally.
 - Nudge: `resume.nudge_after_seconds` (30), once, gated on `session_configured`. Cancelled by speech_started, a transcript, or a guest `response.create`. It is not guest activity.
 - `app.py load_app_secret`: `APP_SESSION_SECRET` env, falling back to urandom for local dev.
+
+## 2026-09-23 — feat/round3
+
+- Reviewed R1's backend integration with the order-resume session layer:
+  - Retries go straight to the upstream socket, so `touch()`/idle clock is never refreshed by a retry (not guest activity).
+  - The 30 s nudge checks `RateLimitRecovery.busy` before firing; the handler's `finally` detach cancels a pending retry, so nothing fires into a held session.
+  - The session.update fallback keeps its correlated-error path; `scripts/benchmark_reasoning.py` unaffected.
+- `resilience.rate_limit` block added to `config.yaml`; env override `RATE_LIMIT_RECOVERY_ENABLED` (empty keeps config).

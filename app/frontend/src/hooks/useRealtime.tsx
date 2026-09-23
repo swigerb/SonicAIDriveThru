@@ -14,7 +14,8 @@ import {
     ExtensionSessionMetadata,
     ExtensionRoundTripToken,
     ExtensionSessionResumed,
-    ExtensionResumeRejected
+    ExtensionResumeRejected,
+    ExtensionRateLimited
 } from "@/types";
 
 type Parameters = {
@@ -42,6 +43,8 @@ type Parameters = {
     /** Background reconnect gave up (retries exhausted); the socket stays down until reconnect(). */
     onReconnectGaveUp?: () => void;
     onReceivedRoundTripToken?: (message: ExtensionRoundTripToken) => void;
+    /** A model response was rate-limited and the server's silent retry failed too (docs/rate_limit_recovery.md). */
+    onReceivedRateLimited?: (message: ExtensionRateLimited) => void;
     onReceivedResponseAudioTranscriptDelta?: (message: ResponseAudioTranscriptDelta) => void;
     onReceivedInputAudioTranscriptionCompleted?: (message: ResponseInputAudioTranscriptionCompleted) => void;
     onReceivedError?: (message: Message) => void;
@@ -143,6 +146,7 @@ export default function useRealTime({
     onReceivedResumeRejected,
     onReconnectGaveUp,
     onReceivedRoundTripToken,
+    onReceivedRateLimited,
     onReceivedError
 }: Parameters) {
     const [sessionToken, setSessionToken] = useState<string | null>(null);
@@ -248,6 +252,9 @@ export default function useRealTime({
             case "extension.round_trip_token":
                 onReceivedRoundTripToken?.(message as ExtensionRoundTripToken);
                 break;
+            case "extension.rate_limited":
+                onReceivedRateLimited?.(message as ExtensionRateLimited);
+                break;
             case "error":
                 onReceivedError?.(message);
                 break;
@@ -265,6 +272,7 @@ export default function useRealTime({
         onReceivedSessionResumed,
         onReceivedResumeRejected,
         onReceivedRoundTripToken,
+        onReceivedRateLimited,
         onReceivedError,
         useDirectAoaiApi
     ]);

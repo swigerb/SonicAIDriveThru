@@ -18,13 +18,14 @@ import useAzureSpeech from "@/hooks/useAzureSpeech";
 import useAudioRecorder from "@/hooks/useAudioRecorder";
 import useAudioPlayer from "@/hooks/useAudioPlayer";
 
-import { ExtensionMiddleTierToolResponse, ExtensionRoundTripToken, ExtensionSessionMetadata, ExtensionSessionResumed } from "./types";
+import { ExtensionMiddleTierToolResponse, ExtensionRateLimited, ExtensionRoundTripToken, ExtensionSessionMetadata, ExtensionSessionResumed } from "./types";
 
 import { ThemeProvider, useTheme } from "./context/theme-context";
 import { DummyDataProvider, useDummyDataContext } from "@/context/dummy-data-context";
 import { AzureSpeechProvider, useAzureSpeechOnContext } from "@/context/azure-speech-context";
 import { AuthProvider, useAuth } from "@/context/auth-context";
 import { resolveVoice } from "@/lib/voices";
+import { apologyClipUrl, playApologyClip } from "@/lib/apology";
 
 import dummyTranscriptsData from "@/data/dummyTranscripts.json";
 import dummyOrderData from "@/data/dummyOrder.json";
@@ -63,6 +64,7 @@ const heroCallouts = [
 ];
 
 function SonicApp() {
+    const { t, i18n } = useTranslation();
     const [isRecording, setIsRecording] = useState(false);
     const [isMobile, setIsMobile] = useState(false);
     const { useAzureSpeechOn } = useAzureSpeechOnContext();
@@ -155,6 +157,12 @@ function SonicApp() {
         orderItemCountRef.current = order.items.length;
     }, [order]);
 
+    // Rate-limit recovery (docs/rate_limit_recovery.md): the apology clip is playing.
+    const apologyPlayingRef = useRef(false);
+    const clearRateLimitNotice = useCallback(() => {
+        setConnectionNotice(current => (current === "rateLimited" || current === "rateLimitedFinal" ? null : current));
+    }, []);
+
     const flashResumedNotice = useCallback(() => {
         setConnectionNotice("resumed");
         if (resumedNoticeTimerRef.current !== null) window.clearTimeout(resumedNoticeTimerRef.current);
@@ -215,6 +223,7 @@ function SonicApp() {
         onReceivedInputAudioBufferSpeechStarted: () => {
             // User speech detected - stop AI playback (barge-in) and unmute mic
             stopAudioPlayer();
+            clearRateLimitNotice();
             if (isAiSpeakingRef.current) {
                 isAiSpeakingRef.current = false;
                 unmuteAudioRecording();
@@ -268,6 +277,28 @@ function SonicApp() {
             if (wasPending || hadItems) setConnectionNotice("resumeRejected");
         },
         onReceivedRoundTripToken: handleSessionIdentifiers,
+        onReceivedRateLimited: ({ final }: ExtensionRateLimited) => {
+            if (!isSessionActiveRef.current) return;
+            // The failed response never finished, so nothing unmuted the mic.
+            isAiSpeakingRef.current = false;
+            if (final) {
+                // Out of retries: ask the guest to say it again, and let them.
+                setConnectionNotice("rateLimitedFinal");
+                if (!apologyPlayingRef.current) unmuteAudioRecording();
+                return;
+            }
+            // The silent retry failed too; a second one is coming. Say sorry, with
+            // the mic muted so the clip can't echo into server VAD (guest speech
+            // would cancel that retry).
+            setConnectionNotice("rateLimited");
+            if (apologyPlayingRef.current) return;
+            apologyPlayingRef.current = true;
+            muteAudioRecording();
+            void playApologyClip(apologyClipUrl(i18n.language)).finally(() => {
+                apologyPlayingRef.current = false;
+                if (isSessionActiveRef.current && !isAiSpeakingRef.current) unmuteAudioRecording();
+            });
+        },
         onReceivedInputAudioTranscriptionCompleted: message => {
             const newTranscriptItem = {
                 text: message.transcript,
@@ -279,6 +310,7 @@ function SonicApp() {
         onReceivedResponseDone: message => {
             const transcript = message.response.output.map(output => output.content?.map(content => content.transcript).join(" ")).join(" ");
             if (!transcript) return;
+            clearRateLimitNotice();
 
             const newTranscriptItem = {
                 text: transcript,
@@ -377,6 +409,7 @@ function SonicApp() {
         isSessionActiveRef.current = false;
         isAiSpeakingRef.current = false;
         awaitingGreetingDoneRef.current = false;
+        clearRateLimitNotice();
         if (useAzureSpeechOn) {
             azureSpeech.inputAudioBufferClear();
         } else {
@@ -492,8 +525,6 @@ function SonicApp() {
             await stopConversation();
         }
     };
-
-    const { t } = useTranslation();
 
     useEffect(() => {
         const checkMobile = () => {

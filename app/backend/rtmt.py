@@ -52,6 +52,7 @@ from audio_pipeline import (
 )
 from config_loader import get_config
 from order_state import order_state_singleton
+from rate_limit import RateLimitRecovery, RateLimitSettings, is_rate_limit_error
 from session_manager import (
     SESSION_ENDED_CLOSE_CODE,
     SESSION_ENDED_CLOSE_REASON,
@@ -421,7 +422,9 @@ class _SessionUpdateGuard:
                 pass
             return event_id
         param = err.get("param") or ""
-        if (self._in_flight and err.get("type") == "invalid_request_error"
+        # A rate limit is never a session.update rejection; only an echoed
+        # event_id (above) ties one to an update.
+        if (self._in_flight and err.get("type") == "invalid_request_error" and not is_rate_limit_error(err)
                 and (not param or param.startswith("session"))):
             return self._in_flight.popleft()
         return None
@@ -483,6 +486,10 @@ class RTMiddleTier:
         # Flipped if the deployment rejects `reasoning` at runtime despite the
         # name check, so later sessions stop sending it.
         self._reasoning_rejected = False
+        # Rate-limit recovery (config.yaml resilience.rate_limit); the sleep is
+        # swappable so tests never really wait.
+        self.rate_limit_settings = RateLimitSettings.from_config(_config, os.environ)
+        self._rate_limit_sleep = asyncio.sleep
         if voice_choice is not None:
             logger.info("Realtime voice choice set to %s", voice_choice)
         if isinstance(credentials, AzureKeyCredential):
@@ -657,7 +664,7 @@ class RTMiddleTier:
             self._token_refresh_task.cancel()
         self._sessions.stop_idle_checker()
 
-    async def _process_message_to_client(self, msg: str, client_ws: web.WebSocketResponse, server_ws: web.WebSocketResponse, tools_pending: dict[str, RTToolCall], verbose: bool = False, guard: "_SessionUpdateGuard | None" = None, on_session_created: Callable[[], Awaitable[None]] | None = None) -> str | None:
+    async def _process_message_to_client(self, msg: str, client_ws: web.WebSocketResponse, server_ws: web.WebSocketResponse, tools_pending: dict[str, RTToolCall], verbose: bool = False, guard: "_SessionUpdateGuard | None" = None, on_session_created: Callable[[], Awaitable[None]] | None = None, recovery: RateLimitRecovery | None = None) -> str | None:
         data = msg.data
 
         # FAST PATH: extract type via regex without full JSON parse.
@@ -705,6 +712,10 @@ class RTMiddleTier:
                     if await self._recover_rejected_session_update(message, server_ws, guard, session_id):
                         _vlog(verbose, "  ⚠ session.update rejected — fallback sent: %s", json.dumps(message, default=str)[:500])
                         return None
+                    # A rate-limited response is retried (see rate_limit.py), not surfaced.
+                    if recovery is not None and await recovery.on_error(message):
+                        _vlog(verbose, "  ⚠ rate-limited — recovery ladder: %s", json.dumps(message, default=str)[:500])
+                        return None
                     # Surface OpenAI errors (e.g. rejected session.update, malformed tool schemas)
                     # so they don't silently vanish into the client.
                     logger.error("OpenAI Realtime API error: %s", json.dumps(message, default=str)[:1000])
@@ -745,6 +756,10 @@ class RTMiddleTier:
                               identifiers.session_token,
                               identifiers.round_trip_index,
                               identifiers.round_trip_token)
+
+                case "response.created":
+                    if recovery is not None:
+                        recovery.on_response_created()
 
                 case "response.output_item.added":
                     if "item" in message and message["item"]["type"] == "function_call":
@@ -843,6 +858,13 @@ class RTMiddleTier:
                                 updated_message = None
 
                 case "response.done":
+                    if recovery is not None and await recovery.on_response_done(message):
+                        # Rate-limited with no output; dropped here, the ladder retries.
+                        # A failed tool follow-up is retried with a bare response.create:
+                        # its function_call_output is already in the conversation, so the
+                        # tool is never re-run.
+                        _vlog(verbose, "  ⚠ response rate-limited — recovery ladder")
+                        return None
                     if tools_pending:
                         tools_pending.clear()
                         await server_ws.send_str(_RESPONSE_CREATE_MSG)
@@ -972,6 +994,8 @@ class RTMiddleTier:
                 assistant_audio_seen = False
                 session_configured = asyncio.Event()
                 guard = _SessionUpdateGuard()
+                recovery = RateLimitRecovery(self.rate_limit_settings, target_ws.send_str, ws.send_json,
+                                             sleep=self._rate_limit_sleep, session_id=session_id)
 
                 # ── Resume handshake state (one decision per socket) ──
                 # A resume is honoured only as the first client frame. Until that
@@ -1061,6 +1085,11 @@ class RTMiddleTier:
                     same session.updated gate as the greeting so voice/tools are confirmed."""
                     await asyncio.sleep(self._sessions.nudge_after_seconds)
                     await session_configured.wait()
+                    if recovery.busy:
+                        # The carhop is already retrying a rate-limited response; a
+                        # nudge now would stack a second response on top of it.
+                        logger.info("Resume nudge skipped: a rate-limit retry is in progress (session=%s)", session_id)
+                        return
                     logger.info("Guest silent %.0fs after resume; carhop nudges (session=%s)",
                                 self._sessions.nudge_after_seconds, session_id)
                     nudge = self._sessions.build_nudge_item()
@@ -1092,6 +1121,7 @@ class RTMiddleTier:
                         await announce_fresh()
                         return
                     session_id = outcome.session_id
+                    recovery.session_id = session_id
                     if outcome.stale_ws is not None:
                         _spawn(_close_superseded(outcome.stale_ws))
                     identifiers = order_state_singleton.get_session_identifiers(session_id)
@@ -1239,8 +1269,10 @@ class RTMiddleTier:
                             # Barge-in: client sent response.cancel — user wants to speak.
                             if _MARKER_RESPONSE_CANCEL in msg.data:
                                 echo.on_barge_in(verbose)
-                            if nudge_task is not None and _MARKER_RESPONSE_CREATE in msg.data:
-                                cancel_nudge("guest-initiated response")
+                            if _MARKER_RESPONSE_CREATE in msg.data:
+                                if nudge_task is not None:
+                                    cancel_nudge("guest-initiated response")
+                                recovery.on_external_response_create("browser")
                             # Forward client message to OpenAI.
                             new_msg = await self._process_message_to_server(msg, ws, verbose, voice_locked=assistant_audio_seen, guard=guard)
                             if new_msg is not None:
@@ -1275,6 +1307,7 @@ class RTMiddleTier:
                                 if session_id:
                                     self._sessions.touch_activity(session_id)
                                 cancel_nudge("guest speech")
+                                recovery.on_guest_speech()
                             elif _MARKER_TRANSCRIPTION_COMPLETED in data and session_id:
                                 self._sessions.touch_activity(session_id)
                                 cancel_nudge("guest transcript")
@@ -1308,7 +1341,8 @@ class RTMiddleTier:
                                         pass
 
                             new_msg = await self._process_message_to_client(msg, ws, target_ws, tools_pending, verbose, guard=guard,
-                                                                            on_session_created=on_session_created)
+                                                                            on_session_created=on_session_created,
+                                                                            recovery=recovery)
                             if new_msg is not None:
                                 await ws.send_str(new_msg)
                         elif msg.type == aiohttp.WSMsgType.ERROR:
@@ -1327,6 +1361,7 @@ class RTMiddleTier:
                 finally:
                     deadline_task.cancel()
                     cancel_nudge("socket closed")
+                    recovery.cancel("socket closed")
                     _vlog(verbose, "\n═══ [SESSION] Disconnected ═══\n"
                                    "Session ID: %s\n"
                                    "══════════════════════════════", session_id or "?")

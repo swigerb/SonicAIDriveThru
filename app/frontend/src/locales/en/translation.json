@@ -17,7 +17,9 @@
         "resumed": "Reconnected — your order is still here.",
         "resumedTapToContinue": "Reconnected — your order is still here. Tap the mic to continue.",
         "resumeRejected": "We couldn't restore your order. Tap the mic to start a new one.",
-        "superseded": "This order continued in another window. Tap the mic to start again."
+        "superseded": "This order continued in another window. Tap the mic to start again.",
+        "rateLimited": "One moment, please…",
+        "rateLimitedFinal": "We're a little busy — please say that again."
     },
     "history": {
         "transcriptHistory": "Transcript history",

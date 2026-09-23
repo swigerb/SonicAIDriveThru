@@ -1,6 +1,6 @@
-# Customizing the VoiceRAG deployment
+# Customizing the Sonic AI Drive-Thru deployment
 
-This guide shows you how to customize the [VoiceRAG](../README.md#deploying-the-app) deployment to specify different options.
+This guide shows you how to customize the [Sonic AI Drive-Thru](../README.md#deploying-the-app) deployment to specify different options.
 If your goal is to reuse existing services (OpenAI or Search), see the [existing services guide](./existing_services.md) instead.
 
 ## Customizing the real-time voice choice
@@ -29,6 +29,14 @@ If you've already run `azd up` and want to first preview the voice with the deve
 (env `AZURE_OPENAI_REALTIME_REASONING_MODEL`: `auto` | `true` | `false`) says whether it is; `auto` infers it from the name
 (`gpt-realtime-1.5`, `gpt-realtime`, `gpt-realtime-mini`, `gpt-4o-*` are treated as non-reasoning). If the service still
 rejects the session, the backend resends a minimal update (instructions + tools only), so tools always register.
+
+The deployment name is configuration, not code. `infra/main.bicep` creates `gpt-realtime-2.1` (GlobalStandard); to
+run on another deployment of the same model, such as a DataZoneStandard `gpt-realtime-2.1-dz` for data-residency
+requirements, point the app at it with `AZURE_OPENAI_REALTIME_DEPLOYMENT` (the `azd env set` flow in the
+[existing services guide](./existing_services.md), or `app/backend/.env` locally). With `reasoning_model: auto`,
+any name outside the non-reasoning list above, including `gpt-realtime-2.1-dz`, is treated as a reasoning
+deployment, so it gets the same `reasoning` settings as `gpt-realtime-2.1`; `gpt-realtime-1.5-dz` still does not.
+Check it with `python scripts/smoke_realtime.py --deployment gpt-realtime-2.1-dz`.
 
 Probed on `gpt-realtime-2.1` and `gpt-realtime-1.5`:
 
@@ -74,6 +82,47 @@ Why `low` is the default:
 
 `false` serialises search→add pairs and uses about 2× the tokens. Leaving it unset (`null`) already batches calls on 2.1
 and is safe on 1.5, so `null` is the default.
+
+## Post-deploy realtime smoke check
+
+`azd deploy` runs `scripts/smoke_realtime.ps1` (Windows) or `scripts/smoke_realtime.sh` (posix) as a `postdeploy`
+hook. The hook never fails the deployment: on a problem it prints a loud warning and exits 0. Skip it with
+`azd env set SONIC_SKIP_REALTIME_SMOKE true`. Run it by hand with:
+
+```shell
+python scripts/smoke_realtime.py                       # endpoint, deployment, tenant, subscription from the azd env
+python scripts/smoke_realtime.py --deployment gpt-realtime-2.1-dz
+python scripts/smoke_realtime.py --tenant <tenant-id> --subscription <subscription-id>
+```
+
+It checks, against the live deployment:
+
+- **Session config.** The bootstrap `session.update`, a relayed browser `session.update` and the minimal fallback each
+  come back as `session.updated` with the four tools, `tool_choice: auto`, the instructions, the voice and (on a
+  reasoning deployment) the reasoning effort.
+- **Transcription.** The realtime model reads a test order aloud ("Hi, can I get a large cherry limeade and a medium
+  tots, please?"), and that audio is sent as guest speech with the app's transcription model. The transcript must
+  match the phrase word for word, ignoring case, punctuation and spacing, with a similarity of at least 0.85. That
+  allows a transcriber's slip ("tops" for "tots") but not an answer. A model that replies "Sure, one large cherry
+  limeade…" instead of reading the phrase now fails the check. It used to pass with a note. The phrase is sent as
+  `response.instructions` rather than a user turn, because given a user turn `gpt-realtime-2.1` took the order
+  instead of reading it (5 of 6 live runs).
+
+Exit codes: 0 all passed, 1 a check failed, 2 could not run (settings, auth or network).
+
+**Tenant.** With `AZURE_OPENAI_EASTUS2_API_KEY` unset, the script uses an Entra ID token, and the token must come from
+the Azure OpenAI resource's tenant. On a machine signed in to several tenants, following the active `az`/`azd` default
+gave HTTP 400 "Tenant provided in token does not match resource token". The tenant and subscription now come from
+`--tenant`/`--subscription`, else `AZURE_TENANT_ID`/`AZURE_SUBSCRIPTION_ID` in the environment, else the azd env.
+Each value falls back on its own. The credentials are tried in turn, and every failure is reported:
+
+1. `az` for that subscription. This picks the sign-in that owns it without changing the global `az account` default.
+2. `azd`, pinned to the tenant.
+3. `az`, pinned to the tenant.
+
+With neither a tenant nor a subscription, the script falls back to `DefaultAzureCredential`. `azd up` grants the
+deploying principal "Cognitive Services OpenAI User" on the resource. Right after a first provision, that role
+assignment can take a few minutes to apply.
 
 ## Scaling, session affinity and the session-token secret
 

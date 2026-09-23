@@ -2,7 +2,17 @@ import "./status-message.css";
 import { useTranslation } from "react-i18next";
 import { memo } from "react";
 
-export type ConnectionNotice = "idle" | "lost" | "reconnecting" | "resumed" | "tapToResume" | "resumeRejected" | "superseded" | null;
+export type ConnectionNotice =
+    | "idle"
+    | "lost"
+    | "reconnecting"
+    | "resumed"
+    | "tapToResume"
+    | "resumeRejected"
+    | "superseded"
+    | "rateLimited"
+    | "rateLimitedFinal"
+    | null;
 
 type Properties = {
     isRecording: boolean;
@@ -16,8 +26,13 @@ const NOTICE_KEYS: Record<Exclude<ConnectionNotice, null>, string> = {
     resumed: "status.resumed",
     tapToResume: "status.resumedTapToContinue",
     resumeRejected: "status.resumeRejected",
-    superseded: "status.superseded"
+    superseded: "status.superseded",
+    rateLimited: "status.rateLimited",
+    rateLimitedFinal: "status.rateLimitedFinal"
 };
+
+// Notices that replace "conversation in progress" while the mic is live.
+const LIVE_NOTICES: ReadonlySet<ConnectionNotice> = new Set<ConnectionNotice>(["resumed", "rateLimited", "rateLimitedFinal"]);
 
 export default memo(function StatusMessage({ isRecording, notice = null }: Properties) {
     const { t } = useTranslation();
@@ -37,7 +52,7 @@ export default memo(function StatusMessage({ isRecording, notice = null }: Prope
                 ))}
             </div>
             <p className="mb-4 ml-2 mt-6 font-semibold text-primary">
-                {t(notice === "resumed" ? NOTICE_KEYS.resumed : "status.conversationInProgress")}
+                {t(notice && LIVE_NOTICES.has(notice) ? NOTICE_KEYS[notice] : "status.conversationInProgress")}
             </p>
         </div>
     );

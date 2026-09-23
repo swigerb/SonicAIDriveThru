@@ -1,7 +1,7 @@
 {
     "app": {
-        "title": "Parlez à vos données",
-        "footer": "Créée avec Azure AI Search + Azure OpenAI",
+        "title": "Commande vocale Sonic",
+        "footer": "Conçu avec Azure AI, Azure OpenAI et Azure Speech",
         "showTranscript": "Afficher la transcription",
         "stopRecording": "Arrêter l'enregistrement",
         "startRecording": "Commencer l'enregistrement",
@@ -17,7 +17,9 @@
         "resumed": "Reconnecté — votre commande est toujours là.",
         "resumedTapToContinue": "Reconnecté — votre commande est toujours là. Touchez le micro pour continuer.",
         "resumeRejected": "Impossible de récupérer votre commande. Touchez le micro pour en commencer une nouvelle.",
-        "superseded": "Cette commande s'est poursuivie dans une autre fenêtre. Touchez le micro pour recommencer."
+        "superseded": "Cette commande s'est poursuivie dans une autre fenêtre. Touchez le micro pour recommencer.",
+        "rateLimited": "Un instant, s'il vous plaît…",
+        "rateLimitedFinal": "Nous sommes un peu débordés — pouvez-vous répéter, s'il vous plaît ?"
     },
     "history": {
         "transcriptHistory": "Historique de la transcription",
@@ -26,5 +28,8 @@
     "groundingFiles": {
         "title": "Fichiers d'ancrage",
         "description": "Fichiers utilisés pour ancrer les réponses."
+    },
+    "menu": {
+        "title": "Menu"
     }
 }

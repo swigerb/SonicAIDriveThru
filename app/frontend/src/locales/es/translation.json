@@ -1,7 +1,7 @@
 {
     "app": {
-        "title": "Habla con tus datos",
-        "footer": "Creado con Azure AI Search + Azure OpenAI",
+        "title": "Pedidos por voz de Sonic",
+        "footer": "Creado con Azure AI, Azure OpenAI y Azure Speech",
         "showTranscript": "Mostrar transcripción",
         "stopRecording": "Detener grabación",
         "startRecording": "Comenzar grabación",
@@ -17,7 +17,9 @@
         "resumed": "Reconectado — tu pedido sigue aquí.",
         "resumedTapToContinue": "Reconectado — tu pedido sigue aquí. Toca el micrófono para continuar.",
         "resumeRejected": "No pudimos recuperar tu pedido. Toca el micrófono para empezar uno nuevo.",
-        "superseded": "Este pedido continuó en otra ventana. Toca el micrófono para empezar de nuevo."
+        "superseded": "Este pedido continuó en otra ventana. Toca el micrófono para empezar de nuevo.",
+        "rateLimited": "Un momento, por favor…",
+        "rateLimitedFinal": "Estamos un poco ocupados — ¿puedes repetirlo, por favor?"
     },
     "history": {
         "transcriptHistory": "Historial de transcripciones",
@@ -26,5 +28,8 @@
     "groundingFiles": {
         "title": "Archivos de fundamentación",
         "description": "Archivos utilizados para fundamentar las respuestas."
+    },
+    "menu": {
+        "title": "Menú"
     }
 }

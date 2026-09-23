@@ -45,3 +45,12 @@
   - Known limits:
     - A reload restores the ticket but needs a tap for the mic, because a new document's AudioContext starts suspended.
     - A duplicated tab shares the id; whichever resumes first wins, and the other gets 4002 or a rejection and starts fresh.
+
+## 2026-09-23 — feat/round3
+
+- **Round 3 review:**
+  - R1 composes with resume without a shared mutable flag: the nudge asks `recovery.busy`, the retry bypasses the idle clock, detach cancels. One failure is never handled twice (in-flight errors defer to that response's `response.done`).
+  - R2's strict transcript check is the real value: the old smoke passed while the model was answering instead of echoing.
+  - R3 guard scans source as well as locales, so a leftover can't come back through a component.
+  - Left alone deliberately: the internal `voicerag` logger name in `setup_search_index.py`, the VoiceRAG attribution in README / `voice_rag_README.md`, unused `groundingFiles.*` keys.
+  - Deploy-only: real Azure rate-limit error shape and retry hint; a live retry regenerating the answer; clip autoplay on devices; the postdeploy smoke hook under azd.

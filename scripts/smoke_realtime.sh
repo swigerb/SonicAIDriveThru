@@ -29,7 +29,8 @@ if [ "$code" -ne 0 ]; then
   echo "WARNING: =================================================================="
   if [ "$code" -eq 1 ]; then
     echo "WARNING:  REALTIME SMOKE CHECK FAILED: the live deployment rejected part of"
-    echo "WARNING:  the carhop's session config. Tools may NOT register. See above."
+    echo "WARNING:  the carhop's session config (tools may NOT register) or did not"
+    echo "WARNING:  transcribe the test phrase word for word. See above."
   else
     echo "WARNING:  Realtime smoke check could not run (exit $code) - auth, network or"
     echo "WARNING:  missing settings. Right after a first provision the OpenAI role"

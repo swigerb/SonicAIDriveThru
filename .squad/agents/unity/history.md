@@ -203,3 +203,17 @@ Since `app/frontend/` is off-limits, the middleware (`rtmt.py` + `audio_pipeline
   - `parallel_tool_calls` false serialises search→add, is about 1.3 s slower and uses about 2× the tokens. Keep `null`.
 - Results table: `docs/customizing_deploy.md`.
 - Raw JSONL: in the session `bench/` directory.
+
+## 2026-09-23 — feat/round3
+
+- **R1 backend (rate-limit recovery):** `app/backend/rate_limit.py` (`RateLimitRecovery`), wired in `rtmt.py`.
+  - Detection: failed `response.done` whose `status_details.error` code/type contains `rate_limit`, or an uncorrelated `rate_limit` `error` event. Correlated session.update errors still go to the minimal-update fallback.
+  - Ladder per failed response: silent retry after 1.5 s → `extension.rate_limited {attempt:1}` + retry after 4 s → `{attempt:2, final:true}`. A "try again in X s/ms" hint is clamped to [0.5, 5] / [2, 8] s.
+  - Cancelled by speech_started, a foreign `response.created`, a browser `response.create`, or detach.
+  - Composes with resume: a retry never touches the idle clock; the nudge is gated on `recovery.busy`; an error during the nudge's response doesn't stack a retry; detach cancels.
+  - Config `resilience.rate_limit.*`; `RATE_LIMIT_RECOVERY_ENABLED` overrides (same name as the sibling demos).
+- **Apology clips:** `scripts/generate_apology_clips.py` recorded en/es/fr/ja on `gpt-realtime-2.1` / marin (phrase in `response.instructions`), each whisper-verified word for word (2.1–3.2 s, 100–152 KB).
+- **R2 (smoke check port):** `scripts/smoke_realtime.py` now fails when the transcript doesn't match the synthesised phrase (similarity ≥ 0.85), puts the phrase in `response.instructions`, and authenticates against the resource's tenant (`--tenant` / `--subscription`, env, azd; credentials tried in turn).
+  - Live probe: user-turn synthesis was verbatim 1/6 (the model answered the order); `response.instructions` 6/6.
+  - Live smoke passed on `gpt-realtime-2.1` (0.98) and `gpt-realtime-2.1-dz` (1.00).
+- **dz:** `gpt-realtime-2.1-dz` pinned as a reasoning deployment (test + docs note).
