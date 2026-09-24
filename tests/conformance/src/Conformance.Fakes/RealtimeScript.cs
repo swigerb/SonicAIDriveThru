@@ -140,12 +140,25 @@ public sealed class RealtimeScript
                 {
                     return;
                 }
+                var itemNode = System.Text.Json.Nodes.JsonNode.Parse(item.GetRawText());
                 await connection.SendAsync(new System.Text.Json.Nodes.JsonObject
                 {
                     ["type"] = "conversation.item.added",
                     ["event_id"] = FakeRealtimeConnection.NewEventId(),
                     ["previous_item_id"] = connection.SessionState.LastConversationItemId,
-                    ["item"] = System.Text.Json.Nodes.JsonNode.Parse(item.GetRawText()),
+                    ["item"] = itemNode?.DeepClone(),
+                }, ct).ConfigureAwait(false);
+                // GA also emits conversation.item.done "when the item is finalized" -- a second,
+                // separate event carrying the full item again. Rick's PR #30 review ("M1"/"M2")
+                // found the backend had no filtering for this event at all, and that the fake's
+                // silence on it was exactly why the existing conformance suite never caught the
+                // leak: nothing exercised the wire behaviour .created/.added alone can't prove.
+                await connection.SendAsync(new System.Text.Json.Nodes.JsonObject
+                {
+                    ["type"] = "conversation.item.done",
+                    ["event_id"] = FakeRealtimeConnection.NewEventId(),
+                    ["previous_item_id"] = connection.SessionState.LastConversationItemId,
+                    ["item"] = itemNode?.DeepClone(),
                 }, ct).ConfigureAwait(false);
             });
 
