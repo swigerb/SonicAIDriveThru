@@ -665,6 +665,26 @@ class RTMiddleTier:
             self._token_refresh_task.cancel()
         self._sessions.stop_idle_checker()
 
+    def _scrub_session_for_client(self, session: dict) -> None:
+        """Strip the system prompt, tool schemas and other server-internal
+        fields from a `session` object before it is relayed to the browser.
+
+        Every GA server event that echoes the full session object -- currently
+        `session.created` (on connect) and `session.updated` (after every
+        accepted session.update: our own bootstrap one, the voice picker, the
+        browser's own handshake, a rejection fallback...) -- must route
+        through this one helper so both events are scrubbed identically. If
+        we ever allow client-side tools, this will need updating.
+        """
+        session["instructions"] = ""
+        session["tools"] = []
+        # Set voice in both legacy and GA locations for client compatibility
+        session["voice"] = self.voice_choice
+        audio = session.setdefault("audio", {})
+        audio.setdefault("output", {})["voice"] = self.voice_choice
+        session["tool_choice"] = "none"
+        session["max_response_output_tokens"] = None
+
     async def _process_message_to_client(self, msg: str, client_ws: web.WebSocketResponse, server_ws: web.WebSocketResponse, tools_pending: dict[str, RTToolCall], verbose: bool = False, guard: "_SessionUpdateGuard | None" = None, on_session_created: Callable[[], Awaitable[None]] | None = None, recovery: RateLimitRecovery | None = None) -> str | None:
         data = msg.data
 
@@ -732,16 +752,7 @@ class RTMiddleTier:
                 case "session.created":
                     session = message["session"]
                     _vlog(verbose, "  Session ID: %s", session.get("id", "?"))
-                    # Hide the instructions, tools and max tokens from clients, if we ever allow client-side 
-                    # tools, this will need updating
-                    session["instructions"] = ""
-                    session["tools"] = []
-                    # Set voice in both legacy and GA locations for client compatibility
-                    session["voice"] = self.voice_choice
-                    audio = session.setdefault("audio", {})
-                    audio.setdefault("output", {})["voice"] = self.voice_choice
-                    session["tool_choice"] = "none"
-                    session["max_response_output_tokens"] = None
+                    self._scrub_session_for_client(session)
                     updated_message = json.dumps(message)
                     if on_session_created is not None:
                         # The forwarder announces the session (metadata or resume)
@@ -757,6 +768,16 @@ class RTMiddleTier:
                               identifiers.session_token,
                               identifiers.round_trip_index,
                               identifiers.round_trip_token)
+
+                case "session.updated":
+                    # Same leak surface as session.created: this event fires
+                    # after every accepted session.update (ours or the
+                    # browser's) and echoes the full session object right
+                    # back -- instructions/tools/max-tokens included.
+                    session = message.get("session")
+                    if session is not None:
+                        self._scrub_session_for_client(session)
+                        updated_message = json.dumps(message)
 
                 case "response.created":
                     if recovery is not None:
