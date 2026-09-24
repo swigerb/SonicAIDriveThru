@@ -50,7 +50,35 @@ public sealed class ComboAbsorptionTests(HappyHourJustBeforeOpenFixture fixture)
 
         var order = JsonDocument.Parse(result.ToolResultJson!).RootElement;
         Assert.Equal(scenario.ExpectedLineItemCount, order.GetProperty("items").GetArrayLength());
-        Assert.Equal(scenario.ExpectedTotal, order.GetProperty("total").GetDouble(), precision: 2);
+        OrderScenarioHelpers.AssertMoneyEqual(scenario.ExpectedTotal, order.GetProperty("total").GetDecimal());
+
+        // PR #38 review item 6: wires up the previously-unenforced expectedComboComplete golden
+        // field via the black-box "[SYSTEM HINT: ...]" text tools.py::update_order appends to the
+        // model-facing function_call_output whenever get_combo_requirements(...) reports the
+        // combo still incomplete (needs a side/drink). This also kills Rick's M1 (PR #38 review
+        // item 4): if reset_order stopped zeroing the absorbed-slot counters, the fresh combo
+        // added after reset in this scenario's steps would wrongly look complete and this
+        // assertion would fail to find the hint.
+        if (scenario.ExpectedComboComplete)
+        {
+            Assert.DoesNotContain("[SYSTEM HINT:", result.FunctionCallOutputText);
+        }
+        else
+        {
+            Assert.Contains("[SYSTEM HINT:", result.FunctionCallOutputText);
+        }
+
+        // PR #38 review item 4 (Rick's M2/M6): when a conversion/absorption step only consumes
+        // part of a standalone line's quantity, the remainder must survive as its own priced
+        // line — neither the whole line removed (M2: converting one of two standalone burgers to
+        // a combo) nor the whole quantity silently absorbed (M6: a combo needing one side slot
+        // sent two units of that side in one call).
+        if (scenario.ExpectedStandaloneQuantityAfterConversion is int expectedStandaloneQty)
+        {
+            var standaloneItem = order.GetProperty("items").EnumerateArray()
+                .Single(i => !i.GetProperty("item").GetString()!.Contains("Combo"));
+            Assert.Equal(expectedStandaloneQty, standaloneItem.GetProperty("quantity").GetInt32());
+        }
     });
 
     [Fact]
@@ -63,8 +91,8 @@ public sealed class ComboAbsorptionTests(HappyHourJustBeforeOpenFixture fixture)
         var result = await OrderScenarioHelpers.RunOrderStepsAsync(
             connection, browser,
             [
-                ("add", "SONIC® Cheeseburger (No Onions)", "standard", 1, 5.29),
-                ("add", "SONIC® Cheeseburger Combo", "standard", 1, 8.49),
+                ("add", "SONIC® Cheeseburger (No Onions)", "standard", 1, 5.29m),
+                ("add", "SONIC® Cheeseburger Combo", "standard", 1, 8.49m),
             ],
             roundTripIndex, ct);
 
@@ -72,7 +100,7 @@ public sealed class ComboAbsorptionTests(HappyHourJustBeforeOpenFixture fixture)
         var items = order.GetProperty("items");
         Assert.Equal(1, items.GetArrayLength());
         Assert.Contains("(No Onions)", items[0].GetProperty("item").GetString());
-        Assert.Equal(8.49, order.GetProperty("total").GetDouble(), precision: 2);
+        OrderScenarioHelpers.AssertMoneyEqual(8.49m, order.GetProperty("total").GetDecimal());
     });
 
     public static TheoryData<int> ComboItemIndexes()
@@ -104,9 +132,9 @@ public sealed class ComboAbsorptionTests(HappyHourJustBeforeOpenFixture fixture)
             roundTripIndex, ct);
 
         var order = JsonDocument.Parse(result.ToolResultJson!).RootElement;
-        Assert.Equal(combo.Price, order.GetProperty("total").GetDouble(), precision: 2);
-        Assert.Equal(combo.ExpectedTax, order.GetProperty("tax").GetDouble(), precision: 2);
-        Assert.Equal(combo.ExpectedFinalTotal, order.GetProperty("finalTotal").GetDouble(), precision: 2);
+        OrderScenarioHelpers.AssertMoneyEqual(combo.Price, order.GetProperty("total").GetDecimal());
+        OrderScenarioHelpers.AssertMoneyEqual(combo.ExpectedTax, order.GetProperty("tax").GetDecimal());
+        OrderScenarioHelpers.AssertMoneyEqual(combo.ExpectedFinalTotal, order.GetProperty("finalTotal").GetDecimal());
     });
 }
 
@@ -116,7 +144,10 @@ public sealed class ComboAbsorptionTests(HappyHourJustBeforeOpenFixture fixture)
 /// a fully-satisfied combo plus an extra standalone drink beyond the one absorbed slot, where only
 /// the extra drink is halved -- the combo price and the already-absorbed drink are untouched.
 /// Needs the HappyHourAtOpen FixedClock (14:00:00) rather than ComboAbsorptionTests's off-happy-hour
-/// fixture, so it gets its own top-level class/collection.
+/// fixture, so it gets its own top-level class/collection. Also runs the 10-real-combo-items
+/// Theory again under this same fixture (PR #38 review item 7): combos are never themselves
+/// classified as "drinks" (see test_combo_orders.py::test_combo_price_not_discounted_during_happy_hour),
+/// so their price/tax/finalTotal must come out byte-for-byte identical to the off-happy-hour run.
 /// </summary>
 [Collection(HappyHourAtOpenCollection.Name)]
 public sealed class ComboAbsorptionHappyHourTests(HappyHourAtOpenFixture fixture)
@@ -136,6 +167,42 @@ public sealed class ComboAbsorptionHappyHourTests(HappyHourAtOpenFixture fixture
 
         var order = JsonDocument.Parse(result.ToolResultJson!).RootElement;
         Assert.Equal(scenario.ExpectedLineItemCount, order.GetProperty("items").GetArrayLength());
-        Assert.Equal(scenario.ExpectedTotal, order.GetProperty("total").GetDouble(), precision: 2);
+        OrderScenarioHelpers.AssertMoneyEqual(scenario.ExpectedTotal, order.GetProperty("total").GetDecimal());
+    });
+
+    public static TheoryData<int> ComboItemIndexes()
+    {
+        var golden = GoldenOrderPricingData.Load(RepoPaths.FindRepoRoot());
+        var data = new TheoryData<int>();
+        for (var i = 0; i < golden.Combos.Items.Count; i++)
+        {
+            data.Add(i);
+        }
+        return data;
+    }
+
+    [Theory]
+    [MemberData(nameof(ComboItemIndexes))]
+    public Task All_ten_real_combo_menu_items_price_correctly_to_the_cent_during_happy_hour(int comboIndex) => fixture.RunAsync(async () =>
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var golden = GoldenOrderPricingData.Load(RepoPaths.FindRepoRoot());
+        Assert.Equal(10, golden.Combos.ExpectedCount);
+        var combo = golden.Combos.Items[comboIndex];
+
+        var (browser, connection, roundTripIndex) = await OrderScenarioHelpers.ConnectAndGreetAsync(fixture, ct);
+        await using var _ = browser;
+
+        var result = await OrderScenarioHelpers.RunOrderStepsAsync(
+            connection, browser,
+            [("add", combo.Name, combo.Size, 1, combo.Price)],
+            roundTripIndex, ct);
+
+        var order = JsonDocument.Parse(result.ToolResultJson!).RootElement;
+        // A combo's bundle price is never itself classified as a "drink" line, so happy hour
+        // being active must make no difference at all -- identical to the off-happy-hour Theory.
+        OrderScenarioHelpers.AssertMoneyEqual(combo.Price, order.GetProperty("total").GetDecimal());
+        OrderScenarioHelpers.AssertMoneyEqual(combo.ExpectedTax, order.GetProperty("tax").GetDecimal());
+        OrderScenarioHelpers.AssertMoneyEqual(combo.ExpectedFinalTotal, order.GetProperty("finalTotal").GetDecimal());
     });
 }
