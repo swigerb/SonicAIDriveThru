@@ -780,6 +780,134 @@ class ProcessMessageToClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(parsed["session"]["voice"], "coral")
         self.assertEqual(parsed["session"]["audio"]["output"]["voice"], "coral")
 
+    async def test_session_updated_strips_instructions_and_tools(self):
+        """swigerb/SonicAIDriveThru#27: session.updated echoes the full session
+        object just like session.created, and must be scrubbed identically."""
+        rtmt = self._make_rtmt()
+        rtmt.voice_choice = "coral"
+        client_ws = _make_mock_ws()
+        server_ws = _make_mock_ws()
+        tools_pending = {}
+        order_state_singleton.sessions = {}
+        rtmt._sessions.create_session(client_ws)
+
+        msg = MagicMock()
+        msg.data = json.dumps({
+            "type": "session.updated",
+            "session": {
+                "id": "sess-123",
+                "instructions": "secret prompt",
+                "tools": [{"name": "search"}],
+                "voice": "alloy",
+                "tool_choice": "auto",
+                "max_response_output_tokens": 500,
+            }
+        })
+        result = await rtmt._process_message_to_client(msg, client_ws, server_ws, tools_pending)
+        parsed = json.loads(result)
+        self.assertEqual(parsed["session"]["instructions"], "")
+        self.assertEqual(parsed["session"]["tools"], [])
+        self.assertEqual(parsed["session"]["voice"], "coral")
+        self.assertEqual(parsed["session"]["audio"]["output"]["voice"], "coral")
+
+    async def test_session_updated_with_no_session_object_is_a_noop(self):
+        """A malformed/unexpected session.updated with no `session` key must
+        not crash -- it's forwarded unchanged rather than scrubbed."""
+        rtmt = self._make_rtmt()
+        client_ws = _make_mock_ws()
+        server_ws = _make_mock_ws()
+        tools_pending = {}
+        msg = MagicMock()
+        msg.data = json.dumps({"type": "session.updated"})
+        result = await rtmt._process_message_to_client(msg, client_ws, server_ws, tools_pending)
+        self.assertEqual(result, msg.data)
+
+    async def test_session_created_and_updated_strip_ga_only_secret_fields(self):
+        """swigerb/SonicAIDriveThru#29: the GA echo carries a duplicate token
+        cap under `max_output_tokens` (the original scrub only nulled the
+        legacy `max_response_output_tokens`), plus `model` (the internal
+        Azure deployment name), `audio.input.transcription.model` (the
+        transcription deployment name), `reasoning` and `parallel_tool_calls`
+        (reasoning-model tuning knobs) -- none of which the browser needs or
+        useRealtime.tsx reads off session.created/session.updated."""
+        rtmt = self._make_rtmt()
+        client_ws = _make_mock_ws()
+        server_ws = _make_mock_ws()
+        tools_pending = {}
+        order_state_singleton.sessions = {}
+        rtmt._sessions.create_session(client_ws)
+
+        raw_session = {
+            "id": "sess-123",
+            "instructions": "secret prompt",
+            "tools": [{"name": "search"}],
+            "voice": "alloy",
+            "tool_choice": "auto",
+            "max_response_output_tokens": 500,
+            "max_output_tokens": 500,
+            "model": "gpt-realtime-2.1-super-secret-deployment",
+            "reasoning": {"effort": "low"},
+            "parallel_tool_calls": True,
+            "audio": {
+                "input": {"transcription": {"model": "gpt-4o-transcribe-secret-deployment"}},
+                "output": {"voice": "alloy"},
+            },
+        }
+        for event_type in ("session.created", "session.updated"):
+            msg = MagicMock()
+            msg.data = json.dumps({"type": event_type, "session": dict(raw_session)})
+            result = await rtmt._process_message_to_client(msg, client_ws, server_ws, tools_pending)
+            session = json.loads(result)["session"]
+            self.assertNotIn("max_output_tokens", session, f"{event_type} leaked the GA max-token cap")
+            self.assertNotIn("model", session, f"{event_type} leaked the internal deployment name")
+            self.assertNotIn("reasoning", session, f"{event_type} leaked the reasoning tuning knob")
+            self.assertNotIn("parallel_tool_calls", session, f"{event_type} leaked parallel_tool_calls")
+            self.assertNotIn("model", session["audio"]["input"]["transcription"],
+                              f"{event_type} leaked the transcription deployment name")
+
+    async def test_conversation_item_created_drops_server_authored_system_item(self):
+        """swigerb/SonicAIDriveThru#29: role="system" conversation items are
+        only ever ones the middle tier itself created (session_manager's
+        build_rehydration_item / build_nudge_item) and sent straight upstream
+        -- the model never originates one. Upstream echoes the item back via
+        conversation.item.created/added, which must not reach the browser:
+        it carries the resume rehydration text (recent transcript + order
+        JSON) or the silent-guest nudge prompt, neither meant for the guest."""
+        rtmt = self._make_rtmt()
+        client_ws = _make_mock_ws()
+        server_ws = _make_mock_ws()
+        tools_pending = {}
+        for event_type in ("conversation.item.created", "conversation.item.added"):
+            msg = MagicMock()
+            msg.data = json.dumps({
+                "type": event_type,
+                "previous_item_id": "prev-1",
+                "item": {
+                    "type": "message",
+                    "role": "system",
+                    "content": [{"type": "input_text", "text": "Current order (JSON): {...}"}],
+                },
+            })
+            result = await rtmt._process_message_to_client(msg, client_ws, server_ws, tools_pending)
+            self.assertIsNone(result, f"{event_type} with role=system must be dropped from the client relay")
+
+    async def test_conversation_item_created_still_forwards_user_and_assistant_items(self):
+        """Only role="system" items are dropped -- role="user"/"assistant"
+        items (real conversation turns) must keep reaching the browser
+        unchanged; the frontend's transcript UI depends on them."""
+        rtmt = self._make_rtmt()
+        client_ws = _make_mock_ws()
+        server_ws = _make_mock_ws()
+        tools_pending = {}
+        for role in ("user", "assistant"):
+            msg = MagicMock()
+            msg.data = json.dumps({
+                "type": "conversation.item.created",
+                "item": {"type": "message", "role": role, "content": [{"type": "input_text", "text": "hi"}]},
+            })
+            result = await rtmt._process_message_to_client(msg, client_ws, server_ws, tools_pending)
+            self.assertEqual(result, msg.data, f"role={role} conversation item must still be forwarded")
+
     async def test_unknown_message_type_returned_as_data(self):
         """Unknown message types should pass through without crashing."""
         rtmt = self._make_rtmt()

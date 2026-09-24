@@ -684,6 +684,26 @@ class RTMiddleTier:
         audio.setdefault("output", {})["voice"] = self.voice_choice
         session["tool_choice"] = "none"
         session["max_response_output_tokens"] = None
+        # `max_response_output_tokens` above is the legacy field name; GA
+        # echoes the same cap back under `max_output_tokens`, which the line
+        # above never touches. Drop it rather than null it out, since the
+        # browser has no case for either session event and reads neither key.
+        session.pop("max_output_tokens", None)
+        # `model` is our Azure deployment name (internal infra detail, not a
+        # secret the browser has any use for); `reasoning`/`parallel_tool_calls`
+        # are server-owned tuning knobs for reasoning-capable deployments
+        # (see `_build_session`) that reveal which model family is deployed.
+        session.pop("model", None)
+        session.pop("reasoning", None)
+        session.pop("parallel_tool_calls", None)
+        # `audio.input.transcription.model` names the transcription deployment
+        # (see `transcription_model` / `_build_session`) -- same class of leak
+        # as `model` above, just nested under the GA audio shape.
+        audio_input = audio.get("input")
+        if isinstance(audio_input, dict):
+            transcription = audio_input.get("transcription")
+            if isinstance(transcription, dict):
+                transcription.pop("model", None)
 
     async def _process_message_to_client(self, msg: str, client_ws: web.WebSocketResponse, server_ws: web.WebSocketResponse, tools_pending: dict[str, RTToolCall], verbose: bool = False, guard: "_SessionUpdateGuard | None" = None, on_session_created: Callable[[], Awaitable[None]] | None = None, recovery: RateLimitRecovery | None = None) -> str | None:
         data = msg.data
@@ -806,6 +826,19 @@ class RTMiddleTier:
                         _vlog(verbose, "  Tool pending confirmed: call_id=%s, prev=%s", item["call_id"], message.get("previous_item_id", ""))
                         updated_message = None
                     elif "item" in message and message["item"]["type"] == "function_call_output":
+                        updated_message = None
+                    elif "item" in message and message["item"].get("role") == "system":
+                        # The only role="system" conversation items in this
+                        # conversation are ones the middle tier itself created
+                        # (build_rehydration_item / build_nudge_item, sent
+                        # straight to the upstream socket) -- the model never
+                        # originates a system-role item. Upstream echoes the
+                        # item straight back via this same event, which would
+                        # otherwise hand the browser our resume rehydration
+                        # text (recent transcript + order JSON) or nudge
+                        # prompt. The frontend has no case for either event
+                        # type, so dropping it changes nothing it reads.
+                        _vlog(verbose, "  Server-authored system item suppressed from client")
                         updated_message = None
                     elif "item" in message and message["item"].get("role") == "assistant":
                         # Log AI conversation items (non-tool)
