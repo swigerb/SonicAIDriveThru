@@ -196,5 +196,13 @@
 - Full suite: 75 passed / 1 skipped / 76 total, run 3×. No regressions.
 - Commit: `013c233`.
 
+## 2026-09-24 — feat/conformance-harness Stage C item N4 (#7)
+
+- Rick's N4: `BackendProfiles.ShortTimers` shortened every other backend timer but missed `CONFORMANCE_SWEEP_INTERVAL_SECONDS` (`session_manager.py`'s `_RESUME_SWEEP_INTERVAL_SECONDS`, default 15s) — a future resume-sweep scenario would still wait up to 15s per sweep even under `ShortTimers`.
+- Added `["CONFORMANCE_SWEEP_INTERVAL_SECONDS"] = "0.2"` to the profile, matching its other ~1s-or-faster overrides; updated the doc comment.
+- No scenario in the suite yet exercises session-resume sweeping (extension point for S1.2–S1.4), so this is a config-only passthrough fix with nothing independently mutation-checkable at the harness level — verified by the full suite staying green.
+- Full suite: 75 passed / 1 skipped / 76 total. No regressions.
+- Commit: `22eae93`.
+
 
 
