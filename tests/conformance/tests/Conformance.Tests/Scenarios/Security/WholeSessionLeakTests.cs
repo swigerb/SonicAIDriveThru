@@ -24,7 +24,12 @@ namespace Conformance.Tests.Scenarios.Security;
 /// leak via a frame type nobody thought to check (or a future GA event this suite doesn't
 /// enumerate by name) would also be caught.
 ///
-/// Deliberately captured text is limited to the four operator-only secrets above, and only their
+/// PR #30 review round 3, item 3 ("S2a") added a fifth secret source: every bootstrap tool's
+/// `description` and its whole serialized `parameters` object, since `_scrub_session_for_client`
+/// drops them from the browser-bound session echo via `session["tools"] = []` -- a different
+/// line than the conversation-item drop logic the other four secrets exercise.
+///
+/// Deliberately captured text is limited to the operator-only secrets above, and only their
 /// truly operator-only prose: the tool round trip's `function_call_output` content is *not*
 /// added to the secret set, because its result legitimately reaches the browser via
 /// `extension.middle_tier_tool_response` today (by design, not a leak; scrubbing
@@ -71,6 +76,24 @@ public sealed class WholeSessionLeakTests(ShortTimersConformanceFixture fixture)
         var instructions = bootstrap!.Json.GetProperty("session").GetProperty("instructions").GetString();
         Assert.False(string.IsNullOrEmpty(instructions), "Bootstrap session.update must carry non-empty instructions.");
         AddSecretWindows(instructions, secretWindows);
+
+        // ── PR #30 review round 3, item 3 ("S2a"): every tool's description and its whole
+        // serialized parameters object are just as operator-only as `instructions` -- they are
+        // dropped from the browser-bound session echo by `_scrub_session_for_client` setting
+        // `session["tools"] = []`, not by anything role- or authorship-based, so this is the one
+        // proof in the suite that specifically exercises *that* line rather than the
+        // conversation-item drop logic. ──
+        var bootstrapTools = bootstrap.Json.GetProperty("session").GetProperty("tools");
+        Assert.True(bootstrapTools.GetArrayLength() > 0, "Bootstrap session.update must carry at least one tool.");
+        foreach (var tool in bootstrapTools.EnumerateArray())
+        {
+            var toolDescription = tool.TryGetProperty("description", out var descProp) ? descProp.GetString() : null;
+            AddSecretWindows(toolDescription, secretWindows);
+            if (tool.TryGetProperty("parameters", out var parameters))
+            {
+                AddSecretWindows(parameters.GetRawText(), secretWindows);
+            }
+        }
 
         // ── Voice change: sent as the very first client frame (before SendStartSessionAsync),
         // so it lands before any assistant audio and isn't silently ignored as voice-locked. ──
