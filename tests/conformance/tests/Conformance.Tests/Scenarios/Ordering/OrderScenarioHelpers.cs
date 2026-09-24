@@ -103,15 +103,34 @@ public static class OrderScenarioHelpers
                 $"Expected extension.middle_tier_tool_response for {toolName} (call_id={callId}) on the browser within {FrameTimeout}.");
             toolResultJson = toolResponse!.Json.GetProperty("tool_result").GetString();
         }
-        else
+
+        // After a tool call, rtmt.py auto-issues a bare follow-up response.create upstream to get
+        // the model's spoken reply to the tool result; only once *that* turn also completes does
+        // it advance/emit the round trip token. Waiting for an index strictly greater than the
+        // caller's last-seen one (rather than just "the next round trip frame") means a second
+        // scripted tool call in the same test can never race an already-observed-but-stale frame.
+        var nextRoundTrip = await browser.ReceivedFrames.WaitForAsync(
+            f => f.Type == "extension.round_trip_token" &&
+                 f.Json.GetProperty("roundTripIndex").GetInt32() > previousRoundTripIndex,
+            FrameTimeout, ct);
+        Assert.True(nextRoundTrip is not null,
+            $"Round trip after {toolName} (call_id={callId}) never completed.");
+
+        if (!toClient)
         {
-            // PR #38 review item 3 (Rick's M4): a rejected/dropped call (TO_SERVER-only apology,
-            // or search which is always TO_SERVER) must not silently reach the browser as if it
-            // had succeeded. Positively prove no extension.middle_tier_tool_response for this
-            // tool arrived at all since the watermark -- not merely "we didn't wait for one",
-            // which would pass vacuously regardless of backend behavior -- and that the
-            // model-facing function_call_output text isn't itself a JSON order-summary object
-            // masquerading as a graceful apology.
+            // PR #38 re-review must-fix 1 (Rick): this positive "nothing arrived" check must run
+            // AFTER the nextRoundTrip wait above, not immediately after functionCallOutput. rtmt.py
+            // sends the upstream function_call_output *before* it sends (or in the rejected case,
+            // withholds) the browser-bound extension.middle_tier_tool_response -- checking a
+            // snapshot right after the upstream frame races the backend's own still-in-flight
+            // browser send and can pass vacuously (frame simply hadn't arrived yet), exactly the
+            // failure mode that let Rick's M4 mutation survive intermittently. Both frames travel
+            // over the single, ordered browser WebSocket, so by the time the round trip token for
+            // *this* call has been received, any middle_tier_tool_response the backend was ever
+            // going to send for it has necessarily already arrived -- there is no later point at
+            // which it could still show up. See ToolErrorSessionSurvivesTests's N1 mutation-testing
+            // note for why this ordering guarantee is what makes the check deterministic instead of
+            // racy (previously observed to catch Rick's mutation on only ~2 of 3 runs).
             var strayToolResponse = browser.ReceivedFrames.Snapshot().Any(f =>
                 f.Sequence >= browserWatermark &&
                 f.Type == "extension.middle_tier_tool_response" &&
@@ -129,18 +148,6 @@ public static class OrderScenarioHelpers
                 "scripted as rejected/dropped -- a genuine rejection is a plain apology string, " +
                 "never an order summary.");
         }
-
-        // After a tool call, rtmt.py auto-issues a bare follow-up response.create upstream to get
-        // the model's spoken reply to the tool result; only once *that* turn also completes does
-        // it advance/emit the round trip token. Waiting for an index strictly greater than the
-        // caller's last-seen one (rather than just "the next round trip frame") means a second
-        // scripted tool call in the same test can never race an already-observed-but-stale frame.
-        var nextRoundTrip = await browser.ReceivedFrames.WaitForAsync(
-            f => f.Type == "extension.round_trip_token" &&
-                 f.Json.GetProperty("roundTripIndex").GetInt32() > previousRoundTripIndex,
-            FrameTimeout, ct);
-        Assert.True(nextRoundTrip is not null,
-            $"Round trip after {toolName} (call_id={callId}) never completed.");
 
         return new ToolCallResult(
             outputText,
