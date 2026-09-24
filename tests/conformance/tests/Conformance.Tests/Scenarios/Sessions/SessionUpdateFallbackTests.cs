@@ -139,3 +139,100 @@ public sealed class UnrelatedErrorsDoNotTriggerFallbackTests(ConformanceFixture 
     // not an unexpected/unhandled error.
     allowedNewBackendErrors: 1);
 }
+
+/// <summary>
+/// #8 (PR #42 review item 3): the guard's no-second-fallback loop guard was previously untested
+/// black-box -- the only reachable rejection (<see cref="SessionUpdateFallbackTests"/>, above) can
+/// only ever reject once per connection, so a fallback that is ITSELF rejected (which is exactly
+/// what should stop the guard from chaining a second, third, ... fallback forever) was never
+/// exercised. <see cref="Conformance.Fakes.FakeRealtimeUpstreamServer.RejectNextSessionUpdates"/>
+/// scripts an arbitrary rejection independent of GA's built-in rules, so both the bootstrap's
+/// session.update AND its own fallback can be forced to fail here. Uses <c>echoEventId: true</c>
+/// (the reasoning fixture's built-in rejection omits it) to additionally prove
+/// <c>_SessionUpdateGuard.correlate</c>'s event_id-keyed path, not just its order-based fallback.
+/// Uses <c>echoEventId: true</c>
+/// (the reasoning fixture's built-in rejection omits it) to additionally prove
+/// <c>_SessionUpdateGuard.correlate</c>'s event_id-keyed path, not just its order-based fallback.
+/// Deliberately runs on <see cref="Gpt15ConformanceFixture"/> (never sends `reasoning`), not the
+/// plain Default deployment: this is about the guard's loop protection alone, and the Default
+/// deployment's bootstrap already sends `reasoning` by default, which would make the scripted
+/// rejection here ALSO flip rtmt.py's process-wide `_reasoning_rejected` latch — a real,
+/// observable side effect this test must not cause, since <see cref="ConformanceCollection"/> is
+/// shared by every other Default-deployment scenario in the suite.
+/// </summary>
+[Collection(Gpt15ConformanceCollection.Name)]
+public sealed class SecondSessionUpdateRejectionLoopGuardTests(Gpt15ConformanceFixture fixture)
+{
+    private static readonly TimeSpan FrameTimeout = TimeSpan.FromSeconds(30);
+
+    [Fact]
+    public Task Rejecting_the_fallback_itself_sends_no_second_fallback_and_the_error_reaches_the_browser() => fixture.RunAsync(async () =>
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var noneOpen = await fixture.Realtime.WaitForNoOpenConnectionsAsync(FrameTimeout, ct);
+        Assert.True(noneOpen, $"Expected no open upstream connections at test start, but " +
+            $"{fixture.Realtime.OpenConnectionCount} are still open — a previous test leaked a connection.");
+
+        // Reject the next TWO session.update frames this server sees, on whichever connection
+        // sends them: the bootstrap (triggering the first, expected fallback) and then that very
+        // fallback (which must NOT trigger a second one).
+        fixture.Realtime.RejectNextSessionUpdates(2, code: "invalid_value", echoEventId: true);
+
+        var connectionTask = fixture.Realtime.WaitForNextConnectionAsync(FrameTimeout, ct);
+        await using var browser = await RealtimeBrowserClient.ConnectAsync(fixture.Backend!.BaseUri, cancellationToken: ct);
+        var connection = await connectionTask;
+        Assert.True(connection is not null, $"No upstream connection was accepted within {FrameTimeout}.");
+
+        var bootstrap = await connection!.ReceivedFrames.WaitForAsync(f => f.Sequence == 0, FrameTimeout, ct);
+        Assert.True(bootstrap is not null, "Bootstrap session.update never arrived.");
+
+        var fallback = await connection.ReceivedFrames.WaitForAsync(
+            f => f.Sequence > bootstrap.Sequence && f.Type == "session.update", FrameTimeout, ct);
+        Assert.True(fallback is not null, "Expected exactly one fallback after the bootstrap's scripted rejection.");
+
+        // The bootstrap's own rejection must still be fully recovered -- no error for it reaches
+        // the browser (same guarantee as SessionUpdateFallbackTests, re-proven here because this
+        // scenario's rejection source is different).
+        Assert.DoesNotContain(browser.ReceivedFrames.Snapshot(), f => f.Type == "error");
+
+        // The fallback itself was ALSO scripted-rejected. If the guard looped (M1: "rejected
+        // fallback triggers another fallback"), it would send a THIRD session.update instead of
+        // ever letting this second rejection reach the browser -- assert the opposite of that.
+        var error = await browser.ReceivedFrames.WaitForAsync(f => f.Type == "error", FrameTimeout, ct);
+        Assert.True(error is not null, "Expected the fallback's own rejection to reach the browser once the guard refuses to loop.");
+        Assert.Equal("invalid_value", error!.Json.GetProperty("error").GetProperty("code").GetString());
+
+        // echoEventId: true was requested -- the fallback's own event_id must be the one echoed
+        // back, proving the guard correlated this rejection to the fallback specifically (not
+        // just "the oldest thing in flight", which the order-based path would also get right).
+        var fallbackEventId = fallback!.Json.GetProperty("event_id").GetString();
+        Assert.Equal(fallbackEventId, error.Json.GetProperty("error").GetProperty("event_id").GetString());
+
+        // Sentinel round trip: our scripted-rejection budget (2) is now exhausted, so the
+        // browser's OWN session.update (the third session.update frame overall) must be accepted
+        // normally and the greeting must complete -- proving forward progress, and that nothing
+        // async is still queued to send a belated extra fallback.
+        await browser.SendStartSessionAsync(cancellationToken: ct);
+        var roundTripToken = await browser.ReceivedFrames.WaitForAsync(
+            f => f.Type == "extension.round_trip_token", FrameTimeout, ct);
+        Assert.True(roundTripToken is not null, "extension.round_trip_token never reached the browser -- the greeting never completed after the scripted-rejection budget was exhausted.");
+
+        // No loop: exactly bootstrap + one fallback + the browser's own update -- never a third,
+        // looped session.update for the fallback's own rejection.
+        var updateCount = connection.ReceivedFrames.Snapshot().Count(f => f.Type == "session.update");
+        Assert.Equal(3, updateCount);
+
+        // Exactly one `error` ever reached the browser (the fallback's own rejection) -- the
+        // bootstrap's original rejection stayed fully invisible to it.
+        var browserErrorCount = browser.ReceivedFrames.Snapshot().Count(f => f.Type == "error");
+        Assert.Equal(1, browserErrorCount);
+    },
+    // Three deterministic backend ERROR-level log lines are this scenario's own subject matter:
+    // "Upstream REJECTED session.update ..." (recovering the bootstrap's rejection), "Fallback
+    // session.update ... was ALSO rejected ..." (refusing to loop), and the generic "OpenAI
+    // Realtime API error: ..." fall-through log for the second rejection once it's let through to
+    // the browser. All three are proven-expected above, not unhandled. (Unlike
+    // SessionUpdateFallbackTests, gpt-realtime-1.5 never sends `reasoning`, so there's no fourth
+    // "rejected reasoning-model options" log line here.)
+    allowedNewBackendErrors: 3);
+}
