@@ -33,10 +33,14 @@ namespace Conformance.Tests.Scenarios.Security;
 /// truly operator-only prose: the tool round trip's `function_call_output` content is *not*
 /// added to the secret set, because its result legitimately reaches the browser via
 /// `extension.middle_tier_tool_response` today (by design, not a leak; scrubbing
-/// `response.done`'s embedded function_call args is tracked separately as out-of-scope "F2");
-/// and the rehydration item's embedded order JSON / recent-conversation history is excluded for
-/// the same reason -- both duplicate data the browser already legitimately has (its own order
-/// state, its own earlier conversation.item frames) -- only its preamble prose is captured.
+/// `response.done`'s embedded function_call args is tracked separately as out-of-scope "F2").
+/// The rehydration item's embedded order JSON / recent-conversation history duplicates data the
+/// browser already legitimately has (its own order state, its own earlier conversation.item /
+/// transcript frames) -- rather than hand-splitting that text at a backend-specific marker
+/// string, PR #30 review round 3, item 5 ("S2c") captures the *full* rehydration text and
+/// subtracts only the windows that also appear in a real frame of a type the browser is
+/// genuinely meant to receive (<see cref="IsLegitimateBrowserFrameType"/>), proving the overlap
+/// is legitimate from this run's actual traffic instead of assuming it from wording.
 ///
 /// Mutation: disabling PR #30 follow-up "M1" (the `conversation.item.done` /
 /// `conversation.item.retrieved` drop case in `rtmt.py`) makes this fail because the rehydration
@@ -185,12 +189,18 @@ public sealed class WholeSessionLeakTests(ShortTimersConformanceFixture fixture)
             FrameTimeout, ct);
         Assert.True(rehydrationItem is not null,
             "Precondition failed: the backend never sent the rehydration item upstream on the resumed connection.");
-        // Only the preamble prose is captured as a secret -- build_rehydration_item also embeds
-        // the guest's own current order (JSON) and recent transcript, both of which are
-        // legitimate duplicates of data the browser already has via its own order state and
-        // earlier conversation.item frames, so including them here would make this test flag
-        // that expected (non-leak) overlap as a false positive.
-        AddSecretWindows(RehydrationPreamble(GreetingText(rehydrationItem!.Json.GetProperty("item"))), secretWindows);
+        // PR #30 review round 3, item 5 ("S2c"): capture the *full* rehydration text (preamble +
+        // embedded order JSON + recent-conversation history), then subtract only the windows that
+        // also legitimately appear in frame types the browser is genuinely meant to receive --
+        // rather than the old approach of hand-splitting off a literal marker string and keeping
+        // only the part before it. That hard-coded a specific backend wording (the
+        // "Current order (JSON):" marker) as the boundary between operator-only prose and
+        // legitimate duplicate data instead of proving the actual overlap is legitimate, and
+        // wouldn't generalize to another secret (S2b's search result) with a differently-shaped
+        // legitimate-overlap risk.
+        var legitimateBrowserFrames = first.ReceivedFrames.Snapshot().Concat(second.ReceivedFrames.Snapshot());
+        AddSecretWindowsExcludingLegitimateOverlap(
+            GreetingText(rehydrationItem!.Json.GetProperty("item")), legitimateBrowserFrames, secretWindows);
 
         // ── Wait for the silence nudge (ShortTimers' ~1s timer) with a keepalive so the idle
         // sweep (pinned to the same ~1s under ShortTimers) doesn't close the session first --
@@ -302,21 +312,79 @@ public sealed class WholeSessionLeakTests(ShortTimersConformanceFixture fixture)
             ? text.GetString()
             : null;
 
-    /// <summary>`build_rehydration_item` (session_manager.py) is
-    /// `"{preamble}\n\nCurrent order (JSON): {order_json}\n\nRecent conversation ...: {history}"`.
-    /// Only the preamble is operator-only prose; the order JSON and recent-conversation history
-    /// are legitimate duplicates of data the browser already has (its own order state, and its
-    /// own earlier conversation.item frames), so they're excluded from the secret set here to
-    /// avoid flagging that expected overlap as a false positive.</summary>
-    private static string? RehydrationPreamble(string? fullText)
+    /// <summary>The frame types the browser is genuinely meant to receive text through, so a
+    /// secret window that also shows up in one of these is legitimate duplicate data (the
+    /// guest's own order, its own earlier transcript), not a leak. Used by
+    /// <see cref="AddSecretWindowsExcludingLegitimateOverlap"/> to decide what to subtract from a
+    /// candidate secret's windows, rather than hand-splitting the secret's own text by a
+    /// backend-specific marker string.</summary>
+    private static bool IsLegitimateBrowserFrameType(string type) =>
+        type is "extension.session_resumed" or "extension.middle_tier_tool_response"
+            or "conversation.item.input_audio_transcription.completed" ||
+        type.StartsWith("response.audio_transcript.", StringComparison.Ordinal);
+
+    /// <summary>Generic replacement for hand-narrowing a secret's text to only its "safe" prose
+    /// (PR #30 review round 3, item 5, "S2c"): takes every 32-char window of the *full* secret
+    /// text, then removes any window that also appears in a real captured frame of a frame type
+    /// the browser is genuinely meant to receive (<see cref="IsLegitimateBrowserFrameType"/>) --
+    /// i.e. legitimate overlap is proven from what the browser actually got this run, not assumed
+    /// from where a marker string happens to sit in the backend's wording. What's left after
+    /// subtraction is added to <paramref name="windows"/> as usual.</summary>
+    private static void AddSecretWindowsExcludingLegitimateOverlap(
+        string? fullText, IEnumerable<RecordedFrame> browserFrames, HashSet<string> windows)
     {
-        if (string.IsNullOrEmpty(fullText))
+        Assert.False(string.IsNullOrEmpty(fullText), "Test bug: expected non-empty operator-only text to capture as a secret.");
+        var candidateWindows = new HashSet<string>(StringComparer.Ordinal);
+        for (var i = 0; i <= fullText!.Length - MinLeakSubstringLength; i++)
         {
-            return fullText;
+            candidateWindows.Add(fullText.Substring(i, MinLeakSubstringLength));
         }
-        const string orderMarker = "\n\nCurrent order (JSON):";
-        var index = fullText.IndexOf(orderMarker, StringComparison.Ordinal);
-        return index >= 0 ? fullText[..index] : fullText;
+
+        var legitimateWindows = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var frame in browserFrames)
+        {
+            if (IsLegitimateBrowserFrameType(frame.Type))
+            {
+                CollectStringWindows(frame.Json, legitimateWindows);
+            }
+        }
+
+        candidateWindows.ExceptWith(legitimateWindows);
+        windows.UnionWith(candidateWindows);
+    }
+
+    /// <summary>Recursively collects every 32-char window of every string leaf in a frame's JSON
+    /// -- the same walk <see cref="ContainsAnySecretWindow"/> does for matching, reused here to
+    /// build the legitimate-overlap exclusion set from real frames instead of matching against
+    /// precomputed secrets.</summary>
+    private static void CollectStringWindows(JsonElement element, HashSet<string> windows)
+    {
+        switch (element.ValueKind)
+        {
+            case JsonValueKind.String:
+                var text = element.GetString();
+                if (string.IsNullOrEmpty(text))
+                {
+                    return;
+                }
+                for (var i = 0; i <= text.Length - MinLeakSubstringLength; i++)
+                {
+                    windows.Add(text.Substring(i, MinLeakSubstringLength));
+                }
+                return;
+            case JsonValueKind.Object:
+                foreach (var property in element.EnumerateObject())
+                {
+                    CollectStringWindows(property.Value, windows);
+                }
+                return;
+            case JsonValueKind.Array:
+                foreach (var item in element.EnumerateArray())
+                {
+                    CollectStringWindows(item, windows);
+                }
+                return;
+        }
     }
 
     private static void AddSecretWindows(string? text, HashSet<string> windows)
