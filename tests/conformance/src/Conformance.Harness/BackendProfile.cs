@@ -29,10 +29,11 @@ public static class BackendProfiles
     /// <summary>
     /// Hooks enabled with every timer shortened to about a second, so timer-driven scenarios
     /// (idle timeout, resume grace/nudge, first-frame resume timeout, greeting timeout, rate-limit
-    /// retry delays) can complete in seconds instead of minutes. Leaves CONFORMANCE_FIXED_NOW unset
-    /// — wall-clock time still advances normally. Pair with <see cref="FixedClock"/>'s variables
-    /// manually (via a custom <see cref="PythonBackendOptions.ExtraEnvironment"/> dictionary) if a
-    /// scenario needs both short timers and a frozen clock at once.
+    /// retry delays, the session-resume sweep) can complete in seconds instead of minutes. Leaves
+    /// CONFORMANCE_FIXED_NOW unset — wall-clock time still advances normally. Pair with
+    /// <see cref="FixedClock"/>'s variables manually (via a custom
+    /// <see cref="PythonBackendOptions.ExtraEnvironment"/> dictionary) if a scenario needs both
+    /// short timers and a frozen clock at once.
     /// </summary>
     public static BackendProfile ShortTimers { get; } = new("ShortTimers", new Dictionary<string, string>
     {
@@ -44,6 +45,7 @@ public static class BackendProfiles
         ["CONFORMANCE_GREETING_TIMEOUT_SECONDS"] = "1",
         ["CONFORMANCE_RATE_LIMIT_RETRY_DELAY_SECONDS"] = "0.2",
         ["CONFORMANCE_RATE_LIMIT_SECOND_RETRY_DELAY_SECONDS"] = "0.4",
+        ["CONFORMANCE_SWEEP_INTERVAL_SECONDS"] = "0.2",
     });
 
     /// <summary>
