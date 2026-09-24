@@ -64,6 +64,21 @@ public sealed record ComboAbsorptionScenario(
     bool ExpectedComboComplete,
     int? ExpectedStandaloneQuantityAfterConversion = null);
 
+/// <summary>
+/// PR #38 second re-review should-fix 2: a golden case for the spoken `$X.XX` display text in the
+/// `function_call_output`, distinct from the exact-decimal wire contract above. <see
+/// cref="LandsOnHalfCent"/> tells scenario code whether this case can be asserted against the live
+/// Python backend today (false) or must stay `[Fact(Skip = ...)]` referencing #46 until a
+/// conforming backend exists (true) -- see the README's "Rendering money for display" section.
+/// </summary>
+public sealed record SpokenTotalCase(
+    string Description,
+    IReadOnlyList<ComboStep> Steps,
+    bool HappyHour,
+    decimal ExpectedFinalTotal,
+    string ExpectedSpokenTotalText,
+    bool LandsOnHalfCent);
+
 public sealed record GoldenOrderPricingData(
     BusinessRules BusinessRules,
     HappyHourBoundaryInstants HappyHourBoundaryInstants,
@@ -72,7 +87,8 @@ public sealed record GoldenOrderPricingData(
     IReadOnlyList<SizeDisplayCase> SizeDisplayCases,
     QuantityLimits QuantityLimits,
     CombosSection Combos,
-    IReadOnlyList<ComboAbsorptionScenario> ComboAbsorptionScenarios)
+    IReadOnlyList<ComboAbsorptionScenario> ComboAbsorptionScenarios,
+    IReadOnlyList<SpokenTotalCase> SpokenTotalCases)
 {
     private static readonly JsonSerializerOptions Options = new()
     {
