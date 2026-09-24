@@ -36,12 +36,57 @@ public static class ExternalModeProfilePolicy
     /// <summary>
     /// Returns a clear skip reason when <paramref name="backendUrl"/> denotes external mode and
     /// <paramref name="profileName"/> isn't <paramref name="defaultProfileName"/>; otherwise null
-    /// (the fixture should proceed normally).
+    /// (the fixture should proceed normally). Equivalent to calling the four-argument overload
+    /// with <c>deployment: null</c> — kept for existing callers that only vary <see
+    /// cref="BackendProfile"/>, not <c>AZURE_OPENAI_REALTIME_DEPLOYMENT</c>.
     /// </summary>
-    public static string? ShouldSkip(string? backendUrl, string profileName, string defaultProfileName)
+    public static string? ShouldSkip(string? backendUrl, string profileName, string defaultProfileName) =>
+        ShouldSkip(backendUrl, profileName, defaultProfileName, deployment: null);
+
+    /// <summary>
+    /// Returns a clear skip reason when <paramref name="backendUrl"/> denotes external mode and
+    /// either <paramref name="profileName"/> isn't <paramref name="defaultProfileName"/>, OR
+    /// <paramref name="deployment"/> is a non-null override (PR #42 review item 2). A non-null
+    /// <paramref name="deployment"/> has exactly the same "needs its own dedicated backend
+    /// process" requirement as a non-Default <see cref="BackendProfile"/> does —
+    /// <c>AZURE_OPENAI_REALTIME_DEPLOYMENT</c> is read once at Python module-import time (see
+    /// <c>ReasoningDeploymentFixtures.cs</c>) — but before this overload existed, a fixture that
+    /// only overrode <c>Deployment</c> while leaving <c>Profile</c> at its Default value slipped
+    /// through the profile-name check entirely: it neither skipped (so it bound the same fixed
+    /// fake ports as every other collection, racing them) nor got a backend actually launched
+    /// with its intended deployment name (external mode's one already-running backend has
+    /// whatever deployment name it was started with — almost certainly not
+    /// "gpt-realtime-1.5-conformance"). Concretely, without this check, a gpt-realtime-1.5-named
+    /// fixture would silently run its "reasoning is never sent for 1.5" assertions against an
+    /// external backend that may well be a 2.1 deployment, passing or failing for the wrong
+    /// reason instead of skipping.
+    /// </summary>
+    public static string? ShouldSkip(string? backendUrl, string profileName, string defaultProfileName, string? deployment)
     {
         var isExternal = !string.IsNullOrWhiteSpace(backendUrl);
-        if (!isExternal || profileName == defaultProfileName)
+        if (!isExternal)
+        {
+            return null;
+        }
+
+        if (deployment is not null)
+        {
+            return
+                $"CONFORMANCE_BACKEND_URL is set (external mode) -- skipping the backend " +
+                $"collection that overrides AZURE_OPENAI_REALTIME_DEPLOYMENT to '{deployment}'. " +
+                $"External mode has exactly one already-running backend process, started with " +
+                $"whatever deployment name its own operator gave it -- the harness cannot know " +
+                $"whether that matches '{deployment}', and (unlike harness-launched mode) cannot " +
+                $"start a second process with a different deployment name to find out. Running " +
+                $"this collection's assertions against a mismatched deployment would pass or fail " +
+                $"for the wrong reason instead of skipping. Every such collection would also " +
+                $"otherwise try to bind the same fixed fake ports " +
+                $"(CONFORMANCE_FAKE_REALTIME_PORT / CONFORMANCE_FAKE_SEARCH_PORT) concurrently, " +
+                $"same as the profile-name race below. Run this deployment's scenarios with " +
+                $"CONFORMANCE_BACKEND=python (harness-launched) instead.";
+        }
+
+        if (profileName == defaultProfileName)
         {
             return null;
         }

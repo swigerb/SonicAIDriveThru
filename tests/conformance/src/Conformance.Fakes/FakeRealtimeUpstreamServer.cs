@@ -76,9 +76,76 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
         }
     }
 
+    private readonly Lock _sessionUpdateRejectionGate = new();
+    private int _pendingSessionUpdateRejections;
+    private string _sessionUpdateRejectionCode = "invalid_value";
+    private string? _sessionUpdateRejectionParam;
+    private string _sessionUpdateRejectionMessage = "Rejected by RejectNextSessionUpdates for conformance testing.";
+    private bool _sessionUpdateRejectionEchoEventId;
+
     /// <summary>
-    /// Asserts neither one-shot switch (<see cref="RejectNextConnectionWith"/>,
-    /// <see cref="SuppressSessionUpdatedOnNextConnection"/>) is still armed. Both switches are
+    /// Arms a one-shot, FIFO counter: the next <paramref name="count"/> `session.update` frames
+    /// this server receives — on ANY connection, in receive order — are rejected with a
+    /// scripted `error` (bypassing <see cref="GaSessionValidator.Validate"/> entirely for those
+    /// frames) instead of being validated/merged/acknowledged as normal. Unlike
+    /// <see cref="SuppressSessionUpdatedOnNextConnection"/> (which silently drops the
+    /// acknowledgement but still merges/accepts the update), this actively rejects, so the
+    /// backend's own rejection-recovery path (rtmt.py's <c>_SessionUpdateGuard</c> /
+    /// <c>_recover_rejected_session_update</c>) is exercised — including rejecting a fallback
+    /// session.update itself, to prove the guard's one-fallback-per-original loop guard actually
+    /// holds under a *second*, chained rejection (PR #42 review item 3: this was previously
+    /// untested — the only reachable black-box rejection was the built-in "reasoning on a
+    /// 1.5-named deployment" rule, which can only ever reject once per connection since the
+    /// fallback never repeats `reasoning`).
+    /// </summary>
+    /// <param name="count">How many session.update frames (across any connection) to reject
+    /// before this switch disarms itself. Use 2 to reject both an original and its fallback.</param>
+    /// <param name="code">The `error.error.code` to send, e.g. "invalid_value".</param>
+    /// <param name="echoEventId">When true, `error.error.event_id` echoes the rejected frame's own
+    /// `event_id` — exercising <c>_SessionUpdateGuard.correlate</c>'s event_id-keyed path. When
+    /// false, no event_id is echoed, exercising its in-flight-queue fallback (order-based)
+    /// correlation path instead — mirroring GA's real gpt-realtime-1.5 `reasoning` rejection,
+    /// which omits it.</param>
+    /// <param name="param">Optional `error.error.param`; defaults to null.</param>
+    /// <param name="message">Optional `error.error.message`; defaults to a generic scripted-rejection message.</param>
+    public void RejectNextSessionUpdates(int count, string code, bool echoEventId, string? param = null, string? message = null)
+    {
+        if (count <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(count), count, "count must be positive.");
+        }
+        lock (_sessionUpdateRejectionGate)
+        {
+            _pendingSessionUpdateRejections = count;
+            _sessionUpdateRejectionCode = code;
+            _sessionUpdateRejectionParam = param;
+            _sessionUpdateRejectionEchoEventId = echoEventId;
+            _sessionUpdateRejectionMessage = message ?? $"Rejected by RejectNextSessionUpdates (code={code}) for conformance testing.";
+        }
+    }
+
+    /// <summary>Consumes one pending scripted rejection (if armed) and returns the
+    /// <see cref="SessionUpdateValidationResult"/> to reject the current frame with, or null if
+    /// none is armed (the caller should fall through to <see cref="GaSessionValidator.Validate"/>
+    /// as normal).</summary>
+    private SessionUpdateValidationResult? TryConsumeScriptedSessionUpdateRejection()
+    {
+        lock (_sessionUpdateRejectionGate)
+        {
+            if (_pendingSessionUpdateRejections <= 0)
+            {
+                return null;
+            }
+            _pendingSessionUpdateRejections--;
+            return SessionUpdateValidationResult.Rejected(
+                _sessionUpdateRejectionCode, _sessionUpdateRejectionParam, _sessionUpdateRejectionMessage, _sessionUpdateRejectionEchoEventId);
+        }
+    }
+
+    /// <summary>
+    /// Asserts none of the one-shot switches (<see cref="RejectNextConnectionWith"/>,
+    /// <see cref="SuppressSessionUpdatedOnNextConnection"/>, <see cref="RejectNextSessionUpdates"/>)
+    /// is still armed. The connection-scoped switches are
     /// consumed by the *next* connection accepted, whichever test happens to trigger it — so a
     /// scenario that arms one and then never actually opens a new connection (an assertion
     /// failing before the connect, a copy-paste mistake, an early return) would otherwise leave
@@ -123,6 +190,21 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
                 "connection attempt in the scenario that armed it -- a previous scenario likely " +
                 "called it but never actually opened a new connection afterwards, leaving it " +
                 "armed to silently suppress an unrelated later scenario's session.updated frames.");
+        }
+
+        int pendingSessionUpdateRejections;
+        lock (_sessionUpdateRejectionGate)
+        {
+            pendingSessionUpdateRejections = _pendingSessionUpdateRejections;
+        }
+        if (pendingSessionUpdateRejections > 0)
+        {
+            throw new InvalidOperationException(
+                $"{pendingSessionUpdateRejections} pending RejectNextSessionUpdates(...) rejection(s) " +
+                "were never consumed by a session.update in the scenario that armed them -- a " +
+                "previous scenario likely called it but never actually sent that many session.update " +
+                "frames afterwards, leaving it armed to silently reject an unrelated later scenario's " +
+                "session.update.");
         }
     }
 
@@ -515,7 +597,11 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
     private async Task HandleSessionUpdateAsync(FakeRealtimeConnection connection, RecordedFrame frame, string deployment, CancellationToken ct)
     {
         var state = connection.SessionState;
-        var result = GaSessionValidator.Validate(frame.Json, state, deployment);
+        // A scripted RejectNextSessionUpdates(...) rejection (if armed) takes priority over the
+        // GA rule-based validator for this frame, regardless of its actual content -- this is how
+        // a test forces even an otherwise-perfectly-valid session.update (e.g. the backend's own
+        // minimal fallback) to also be rejected, to exercise the no-second-fallback loop guard.
+        var result = TryConsumeScriptedSessionUpdateRejection() ?? GaSessionValidator.Validate(frame.Json, state, deployment);
         var eventId = TryGetString(frame.Json, "event_id");
 
         if (!result.IsAccepted)
