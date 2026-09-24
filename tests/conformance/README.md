@@ -231,5 +231,45 @@ parity with the Python fake's own prior assumptions:
   over unverified; the *fact* that 1.5-style deployments don't support `reasoning` is documented
   Azure/OpenAI behaviour, but the exact wire error was not reproduced live (doing so would require
   a real 1.5 deployment, which wasn't available to probe against in this pass).
+- `conversation_already_has_active_response` — the error returned when `response.create` is
+  received while a response is already streaming on the default conversation. See "Response cancel
+  and concurrent response.create" below.
+- `response_cancel_not_active` — the error returned when `response.cancel` targets nothing (no
+  active response, or a `response_id` that doesn't match the active one). See below.
 
 Both call sites carry a `NOT independently live-verified` code comment pointing back here.
+
+## Response cancel and concurrent response.create (item N7)
+
+`FakeRealtimeUpstreamServer` models the GA `response.cancel` event and the "only one response
+writes to the default conversation at a time" rule, per the official reference
+(`https://developers.openai.com/api/reference/resources/realtime`, fetched 2026-09-24 — the same
+primary source cited by `GaSessionValidator`):
+
+- **"Response Cancel Event"** — sending `response.cancel` while a response is actively streaming
+  interrupts it: the fake stops emitting further scripted delta/done events, closes any still-open
+  output item with `status: "incomplete"`, and sends a final `response.done` with
+  `status: "cancelled"` carrying whatever output items had already been opened. The optional
+  `response_id` field on the request, when present, must match the currently-active response id;
+  if it doesn't (or nothing is active at all), the doc says the request errors and "the session
+  will remain unaffected" — modelled here as a rejection with code `response_cancel_not_active`,
+  `param: "response_id"`.
+- **"Response Create Event"** — "Only one Response can write to the default Conversation at a
+  time." The fake tracks one `ActiveResponseId` per connection (multiple concurrent *out-of-band*
+  responses are real-GA behaviour but are not modelled by this fake, which only ever drives the
+  default-conversation case exercised by the backend under test); a `response.create` received
+  while that id is set is rejected rather than started, with code
+  `conversation_already_has_active_response`.
+- **Error code caveat**: the reference documents the cancel/conflict *behaviour* precisely (the
+  `response.done`/`status: "cancelled"` shape, and the "remains unaffected" / "only one Response"
+  prose) but does **not** give literal error `code` strings for either rejection case anywhere in
+  the resource reference. Both codes above were grepped for verbatim in the full downloaded
+  reference markdown with zero hits, so — following the same policy already applied to
+  `cannot_update_voice` / `reasoning` above — they are chosen names that read naturally against the
+  documented `{type, code, message, param}` error shape, but are **not independently live-verified**
+  (no new live probe was run for this item; the coordinator did not re-authorise one, and the
+  existing Stage B item 9 probes did not exercise `response.cancel`/concurrent `response.create`).
+- Tests: `ResponseCancelTests.cs` — `Cancel_with_nothing_active_is_rejected_and_the_session_remains_unaffected`,
+  `Cancel_while_streaming_stops_the_response_early_and_reports_cancelled_status`,
+  `Response_create_while_a_response_is_already_active_is_rejected`. All three are mutation-checked
+  (see PR history / squad history for outputs).

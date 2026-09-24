@@ -318,10 +318,32 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
                 await HandleSessionUpdateAsync(connection, frame, deployment, ct).ConfigureAwait(false);
                 break;
             case "response.create":
+                // GA (Response Create Event): "Only one Response can write to the default
+                // Conversation at a time" — a second response.create while one is still active is
+                // rejected rather than queued or silently ignored (PR #22 review item N7). Exact
+                // error code NOT independently live-verified; see README "Response cancel — GA
+                // semantics and unverified error codes".
+                if (connection.ActiveResponseId is not null)
+                {
+                    await SendValidationErrorAsync(
+                        connection,
+                        SessionUpdateValidationResult.Rejected(
+                            "conversation_already_has_active_response",
+                            null,
+                            "Only one response can be active on the default conversation at a time.",
+                            echoEventId: true),
+                        TryGetString(frame.Json, "event_id"),
+                        ct).ConfigureAwait(false);
+                    break;
+                }
+
                 if (connection.Script.AutoRespond)
                 {
                     await RespondAsync(connection, ct).ConfigureAwait(false);
                 }
+                break;
+            case "response.cancel":
+                await HandleResponseCancelAsync(connection, frame, ct).ConfigureAwait(false);
                 break;
         }
 
@@ -407,6 +429,44 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
         await connection.SendAsync(updated, ct).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// GA (Response Cancel Event): "Send this event to cancel an in-progress response. The server
+    /// will respond with a `response.done` event with a status of `response.status=cancelled`. If
+    /// there is no response to cancel, the server will respond with an error. It's safe to call
+    /// `response.cancel` even if no response is in progress, an error will be returned the session
+    /// will remain unaffected." An optional `response_id` targets a specific response; GA: "if not
+    /// provided, will cancel an in-progress response in the default conversation" — this fake only
+    /// ever has one response active on the default conversation at a time, so an explicit
+    /// `response_id` that doesn't match it is treated the same as "nothing to cancel" (PR #22
+    /// review item N7). Exact error code/message/param NOT independently live-verified; see README
+    /// "Response cancel — GA semantics and unverified error codes".
+    /// </summary>
+    private static async Task HandleResponseCancelAsync(FakeRealtimeConnection connection, RecordedFrame frame, CancellationToken ct)
+    {
+        var requestedResponseId = TryGetString(frame.Json, "response_id");
+        var activeResponseId = connection.ActiveResponseId;
+        var targetsActiveResponse = activeResponseId is not null &&
+            (requestedResponseId is null || string.Equals(requestedResponseId, activeResponseId, StringComparison.Ordinal));
+
+        if (!targetsActiveResponse)
+        {
+            await SendValidationErrorAsync(
+                connection,
+                SessionUpdateValidationResult.Rejected(
+                    "response_cancel_not_active",
+                    "response_id",
+                    "No active response to cancel.",
+                    echoEventId: true),
+                TryGetString(frame.Json, "event_id"),
+                ct).ConfigureAwait(false);
+            return;
+        }
+
+        // Interrupts RespondAsync's streaming loop for this response — see the cancellation
+        // handling there for how it turns this into a response.done with status "cancelled".
+        connection.ActiveResponseCancellation?.Cancel();
+    }
+
     private async Task RespondAsync(FakeRealtimeConnection connection, CancellationToken ct)
     {
         var state = connection.SessionState;
@@ -414,6 +474,16 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
             ? scripted
             : ResponseScript.Default;
         var responseId = $"resp_{Guid.NewGuid():N}";
+
+        // Tracks this response as "active" for the lifetime of this method, so a concurrent
+        // response.cancel (handled by HandleResponseCancelAsync off the same non-blocking receive
+        // loop, item 8) has something to signal and a concurrent response.create has something to
+        // reject (PR #22 review item N7). Linked to the connection's own ct so a socket-level
+        // teardown still cancels this exactly as before; response.cancel additionally trips this
+        // same source without affecting ct.
+        using var responseCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        connection.ActiveResponseId = responseId;
+        connection.ActiveResponseCancellation = responseCts;
 
         await connection.SendAsync(new JsonObject
         {
@@ -433,7 +503,7 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
         string? audioItemId = null;
         var audioContentIndex = 0;
 
-        async Task CloseOpenAudioItemAsync()
+        async Task CloseOpenAudioItemAsync(string itemStatus = "completed")
         {
             if (audioItemId is null)
             {
@@ -464,7 +534,7 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
             {
                 ["id"] = audioItemId,
                 ["type"] = "message",
-                ["status"] = "completed",
+                ["status"] = itemStatus,
                 ["role"] = "assistant",
                 ["content"] = new JsonArray(new JsonObject { ["type"] = "audio", ["transcript"] = "" }),
             };
@@ -483,31 +553,109 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
             audioContentIndex = 0;
         }
 
-        foreach (var evt in script.Events)
+        var cancelled = false;
+        try
         {
-            switch (evt)
+            foreach (var evt in script.Events)
             {
-                case AudioDeltaEvent audio:
-                    if (audio.Pace is { } pace)
-                    {
-                        // Scripted pacing for barge-in scenarios: a real delay (not a
-                        // synchronization sleep) between deltas so a test can send a
-                        // response.cancel / new input_audio_buffer.append while a response is
-                        // still streaming. Uses the connection's own TimeProvider so a future
-                        // fake clock can make this deterministic without touching call sites.
-                        await Task.Delay(pace, connection.TimeProvider, ct).ConfigureAwait(false);
-                    }
+                // Checked between events (not just inside the paced Task.Delay above) so a
+                // response.cancel accepted while processing a non-paced event (e.g. a
+                // FunctionCallEvent, or an AudioDeltaEvent with no Pace set) is still observed
+                // before the next event runs, rather than only at the next delay point (PR #22
+                // review item N7).
+                if (responseCts.IsCancellationRequested)
+                {
+                    cancelled = true;
+                    break;
+                }
 
-                    if (audioItemId is null)
-                    {
-                        audioItemId = $"item_{Guid.NewGuid():N}";
-                        var openItem = new JsonObject
+                switch (evt)
+                {
+                    case AudioDeltaEvent audio:
+                        if (audio.Pace is { } pace)
                         {
-                            ["id"] = audioItemId,
-                            ["type"] = "message",
+                            // Scripted pacing for barge-in scenarios: a real delay (not a
+                            // synchronization sleep) between deltas so a test can send a
+                            // response.cancel / new input_audio_buffer.append while a response is
+                            // still streaming. Uses the connection's own TimeProvider so a future
+                            // fake clock can make this deterministic without touching call sites.
+                            // responseCts.Token (not ct) so an accepted response.cancel actually
+                            // interrupts this wait instead of only being observed at the next event
+                            // (PR #22 review item N7).
+                            await Task.Delay(pace, connection.TimeProvider, responseCts.Token).ConfigureAwait(false);
+                        }
+
+                        if (audioItemId is null)
+                        {
+                            audioItemId = $"item_{Guid.NewGuid():N}";
+                            var openItem = new JsonObject
+                            {
+                                ["id"] = audioItemId,
+                                ["type"] = "message",
+                                ["status"] = "in_progress",
+                                ["role"] = "assistant",
+                                ["content"] = new JsonArray(),
+                            };
+                            await connection.SendAsync(new JsonObject
+                            {
+                                ["type"] = "response.output_item.added",
+                                ["event_id"] = FakeRealtimeConnection.NewEventId(),
+                                ["response_id"] = responseId,
+                                ["output_index"] = outputIndex,
+                                ["item"] = openItem.DeepClone(),
+                            }, ct).ConfigureAwait(false);
+                            await connection.SendAsync(new JsonObject
+                            {
+                                ["type"] = "conversation.item.added",
+                                ["event_id"] = FakeRealtimeConnection.NewEventId(),
+                                ["previous_item_id"] = state.LastConversationItemId,
+                                ["item"] = openItem.DeepClone(),
+                            }, ct).ConfigureAwait(false);
+                            state.LastConversationItemId = audioItemId;
+                            await connection.SendAsync(new JsonObject
+                            {
+                                ["type"] = "response.content_part.added",
+                                ["event_id"] = FakeRealtimeConnection.NewEventId(),
+                                ["response_id"] = responseId,
+                                ["item_id"] = audioItemId,
+                                ["output_index"] = outputIndex,
+                                ["content_index"] = audioContentIndex,
+                                ["part"] = new JsonObject { ["type"] = "audio", ["transcript"] = "" },
+                            }, ct).ConfigureAwait(false);
+                        }
+
+                        await connection.SendAsync(new JsonObject
+                        {
+                            ["type"] = "response.output_audio.delta",
+                            ["event_id"] = FakeRealtimeConnection.NewEventId(),
+                            ["response_id"] = responseId,
+                            ["item_id"] = audioItemId,
+                            ["output_index"] = outputIndex,
+                            ["content_index"] = audioContentIndex,
+                            ["delta"] = audio.Base64Delta,
+                        }, ct).ConfigureAwait(false);
+                        // GA rejects session.update's `voice` field once any assistant audio has been
+                        // sent on the session (cannot_update_voice) — this is the one and only place
+                        // the fake actually emits audio, so it is the one and only place that must
+                        // flip the flag GaSessionValidator checks.
+                        state.AssistantAudioSeen = true;
+                        break;
+
+                    case FunctionCallEvent call:
+                        // A function call is its own item — close out any open audio item first so
+                        // output ordering matches a real turn (assistant says something, then calls
+                        // a tool, rather than interleaving).
+                        await CloseOpenAudioItemAsync().ConfigureAwait(false);
+
+                        var callItemId = $"item_{Guid.NewGuid():N}";
+                        var openCallItem = new JsonObject
+                        {
+                            ["id"] = callItemId,
+                            ["type"] = "function_call",
                             ["status"] = "in_progress",
-                            ["role"] = "assistant",
-                            ["content"] = new JsonArray(),
+                            ["name"] = call.Name,
+                            ["call_id"] = call.CallId,
+                            ["arguments"] = "",
                         };
                         await connection.SendAsync(new JsonObject
                         {
@@ -515,148 +663,125 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
                             ["event_id"] = FakeRealtimeConnection.NewEventId(),
                             ["response_id"] = responseId,
                             ["output_index"] = outputIndex,
-                            ["item"] = openItem.DeepClone(),
+                            ["item"] = openCallItem.DeepClone(),
                         }, ct).ConfigureAwait(false);
+                        // rtmt.py reads the top-level `previous_item_id` off this exact event type
+                        // (conversation.item.created | conversation.item.added) to remember what to
+                        // stitch extension.middle_tier_tool_response's own previous_item_id to.
                         await connection.SendAsync(new JsonObject
                         {
                             ["type"] = "conversation.item.added",
                             ["event_id"] = FakeRealtimeConnection.NewEventId(),
                             ["previous_item_id"] = state.LastConversationItemId,
-                            ["item"] = openItem.DeepClone(),
+                            ["item"] = openCallItem.DeepClone(),
                         }, ct).ConfigureAwait(false);
-                        state.LastConversationItemId = audioItemId;
+                        state.LastConversationItemId = callItemId;
+
                         await connection.SendAsync(new JsonObject
                         {
-                            ["type"] = "response.content_part.added",
+                            ["type"] = "response.function_call_arguments.done",
                             ["event_id"] = FakeRealtimeConnection.NewEventId(),
                             ["response_id"] = responseId,
-                            ["item_id"] = audioItemId,
+                            ["item_id"] = callItemId,
                             ["output_index"] = outputIndex,
-                            ["content_index"] = audioContentIndex,
-                            ["part"] = new JsonObject { ["type"] = "audio", ["transcript"] = "" },
+                            ["call_id"] = call.CallId,
+                            ["name"] = call.Name,
+                            ["arguments"] = call.ArgumentsJson,
                         }, ct).ConfigureAwait(false);
-                    }
 
-                    await connection.SendAsync(new JsonObject
-                    {
-                        ["type"] = "response.output_audio.delta",
-                        ["event_id"] = FakeRealtimeConnection.NewEventId(),
-                        ["response_id"] = responseId,
-                        ["item_id"] = audioItemId,
-                        ["output_index"] = outputIndex,
-                        ["content_index"] = audioContentIndex,
-                        ["delta"] = audio.Base64Delta,
-                    }, ct).ConfigureAwait(false);
-                    // GA rejects session.update's `voice` field once any assistant audio has been
-                    // sent on the session (cannot_update_voice) — this is the one and only place
-                    // the fake actually emits audio, so it is the one and only place that must
-                    // flip the flag GaSessionValidator checks.
-                    state.AssistantAudioSeen = true;
-                    break;
-
-                case FunctionCallEvent call:
-                    // A function call is its own item — close out any open audio item first so
-                    // output ordering matches a real turn (assistant says something, then calls
-                    // a tool, rather than interleaving).
-                    await CloseOpenAudioItemAsync().ConfigureAwait(false);
-
-                    var callItemId = $"item_{Guid.NewGuid():N}";
-                    var openCallItem = new JsonObject
-                    {
-                        ["id"] = callItemId,
-                        ["type"] = "function_call",
-                        ["status"] = "in_progress",
-                        ["name"] = call.Name,
-                        ["call_id"] = call.CallId,
-                        ["arguments"] = "",
-                    };
-                    await connection.SendAsync(new JsonObject
-                    {
-                        ["type"] = "response.output_item.added",
-                        ["event_id"] = FakeRealtimeConnection.NewEventId(),
-                        ["response_id"] = responseId,
-                        ["output_index"] = outputIndex,
-                        ["item"] = openCallItem.DeepClone(),
-                    }, ct).ConfigureAwait(false);
-                    // rtmt.py reads the top-level `previous_item_id` off this exact event type
-                    // (conversation.item.created | conversation.item.added) to remember what to
-                    // stitch extension.middle_tier_tool_response's own previous_item_id to.
-                    await connection.SendAsync(new JsonObject
-                    {
-                        ["type"] = "conversation.item.added",
-                        ["event_id"] = FakeRealtimeConnection.NewEventId(),
-                        ["previous_item_id"] = state.LastConversationItemId,
-                        ["item"] = openCallItem.DeepClone(),
-                    }, ct).ConfigureAwait(false);
-                    state.LastConversationItemId = callItemId;
-
-                    await connection.SendAsync(new JsonObject
-                    {
-                        ["type"] = "response.function_call_arguments.done",
-                        ["event_id"] = FakeRealtimeConnection.NewEventId(),
-                        ["response_id"] = responseId,
-                        ["item_id"] = callItemId,
-                        ["output_index"] = outputIndex,
-                        ["call_id"] = call.CallId,
-                        ["name"] = call.Name,
-                        ["arguments"] = call.ArgumentsJson,
-                    }, ct).ConfigureAwait(false);
-
-                    var completedCallItem = new JsonObject
-                    {
-                        ["id"] = callItemId,
-                        ["type"] = "function_call",
-                        ["status"] = "completed",
-                        ["name"] = call.Name,
-                        ["call_id"] = call.CallId,
-                        ["arguments"] = call.ArgumentsJson,
-                    };
-                    // rtmt.py's response.output_item.done handler is what actually invokes the
-                    // backend tool and sends conversation.item.create(function_call_output)
-                    // upstream — this frame is the trigger for item 3's tool-execution scenario.
-                    await connection.SendAsync(new JsonObject
-                    {
-                        ["type"] = "response.output_item.done",
-                        ["event_id"] = FakeRealtimeConnection.NewEventId(),
-                        ["response_id"] = responseId,
-                        ["output_index"] = outputIndex,
-                        ["item"] = completedCallItem.DeepClone(),
-                    }, ct).ConfigureAwait(false);
-
-                    output.Add(completedCallItem.DeepClone());
-                    outputIndex++;
-                    break;
-
-                case DoneEvent done:
-                    await CloseOpenAudioItemAsync().ConfigureAwait(false);
-
-                    var responseBody = new JsonObject
-                    {
-                        ["id"] = responseId,
-                        ["status"] = done.Status,
-                        ["output"] = output.DeepClone(),
-                        ["usage"] = BuildUsage(output.Count),
-                    };
-                    if (done.ErrorCode is not null)
-                    {
-                        responseBody["status_details"] = new JsonObject
+                        var completedCallItem = new JsonObject
                         {
-                            ["type"] = done.Status,
-                            ["error"] = new JsonObject
-                            {
-                                ["code"] = done.ErrorCode,
-                                ["message"] = done.ErrorMessage,
-                            },
+                            ["id"] = callItemId,
+                            ["type"] = "function_call",
+                            ["status"] = "completed",
+                            ["name"] = call.Name,
+                            ["call_id"] = call.CallId,
+                            ["arguments"] = call.ArgumentsJson,
                         };
-                    }
-                    await connection.SendAsync(new JsonObject
-                    {
-                        ["type"] = "response.done",
-                        ["event_id"] = FakeRealtimeConnection.NewEventId(),
-                        ["response"] = responseBody,
-                    }, ct).ConfigureAwait(false);
-                    break;
+                        // rtmt.py's response.output_item.done handler is what actually invokes the
+                        // backend tool and sends conversation.item.create(function_call_output)
+                        // upstream — this frame is the trigger for item 3's tool-execution scenario.
+                        await connection.SendAsync(new JsonObject
+                        {
+                            ["type"] = "response.output_item.done",
+                            ["event_id"] = FakeRealtimeConnection.NewEventId(),
+                            ["response_id"] = responseId,
+                            ["output_index"] = outputIndex,
+                            ["item"] = completedCallItem.DeepClone(),
+                        }, ct).ConfigureAwait(false);
+
+                        output.Add(completedCallItem.DeepClone());
+                        outputIndex++;
+                        break;
+
+                    case DoneEvent done:
+                        await CloseOpenAudioItemAsync().ConfigureAwait(false);
+
+                        var responseBody = new JsonObject
+                        {
+                            ["id"] = responseId,
+                            ["status"] = done.Status,
+                            ["output"] = output.DeepClone(),
+                            ["usage"] = BuildUsage(output.Count),
+                        };
+                        if (done.ErrorCode is not null)
+                        {
+                            responseBody["status_details"] = new JsonObject
+                            {
+                                ["type"] = done.Status,
+                                ["error"] = new JsonObject
+                                {
+                                    ["code"] = done.ErrorCode,
+                                    ["message"] = done.ErrorMessage,
+                                },
+                            };
+                        }
+                        await connection.SendAsync(new JsonObject
+                        {
+                            ["type"] = "response.done",
+                            ["event_id"] = FakeRealtimeConnection.NewEventId(),
+                            ["response"] = responseBody,
+                        }, ct).ConfigureAwait(false);
+                        break;
+                }
             }
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            // Only a response.cancel (which trips responseCts without touching the connection's
+            // own ct) is swallowed here — a real socket-level teardown (ct itself cancelled)
+            // still propagates normally, same as before this method tracked cancellation.
+            cancelled = true;
+        }
+        finally
+        {
+            // Whatever happened above, this response is no longer active — a later
+            // response.create must be allowed to start a new one, and a later response.cancel
+            // for this (now finished) id must be told there's nothing to cancel.
+            connection.ActiveResponseId = null;
+            connection.ActiveResponseCancellation = null;
+        }
+
+        if (cancelled)
+        {
+            // GA (Response Cancel Event): "the server will respond with a response.done event
+            // with a status of response.status=cancelled". Any item still open when the cancel
+            // landed is closed as "incomplete" rather than "completed" — it stopped mid-stream,
+            // it didn't finish (PR #22 review item N7).
+            await CloseOpenAudioItemAsync(itemStatus: "incomplete").ConfigureAwait(false);
+
+            await connection.SendAsync(new JsonObject
+            {
+                ["type"] = "response.done",
+                ["event_id"] = FakeRealtimeConnection.NewEventId(),
+                ["response"] = new JsonObject
+                {
+                    ["id"] = responseId,
+                    ["status"] = "cancelled",
+                    ["output"] = output.DeepClone(),
+                    ["usage"] = BuildUsage(output.Count),
+                },
+            }, ct).ConfigureAwait(false);
         }
     }
 

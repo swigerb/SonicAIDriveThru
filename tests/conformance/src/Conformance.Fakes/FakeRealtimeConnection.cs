@@ -95,6 +95,24 @@ public sealed class FakeRealtimeConnection
     /// </summary>
     public bool SuppressAllSessionUpdated { get; internal set; }
 
+    /// <summary>
+    /// The `id` of the response currently streaming on this connection's default conversation, or
+    /// null when none is in flight. GA: "Only one Response can write to the default Conversation
+    /// at a time" (Response Create Event) — <see cref="FakeRealtimeUpstreamServer"/> uses this to
+    /// reject a `response.create` that arrives while one is already active, and to know whether an
+    /// incoming `response.cancel` has anything to cancel (PR #22 review item N7).
+    /// </summary>
+    internal string? ActiveResponseId { get; set; }
+
+    /// <summary>
+    /// Cancelled by an accepted `response.cancel` to interrupt the matching in-flight
+    /// <see cref="FakeRealtimeUpstreamServer"/>'s response-streaming loop mid-item, so it can stop
+    /// early and emit `response.done` with `status: "cancelled"` instead of running the scripted
+    /// response to completion (PR #22 review item N7). Null whenever <see cref="ActiveResponseId"/>
+    /// is null.
+    /// </summary>
+    internal CancellationTokenSource? ActiveResponseCancellation { get; set; }
+
     private readonly SemaphoreSlim _sendLock = new(1, 1);
     private WebSocket? _socket;
 
