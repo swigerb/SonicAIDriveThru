@@ -94,6 +94,13 @@ public sealed class ToolErrorSessionSurvivesTests(ConformanceFixture fixture)
         // `item_name = args["item_name"]` with no .get()/default, so this raises an unhandled
         // KeyError inside the tool handler.
         const string callId = "call_unhandled_exception";
+
+        // Watermark taken before scripting, same as OrderScenarioHelpers.CallToolAsync's own
+        // rejection-path pattern (PR #38 review item 3 / re-review follow-up 8: this test
+        // hand-rolls its scripting instead of going through CallToolAsync, and so was missing
+        // the same rejection-path checks that toClient:false callers get for free).
+        var browserWatermark = browser.ReceivedFrames.Count;
+
         connection.Script.Enqueue(new ResponseScript([
             new FunctionCallEvent(
                 Name: "update_order",
@@ -114,6 +121,7 @@ public sealed class ToolErrorSessionSurvivesTests(ConformanceFixture fixture)
         Assert.True(functionCallOutput is not null,
             "Expected a graceful function_call_output for the malformed call -- if this is null, the " +
             "tool exception killed the connection instead of producing a model-visible error.");
+        var outputText = functionCallOutput!.Json.GetProperty("item").GetProperty("output").GetString() ?? "";
 
         // Session survives: prove the connection is still usable for a further tool call.
         var nextRoundTrip = await browser.ReceivedFrames.WaitForAsync(
@@ -122,6 +130,26 @@ public sealed class ToolErrorSessionSurvivesTests(ConformanceFixture fixture)
             ShortFrameTimeout, ct);
         Assert.True(nextRoundTrip is not null, "Round trip after the malformed call never completed.");
         var nextIndex = nextRoundTrip!.Json.GetProperty("roundTripIndex").GetInt32();
+
+        // Rejection-path checks (PR #38 review item 3 / re-review must-fix 1 and follow-up 8),
+        // run AFTER the round trip wait above -- not immediately after functionCallOutput -- for
+        // the same reason OrderScenarioHelpers.CallToolAsync's own check is placed there: both
+        // frames travel over the single, ordered browser WebSocket, so by the time this call's
+        // round trip token has been received, anything the backend was ever going to send the
+        // browser for this call has necessarily already arrived.
+        var strayToolResponse = browser.ReceivedFrames.Snapshot().Any(f =>
+            f.Sequence >= browserWatermark &&
+            f.Type == "extension.middle_tier_tool_response" &&
+            f.Json.TryGetProperty("tool_name", out var strayToolNameProp) &&
+            strayToolNameProp.GetString() == "update_order");
+        Assert.False(strayToolResponse,
+            $"Expected no extension.middle_tier_tool_response for update_order (call_id={callId}) " +
+            "to have reached the browser since the watermark for this deliberately malformed call.");
+        Assert.False(OrderScenarioHelpers.LooksLikeOrderSummary(outputText),
+            $"function_call_output for update_order (call_id={callId}) parses as a JSON " +
+            "order-summary object, but this call was scripted to raise inside the tool handler -- " +
+            "a genuine graceful error is a plain apology string, never an order summary.");
+        Assert.Null(browser.CloseStatus);
 
         var next = await OrderScenarioHelpers.RunOrderStepsAsync(
             connection, browser,

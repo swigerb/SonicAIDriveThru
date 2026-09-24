@@ -240,9 +240,11 @@ public static class OrderScenarioHelpers
     /// `reset_order` embed as `client_text` (see app/backend/tools.py), rather than a plain
     /// natural-language string. Used to positively prove a rejected/dropped tool call's
     /// function_call_output is a genuine apology, not an order summary in disguise (PR #38 review
-    /// item 3, Rick's M4).
+    /// item 3, Rick's M4). Internal (not private) so ToolErrorSessionSurvivesTests's hand-rolled
+    /// unhandled-exception scenario -- which bypasses CallToolAsync entirely and so needs the same
+    /// check inline -- can reuse it (re-review follow-up 8).
     /// </summary>
-    private static bool LooksLikeOrderSummary(string text)
+    internal static bool LooksLikeOrderSummary(string text)
     {
         try
         {
