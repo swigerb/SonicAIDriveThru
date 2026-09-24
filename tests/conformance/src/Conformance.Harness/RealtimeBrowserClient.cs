@@ -23,15 +23,26 @@ public sealed class RealtimeBrowserClient : IAsyncDisposable
     private readonly CancellationTokenSource _readerCts = new();
     private readonly TaskCompletionSource _closed = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private Task? _readerTask;
+    private WebSocketCloseStatus? _observedCloseStatus;
+    private string? _observedCloseStatusDescription;
 
     /// <summary>Every frame the backend has sent down to this client, in arrival order.</summary>
     public FrameLog ReceivedFrames { get; } = new();
 
-    /// <summary>The close status the backend sent, or null if the socket is still open.</summary>
-    public WebSocketCloseStatus? CloseStatus => _socket.CloseStatus;
+    /// <summary>
+    /// The close status the backend sent, or null if the reader loop hasn't observed a Close
+    /// frame yet. Captured directly from the <see cref="WebSocketReceiveResult"/> the reader loop
+    /// saw, not read live off <c>ClientWebSocket.CloseStatus</c> — the latter was observed to still
+    /// be null on Linux immediately after <see cref="WaitForCloseAsync"/> completed (CI run
+    /// 35936172326), even though the very same receive had already produced the Close frame that
+    /// unblocked it. That's a platform-dependent difference in when the underlying WebSocket
+    /// implementation updates its own properties versus when it hands back the result of the
+    /// receive call that observed the frame; reading from the result itself sidesteps it entirely.
+    /// </summary>
+    public WebSocketCloseStatus? CloseStatus => _observedCloseStatus;
 
-    /// <summary>The close reason text the backend sent, or null if the socket is still open.</summary>
-    public string? CloseStatusDescription => _socket.CloseStatusDescription;
+    /// <summary>The close reason text the backend sent, or null if no Close frame was observed yet.</summary>
+    public string? CloseStatusDescription => _observedCloseStatusDescription;
 
     public static async Task<RealtimeBrowserClient> ConnectAsync(
         Uri backendBaseUri, bool offerDeflate = false, string? origin = null, CancellationToken cancellationToken = default)
@@ -158,7 +169,10 @@ public sealed class RealtimeBrowserClient : IAsyncDisposable
     /// <summary>
     /// Awaits the reader loop observing the socket close (server Close frame or the connection
     /// dropping), bounded by <paramref name="timeout"/> instead of a fixed sleep, so tests can
-    /// assert on <see cref="CloseStatus"/> deterministically.
+    /// assert on <see cref="CloseStatus"/> deterministically: by the time this returns, the reader
+    /// loop has already captured <see cref="CloseStatus"/>/<see cref="CloseStatusDescription"/>
+    /// from the Close frame's <see cref="WebSocketReceiveResult"/> (see <see cref="PumpReceivedFramesAsync"/>),
+    /// so there is nothing left to race against afterward.
     /// </summary>
     public async Task WaitForCloseAsync(TimeSpan timeout, CancellationToken cancellationToken = default)
     {
@@ -178,14 +192,44 @@ public sealed class RealtimeBrowserClient : IAsyncDisposable
     {
         try
         {
-            while (_socket.State == WebSocketState.Open)
+            // Deliberately not "while (_socket.State == WebSocketState.Open)": that was the actual
+            // root cause of the close race (CI run 35936172326, and reproduced locally against the
+            // real Python backend with a 50-connection stress loop — 1/50 iterations). CloseAsync
+            // sends the local close frame via CloseOutputAsync, which flips the socket's own State
+            // from Open to CloseSent as soon as it completes — on the caller's task, concurrently
+            // with this loop. If that flip lands between this loop's iterations (rather than while a
+            // receive is already in flight), the while-condition below would go false and the loop
+            // would return *without ever calling ReceiveAsync again* — meaning it would never see the
+            // peer's answering Close frame at all, leaving CloseStatus null forever even though the
+            // peer had already answered. CloseSent is a perfectly valid state to keep receiving from
+            // (that's the entire point of the state: "our close is out, the peer's answering close
+            // may still arrive"), so the loop must keep receiving through it.
+            while (_socket.State is WebSocketState.Open or WebSocketState.CloseSent)
             {
-                var frame = await WebSocketJson.ReceiveJsonAsync(_socket, cancellationToken).ConfigureAwait(false);
-                if (frame is null)
+                var received = await WebSocketJson.ReceiveJsonOrCloseAsync(_socket, cancellationToken).ConfigureAwait(false);
+                if (received.IsClose)
                 {
+                    // Capture from the result itself, before anything else can observe or race
+                    // with the socket's own (platform-dependent-timed) CloseStatus property.
+                    _observedCloseStatus = received.CloseStatus;
+                    _observedCloseStatusDescription = received.CloseStatusDescription;
                     return;
                 }
-                ReceivedFrames.Add(frame.Value);
+                if (received.Json is null)
+                {
+                    // Either an empty read or a WebSocketException that ReceiveJsonOrCloseAsync
+                    // swallowed internally (its documented "safe null" contract, shared by other
+                    // callers that don't care about close status) — so the exception never reaches
+                    // this method's own catch block below. Observed in a 50-connection stress run
+                    // against the real Python backend (1/50 iterations): the peer had actually
+                    // already answered the close (aiohttp's autoclose) before its TCP connection
+                    // tore down, so the socket had recorded a close status despite the receive
+                    // faulting instead of returning a clean Close-type result. Best-effort recover
+                    // it here rather than leaving CloseStatus permanently null.
+                    TryCaptureCloseFromSettledSocket();
+                    return;
+                }
+                ReceivedFrames.Add(received.Json.Value);
             }
         }
         catch (OperationCanceledException)
@@ -194,11 +238,33 @@ public sealed class RealtimeBrowserClient : IAsyncDisposable
         }
         catch (WebSocketException)
         {
-            // Socket torn down from under the reader — expected on disposal/backend close.
+            // Belt-and-braces: covers a WebSocketException thrown by something other than the
+            // ReceiveAsync call ReceiveJsonOrCloseAsync already guards (e.g. cancellation racing
+            // with a receive in a way that surfaces here instead of as OperationCanceledException).
+            TryCaptureCloseFromSettledSocket();
         }
         finally
         {
             _closed.TrySetResult();
+        }
+    }
+
+    /// <summary>
+    /// Best-effort fallback used when the reader loop didn't get a clean Close-type
+    /// <see cref="WebSocketReceiveResult"/> to capture status from directly (see
+    /// <see cref="PumpReceivedFramesAsync"/>): once the socket has actually settled to
+    /// <see cref="WebSocketState.Closed"/> or <see cref="WebSocketState.CloseReceived"/>, the
+    /// runtime may still have recorded the peer's close status even though the receive that
+    /// observed it faulted instead of returning cleanly. Reading it here — inside the reader's own
+    /// task, before <c>_closed</c> is signalled — means any caller of <see cref="WaitForCloseAsync"/>
+    /// only ever sees the settled value, never an in-between one.
+    /// </summary>
+    private void TryCaptureCloseFromSettledSocket()
+    {
+        if (_socket.State is WebSocketState.Closed or WebSocketState.CloseReceived)
+        {
+            _observedCloseStatus = _socket.CloseStatus;
+            _observedCloseStatusDescription = _socket.CloseStatusDescription;
         }
     }
 
