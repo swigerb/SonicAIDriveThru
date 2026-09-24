@@ -22,6 +22,14 @@ under test:
   review item 16) before either fake even starts, instead of silently running against ports the
   external backend can never match. Start the external backend pointed at those same two fixed
   ports, then run the suite with the identical env vars set.
+- In external mode, only the **Default** backend profile collection actually runs against the
+  external backend. The `ShortTimers` and `FixedClock` profile collections (see "Backend
+  profiles" below) skip themselves instead, with a clear reason (`ExternalModeProfilePolicy`, PR
+  #22 review item N6): external mode has exactly one already-running backend process, which
+  cannot simultaneously satisfy the Default profile's requirements and a different profile's
+  `CONFORMANCE_TEST_HOOKS` overrides, and every profile collection would otherwise try to bind
+  the same fixed fake ports concurrently and race for them. Run non-Default profile scenarios
+  with `CONFORMANCE_BACKEND=python` (harness-launched) instead.
 - `CONFORMANCE_BACKEND=python` (the default) — launch `app/backend` via `.venv`.
 - `CONFORMANCE_BACKEND=dotnet` — the S2 .NET backend placeholder (issue #7; the backend doesn't
   exist yet). **This FAILS the suite by default** (PR #22 review item 15) — CI must never silently

@@ -35,6 +35,19 @@ public class ConformanceFixture : IAsyncLifetime
 
     public async ValueTask InitializeAsync()
     {
+        // Non-Default profile collections must skip themselves in external mode, before either
+        // fake is started, so they never race the Default collection (or each other) to bind the
+        // same fixed fake ports, and never assume an external, already-running backend happens to
+        // match a profile it was never configured for (PR #22 review item N6).
+        SkipReason = ExternalModeProfilePolicy.ShouldSkip(
+            Environment.GetEnvironmentVariable("CONFORMANCE_BACKEND_URL"),
+            Profile.Name,
+            BackendProfiles.Default.Name);
+        if (SkipReason is not null)
+        {
+            return;
+        }
+
         // External mode (CONFORMANCE_BACKEND_URL) requires the two fakes to bind to fixed,
         // known-in-advance ports -- see ExternalModePortPolicy's own docs for why -- and fails
         // fast with a clear message here (before either fake even starts) if they're missing
