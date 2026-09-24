@@ -103,9 +103,23 @@ public class ConformanceFixture : IAsyncLifetime
     /// <summary>
     /// Wraps a scenario body so any failure carries the backend's captured stdout/stderr in the
     /// exception message — xUnit displays inner-exception text on failure without needing
-    /// ITestOutputHelper plumbing through every scenario.
+    /// ITestOutputHelper plumbing through every scenario. Equivalent to
+    /// <c>RunAsync(body, expectedNewUnhandledErrors: 0)</c>.
     /// </summary>
-    public async Task RunAsync(Func<Task> body)
+    public Task RunAsync(Func<Task> body) => RunAsync(body, expectedNewUnhandledErrors: 0);
+
+    /// <summary>
+    /// Same as <see cref="RunAsync(Func{Task})"/>, but lets a scenario declare that its body is
+    /// expected to cause exactly <paramref name="expectedNewUnhandledErrors"/> additional
+    /// unhandled-error log lines relative to the baseline captured before it runs (PR #38 review
+    /// item 2). A caught-and-reported application-level tool exception (see
+    /// ToolErrorSessionSurvivesTests's README-documented "one ERROR" contract) is expected to log
+    /// exactly one such line even in a correct implementation — without this overload, the
+    /// zero-new-errors invariant below would itself block an otherwise-passing scenario from ever
+    /// passing, which is exactly what PR #38's Rick review flagged: "the body passes and only the
+    /// error count blocked it."
+    /// </summary>
+    public async Task RunAsync(Func<Task> body, int expectedNewUnhandledErrors)
     {
         if (SkipReason is not null)
         {
@@ -119,6 +133,11 @@ public class ConformanceFixture : IAsyncLifetime
         // would point at this scenario's assertions instead of the real, earlier cause (PR #22
         // review item N9). See FakeRealtimeUpstreamServer.AssertNoPendingOneShotSwitches.
         Realtime.AssertNoPendingOneShotSwitches();
+
+        // Same reasoning as above, for FakeSearchServer.RejectSelectFieldOnce (PR #38 review
+        // item 8) — a leaked one-shot search-rejection flag from a previous scenario must not be
+        // allowed to silently misfire against this scenario's own search request instead.
+        Search.AssertNoPendingOneShotSwitches();
 
         // Captured BEFORE the scenario runs, not after: only a handler fault recorded on a
         // connection accepted at or after this point belongs to *this* scenario. A connection an
@@ -174,12 +193,15 @@ public class ConformanceFixture : IAsyncLifetime
             // fail this one either.
             Realtime.AssertNoHandlerFaults(since: connectionWatermark);
 
-            // Language-neutral, fixture-wide equivalent of "backend logged no traceback" (item
-            // N5): a future C# backend under test reports the same zero-new-errors contract
-            // without ever producing a Python-shaped traceback string.
+            // Language-neutral, fixture-wide equivalent of "backend logged no (unexpected)
+            // traceback" (item N5): a future C# backend under test reports the same
+            // baseline-plus-delta contract without ever producing a Python-shaped traceback
+            // string. Most scenarios pass expectedNewUnhandledErrors: 0 (via the single-arg
+            // RunAsync overload); a scenario that deliberately provokes one caught-and-reported
+            // tool exception passes 1 instead (PR #38 review item 2).
             if (Backend is not null)
             {
-                Assert.Equal(baselineUnhandledErrors, Backend.UnhandledErrorCount());
+                Assert.Equal(baselineUnhandledErrors + expectedNewUnhandledErrors, Backend.UnhandledErrorCount());
             }
         }
         catch (Exception ex) when (Backend is not null)
