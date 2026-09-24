@@ -325,3 +325,104 @@ primary source cited by `GaSessionValidator`):
   `Cancel_while_streaming_stops_the_response_early_and_reports_cancelled_status`,
   `Response_create_while_a_response_is_already_active_is_rejected`. All three are mutation-checked
   (see PR history / squad history for outputs).
+
+## Ordering scenarios (issue #9)
+
+Black-box `update_order`/`get_order`/`reset_order`/`search` scenarios in
+`tests/Conformance.Tests/Scenarios/Ordering/`, driven by scripted function calls from the fake
+upstream and asserting on both the browser-bound `extension.middle_tier_tool_response` and the
+`function_call_output` sent upstream. Golden pricing/tax/combo/Route-44 data ported from
+`app/backend/tests/test_order_state*.py`, `test_tools*.py`, `test_order_logic.py`, and
+`test_combo_orders.py` lives in one file, `tests/conformance/testdata/golden-order-pricing.json`
+(loaded via `GoldenOrderPricingData.cs`), so a future C# backend (S4) can assert against the exact
+same cent-accurate cases instead of a second, independently-transcribed copy.
+
+### Money contract (PR #38 review item 1)
+
+Every money computation this suite asserts on follows exactly one rule, stated in full in
+`golden-order-pricing.json`'s own top-level `description` field:
+
+> `line = unit * qty * (happyHourDiscount iff isDrink and happy hour is active)`;
+> `subtotal = sum(line)`; `tax = subtotal * taxRate`, computed **once per order** (never per line,
+> never re-derived from a rounded subtotal); `finalTotal = subtotal + tax`. There is **no rounding
+> at any step** of this arithmetic — `.2f`/currency formatting is presentation-only and must never
+> feed back into subtotal/tax/finalTotal math.
+
+Consequences for how this suite is written:
+
+- Every money value in the golden file (`unitPrice`/`price`/`taxRate`/`happyHourDiscount`/
+  `expectedSubtotal`/`expectedTax`/`expectedFinalTotal`/`expectedTotal`) is stored as a **quoted,
+  exact decimal string** (e.g. `"0.8152"`, `"10.185"`), computed with true decimal arithmetic —
+  never as a bare JSON number, which would round-trip through `double` during parsing.
+- `GoldenOrderPricingData.cs` loads every money-typed property as C# `decimal` (never `double`).
+  `JsonNumberHandling.AllowReadingFromString` lets a quoted JSON string deserialize straight into a
+  `decimal` property with no intermediate `double` and no custom converter.
+- Scenario code parses money values off the live backend's wire responses via
+  `JsonElement.GetDecimal()` — **never** `JsonElement.GetDouble()` — which reads the raw JSON number
+  token text directly into `decimal`.
+- All money assertions go through `OrderScenarioHelpers.AssertMoneyEqual(expected, actual)`, an
+  absolute-tolerance decimal comparison (`|expected − actual| ≤ 0.000001m`). This tolerance exists
+  solely to absorb the live Python backend's own internal `double` arithmetic noise on the wire
+  (e.g. it may echo back `0.8151999999999999` instead of the golden `0.8152`) — it is **not** a
+  license to round anywhere in this suite's own math, and it is far too tight to mask a genuinely
+  wrong implementation (e.g. one that rounds tax to cents per line before summing).
+- **Never** use xUnit's `Assert.Equal(double, double, precision: N)` for money in this stream: that
+  rounds via `Math.Round(double, N)` semantics, which both wrongly fails some correct decimal-exact
+  values (`10.185m` rounds to `10.18`, not the correct `10.19`) and wrongly passes some incorrect
+  ones. There must be no `precision: 2` (or any other precision-based money assertion) anywhere
+  under `Scenarios/Ordering/`.
+
+### Tool-error unhandled-error-count contract (PR #38 review item 2)
+
+`ConformanceFixture.RunAsync(Func<Task> body)` asserts, by default, that a scenario introduces
+**zero** new backend unhandled-error log lines relative to a baseline captured before the scenario
+runs (see the fixture's own doc comments for why it's baseline-relative rather than an absolute
+zero). A scenario that deliberately provokes one **caught-and-reported** application-level tool
+exception — the kind `tools.py` itself catches and turns into a graceful apology `ToolResult`
+rather than letting propagate — is expected, even in a fully correct implementation, to log exactly
+one such ERROR line for that exception. Use the second overload,
+`RunAsync(Func<Task> body, int expectedNewUnhandledErrors)`, to declare that expected delta instead
+of letting the zero-new-errors invariant block an otherwise-passing scenario
+(`ToolErrorSessionSurvivesTests.cs`'s `Session_survives_an_unhandled_tool_exception` — currently
+`[Fact(Skip = ...)]` pending the Python fix tracked in #36 — is written to pass
+`expectedNewUnhandledErrors: 1` once that fix lands).
+
+### `search`'s two `select` field sets (should-fix #8)
+
+`app/backend/tools.py::search` issues its Azure AI Search query with one of two different
+`$select` field lists, depending on whether the primary attempt succeeded:
+
+- **Primary** `select_fields`: `[id, name, category, description, sizes]` (or the configured
+  identifier/content field names in place of `id`/`description`).
+- **Fallback** `select` (used only after Azure responds "Could not find a property named" — the
+  field-name-mismatch 400 this suite's `FakeSearchServer.RejectSelectFieldOnce` hook simulates):
+  `[id, description]` (or the configured identifier/content field names). Notably, `sizes` is
+  present in the primary set and **absent** from the fallback — `SearchToolTests.cs`'s fallback
+  test deliberately rejects `"sizes"` for exactly this reason, so a successful retry can only be
+  observed by the second request omitting it.
+
+### Order-summary wire schema
+
+`update_order`/`get_order`/`reset_order` are all `ToolResultDirection.TO_BOTH` (see
+`app/backend/tools.py`): the `tool_result` field of the browser-bound
+`extension.middle_tier_tool_response` frame is a **JSON-encoded string** (not a nested JSON object —
+parse it with a second `JsonDocument.Parse`/`JsonSerializer.Deserialize` call) containing the order
+summary:
+
+```json
+{
+  "items": [
+    { "item": "<name>", "size": "<display size, or empty>", "quantity": <int>, "price": "<unit price>", "display": "<full display string>" }
+  ],
+  "total": "<subtotal, pre-tax>",
+  "tax": "<tax>",
+  "finalTotal": "<total>"
+}
+```
+
+All four money fields (`items[].price`, `total`, `tax`, `finalTotal`) are numbers on the wire (not
+quoted, unlike the golden file's storage format) and must always be parsed via
+`JsonElement.GetDecimal()` per the money contract above. `search`'s `tool_result` is always `null`
+(it's `ToolResultDirection.TO_SERVER`-only and never reaches the browser at all) — its
+model-visible content is instead the plain-text `function_call_output` sent upstream.
+
