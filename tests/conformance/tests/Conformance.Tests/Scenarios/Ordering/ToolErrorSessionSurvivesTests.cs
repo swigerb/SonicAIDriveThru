@@ -67,7 +67,7 @@ public sealed class ToolErrorSessionSurvivesTests(ConformanceFixture fixture)
         // The session survives: the very next tool call, on the same connection, still works.
         var next = await OrderScenarioHelpers.RunOrderStepsAsync(
             connection, browser,
-            [("add", "Tots", "medium", 1, 2.79)],
+            [("add", "Tots", "medium", 1, 2.79m)],
             errored.RoundTripIndex, ct);
         var order = JsonDocument.Parse(next.ToolResultJson!).RootElement;
         Assert.Equal(1, order.GetProperty("items").GetArrayLength());
@@ -125,9 +125,9 @@ public sealed class ToolErrorSessionSurvivesTests(ConformanceFixture fixture)
 
         var next = await OrderScenarioHelpers.RunOrderStepsAsync(
             connection, browser,
-            [("add", "Tots", "medium", 1, 2.79)],
+            [("add", "Tots", "medium", 1, 2.79m)],
             nextIndex, ct);
         var order = JsonDocument.Parse(next.ToolResultJson!).RootElement;
         Assert.Equal(1, order.GetProperty("items").GetArrayLength());
-    });
+    }, expectedNewUnhandledErrors: 1);
 }
