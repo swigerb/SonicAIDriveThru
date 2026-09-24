@@ -192,6 +192,20 @@ shape of each individual frame.
    (`CloseCodeTests.Resuming_a_still_attached_session_supersedes_the_original_socket_with_4002`'s
    "A's very first client frame — not a resume — makes the resume decision fresh" comment)
 
+### Backend logging is not a wire contract (PR #42 review item 1)
+
+`ConformanceFixture.RunAsync(body, allowedNewBackendErrors)` bounds — from **above only** — how
+many new backend ERROR-level log lines (`CapturedProcessOutput.CountUnhandledErrors`) a scenario's
+own body may cause, asserted as `actual <= baseline + allowedNewBackendErrors`, never exact
+equality. This is deliberately a ceiling, not a pinned count: *how many* ERROR-level lines a
+backend logs for a given recovered condition (one line vs. two, or ERROR vs. WARNING) is a
+logging/observability choice specific to this backend's own code, not part of the neutral contract
+a correct backend in another language must reproduce. A future .NET backend that logs one line
+where the Python backend logs two — or logs at a level this harness doesn't count as an "unhandled
+error" at all — must still pass every scenario that uses this overload. Only genuinely *unexpected*
+errors (anything above the declared ceiling) fail a scenario. The zero-arg `RunAsync(body)` overload
+still asserts a hard `0` ceiling, i.e. this scenario must cause no new backend errors at all.
+
 ### Shared files
 
 | File | Consumed by | Purpose |

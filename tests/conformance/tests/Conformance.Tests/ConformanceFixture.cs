@@ -117,20 +117,25 @@ public class ConformanceFixture : IAsyncLifetime
     /// exception message — xUnit displays inner-exception text on failure without needing
     /// ITestOutputHelper plumbing through every scenario.
     /// </summary>
-    public Task RunAsync(Func<Task> body) => RunAsync(body, expectedNewBackendErrorCount: 0);
+    public Task RunAsync(Func<Task> body) => RunAsync(body, allowedNewBackendErrors: 0);
 
     /// <summary>
     /// Same as <see cref="RunAsync(Func{Task})"/>, but for scenarios whose entire subject matter
     /// is a deterministic, application-level error path (e.g. a rejected session.update, or an
     /// unrelated upstream error) that the backend legitimately logs at ERROR level as part of
-    /// proving recovery actually happened. <paramref name="expectedNewBackendErrorCount"/> is the
-    /// exact number of new backend ERROR-level log lines (per
+    /// proving recovery actually happened. <paramref name="allowedNewBackendErrors"/> is an
+    /// UPPER BOUND on the number of new backend ERROR-level log lines (per
     /// <see cref="Conformance.Harness.CapturedProcessOutput.CountUnhandledErrors"/>) this
-    /// scenario's own body deliberately, deterministically causes — the zero-arg overload's
-    /// baseline-delta invariant (PR #22 review item N5) still applies on top of that expected
-    /// count, so any *additional*, unexpected backend error still fails the scenario.
+    /// scenario's own body may deliberately, deterministically cause — asserted as
+    /// <c>actual &lt;= baseline + allowed</c>, never exact equality. How many ERROR-level lines a
+    /// backend chooses to log for a given recovered condition (one line, two lines, or logged at
+    /// WARNING instead of ERROR and therefore zero) is a logging/observability choice, not a wire
+    /// contract — a correct backend in another language must not be forced to reproduce this
+    /// backend's own log-line count to pass. The zero-arg overload's baseline-delta invariant (PR
+    /// #22 review item N5) still applies on top of the bound, so any *unexpected* excess backend
+    /// error still fails the scenario.
     /// </summary>
-    public async Task RunAsync(Func<Task> body, int expectedNewBackendErrorCount)
+    public async Task RunAsync(Func<Task> body, int allowedNewBackendErrors)
     {
         if (SkipReason is not null)
         {
@@ -201,10 +206,16 @@ public class ConformanceFixture : IAsyncLifetime
 
             // Language-neutral, fixture-wide equivalent of "backend logged no traceback" (item
             // N5): a future C# backend under test reports the same zero-new-errors contract
-            // without ever producing a Python-shaped traceback string.
+            // without ever producing a Python-shaped traceback string. Bounded from ABOVE only —
+            // backend logging verbosity/level is not a wire contract (Rick's PR #42 review, item
+            // 1): a correct backend that logs fewer lines, or logs at a level this harness
+            // doesn't count as an "unhandled error" at all, must still pass.
             if (Backend is not null)
             {
-                Assert.Equal(baselineUnhandledErrors + expectedNewBackendErrorCount, Backend.UnhandledErrorCount());
+                var actual = Backend.UnhandledErrorCount();
+                Assert.True(actual <= baselineUnhandledErrors + allowedNewBackendErrors,
+                    $"Expected at most {allowedNewBackendErrors} new backend error(s) above the " +
+                    $"baseline of {baselineUnhandledErrors}, but observed {actual}.");
             }
         }
         catch (Exception ex) when (Backend is not null)

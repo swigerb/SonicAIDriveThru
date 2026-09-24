@@ -84,7 +84,7 @@ public sealed class SessionUpdateFallbackTests(Gpt15ForcedReasoningConformanceFi
     // rejected reasoning-model options ..." (the process-wide reasoning-off flip it triggers).
     // Both are proven recovered above (no `error` frame reaches the browser, exactly one
     // fallback, the guard never loops) -- this is not an unexpected/unhandled error.
-    expectedNewBackendErrorCount: 2);
+    allowedNewBackendErrors: 2);
 }
 
 /// <summary>
@@ -137,5 +137,5 @@ public sealed class UnrelatedErrorsDoNotTriggerFallbackTests(ConformanceFixture 
     // rtmt.py's "error" case logs this unrelated OpenAI Realtime API error at ERROR level before
     // relaying it -- deterministic, and proven above to be a plain relay (no fallback triggered),
     // not an unexpected/unhandled error.
-    expectedNewBackendErrorCount: 1);
+    allowedNewBackendErrors: 1);
 }
