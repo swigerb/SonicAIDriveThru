@@ -56,7 +56,7 @@ public sealed class SearchToolTests(ConformanceFixture fixture)
         Assert.False(anySearchToolResponse, "search must never emit extension.middle_tier_tool_response.");
     });
 
-    [Fact(Skip = "Known Python bug: app/backend/tools.py's search() wraps only the initial " +
+    [Fact(Skip = "Known Python bug (tracked in #37): app/backend/tools.py's search() wraps only the initial " +
         "`await search_client.search(...)` call in try/except HttpResponseError (lines 206-244) " +
         "expecting the field-mismatch 400 to raise there, but the azure-search-documents async " +
         "client is lazy -- `search_client.search(...)` returns immediately without making any " +
@@ -109,7 +109,7 @@ public sealed class SearchToolTests(ConformanceFixture fixture)
         Assert.DoesNotContain(rejectedField, retrySelect.Split(',', StringSplitOptions.TrimEntries), StringComparer.OrdinalIgnoreCase);
     });
 
-    [Fact(Skip = "Known Python bug: depends on the search field-name fallback retry actually " +
+    [Fact(Skip = "Known Python bug (tracked in #37): depends on the search field-name fallback retry actually " +
         "succeeding (see Search_retries_with_a_minimal_select_after_the_field_name_fallback_400's " +
         "Skip reason) -- the fallback's HttpResponseError propagates unhandled and tears down " +
         "the connection before a later update_order call could ever prove the session survives. " +

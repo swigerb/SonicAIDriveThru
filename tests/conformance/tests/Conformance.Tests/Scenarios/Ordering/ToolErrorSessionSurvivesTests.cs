@@ -73,7 +73,7 @@ public sealed class ToolErrorSessionSurvivesTests(ConformanceFixture fixture)
         Assert.Equal(1, order.GetProperty("items").GetArrayLength());
     });
 
-    [Fact(Skip = "Known Python bug: app/backend/rtmt.py's response.output_item.done handler " +
+    [Fact(Skip = "Known Python bug (tracked in #36): app/backend/rtmt.py's response.output_item.done handler " +
         "(_process_message_to_client, line ~817) calls `await tool.target(args, session_id)` " +
         "with no try/except. A genuinely unhandled exception inside a tool (e.g. update_order's " +
         "`args[\"item_name\"]` with no default, raising KeyError when the argument is omitted) " +
