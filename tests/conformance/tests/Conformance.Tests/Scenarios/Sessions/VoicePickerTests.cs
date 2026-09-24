@@ -128,11 +128,28 @@ public sealed class VoicePickerTests(VoicePickerConformanceFixture fixture)
         Assert.True(noneOpen, $"Expected no open upstream connections at test start, but " +
             $"{fixture.Realtime.OpenConnectionCount} are still open — a previous test leaked a connection.");
 
+        // Rick's PR #42 review (M5 blocker): every other active test in this collection (which
+        // shares one backend process/voice_choice -- see VoicePickerConformanceFixture's docs)
+        // also picks "cedar", so with M5 applied (the picked voice discarded, never carried to
+        // the next conversation) the bootstrap below could still show "cedar" purely because an
+        // earlier test in the run already left the process-wide voice_choice at "cedar" -- not
+        // because *this* test's own pick carried over. Picking a voice nothing else in this
+        // collection ever picks, and asserting the FIRST connection's own bootstrap voice is
+        // something else beforehand, closes that gap: only this test's own set_voice call can
+        // explain the second connection's bootstrap voice matching the target below.
+        const string targetVoice = "verse";
+
         var firstConnectionTask = fixture.Realtime.WaitForNextConnectionAsync(FrameTimeout, ct);
         await using (var firstBrowser = await RealtimeBrowserClient.ConnectAsync(fixture.Backend!.BaseUri, cancellationToken: ct))
         {
             var firstConnection = await firstConnectionTask;
             Assert.True(firstConnection is not null, $"No upstream connection was accepted within {FrameTimeout}.");
+
+            var firstBootstrap = await firstConnection!.ReceivedFrames.WaitForAsync(f => f.Sequence == 0, FrameTimeout, ct);
+            Assert.True(firstBootstrap is not null, "Bootstrap session.update never arrived on the first connection.");
+            var voiceBeforePick = firstBootstrap!.Json.GetProperty("session").GetProperty("audio")
+                .GetProperty("output").GetProperty("voice").GetString();
+            Assert.NotEqual(targetVoice, voiceBeforePick);
 
             await firstBrowser.SendStartSessionAsync(cancellationToken: ct);
             var roundTripToken = await firstBrowser.ReceivedFrames.WaitForAsync(
@@ -142,7 +159,7 @@ public sealed class VoicePickerTests(VoicePickerConformanceFixture fixture)
             // Lock the connection (assistant audio already seen via the greeting above), then
             // pick a voice -- deferred: updates rtmt.py's process-wide voice_choice but sends
             // nothing upstream on this connection.
-            await firstBrowser.SendExtensionSetVoiceAsync("cedar", cancellationToken: ct);
+            await firstBrowser.SendExtensionSetVoiceAsync(targetVoice, cancellationToken: ct);
 
             await firstBrowser.CloseAsync(WebSocketCloseStatus.NormalClosure, "voice picked, moving to next conversation", ct);
             await firstBrowser.WaitForCloseAsync(FrameTimeout, ct);
@@ -161,7 +178,7 @@ public sealed class VoicePickerTests(VoicePickerConformanceFixture fixture)
 
         var pickedVoice = bootstrap!.Json.GetProperty("session").GetProperty("audio")
             .GetProperty("output").GetProperty("voice").GetString();
-        Assert.Equal("cedar", pickedVoice);
+        Assert.Equal(targetVoice, pickedVoice);
     });
 
     /// <summary>
