@@ -103,6 +103,32 @@ public static class OrderScenarioHelpers
                 $"Expected extension.middle_tier_tool_response for {toolName} (call_id={callId}) on the browser within {FrameTimeout}.");
             toolResultJson = toolResponse!.Json.GetProperty("tool_result").GetString();
         }
+        else
+        {
+            // PR #38 review item 3 (Rick's M4): a rejected/dropped call (TO_SERVER-only apology,
+            // or search which is always TO_SERVER) must not silently reach the browser as if it
+            // had succeeded. Positively prove no extension.middle_tier_tool_response for this
+            // tool arrived at all since the watermark -- not merely "we didn't wait for one",
+            // which would pass vacuously regardless of backend behavior -- and that the
+            // model-facing function_call_output text isn't itself a JSON order-summary object
+            // masquerading as a graceful apology.
+            var strayToolResponse = browser.ReceivedFrames.Snapshot().Any(f =>
+                f.Sequence >= browserWatermark &&
+                f.Type == "extension.middle_tier_tool_response" &&
+                f.Json.TryGetProperty("tool_name", out var strayToolNameProp) &&
+                strayToolNameProp.GetString() == toolName);
+            Assert.False(strayToolResponse,
+                $"Expected no extension.middle_tier_tool_response for {toolName} (call_id={callId}) " +
+                "to have reached the browser since the watermark, but one arrived -- this is " +
+                "exactly the shape of PR #38 review M4 (a rejected/dropped call silently answered " +
+                "as if it had succeeded).");
+
+            Assert.False(LooksLikeOrderSummary(outputText),
+                $"function_call_output for {toolName} (call_id={callId}) parses as a JSON " +
+                "order-summary object (has \"items\" and \"finalTotal\" keys), but this call was " +
+                "scripted as rejected/dropped -- a genuine rejection is a plain apology string, " +
+                "never an order summary.");
+        }
 
         // After a tool call, rtmt.py auto-issues a bare follow-up response.create upstream to get
         // the model's spoken reply to the tool result; only once *that* turn also completes does
@@ -124,11 +150,14 @@ public static class OrderScenarioHelpers
 
     /// <summary>Runs a sequence of `update_order` "add"/"remove" steps (as scripted by
     /// <see cref="ComboStep"/>/ad-hoc callers) against one connection, returning the final
-    /// <c>tool_result</c> (order summary JSON) from the last step.</summary>
+    /// <c>tool_result</c> (order summary JSON) from the last step. A step whose <c>Action</c> is
+    /// <c>"reset"</c> calls `reset_order` instead of `update_order` (item/size/quantity/price are
+    /// unused for that step) — added for the M1 kill-scenario (PR #38 review item 4) that needs
+    /// to reset mid-sequence and keep scripting further steps on the same connection.</summary>
     public static async Task<ToolCallResult> RunOrderStepsAsync(
         FakeRealtimeConnection connection,
         RealtimeBrowserClient browser,
-        IEnumerable<(string Action, string Item, string Size, int Quantity, double Price)> steps,
+        IEnumerable<(string Action, string Item, string Size, int Quantity, decimal Price)> steps,
         int roundTripIndex,
         CancellationToken ct,
         string callIdPrefix = "call_step")
@@ -137,16 +166,24 @@ public static class OrderScenarioHelpers
         var i = 0;
         foreach (var step in steps)
         {
-            var argsJson = JsonSerializer.Serialize(new
+            if (step.Action == "reset")
             {
-                action = step.Action,
-                item_name = step.Item,
-                size = step.Size,
-                quantity = step.Quantity,
-                price = step.Price,
-            });
-            last = await CallToolAsync(
-                connection, browser, "update_order", argsJson, $"{callIdPrefix}_{i}", roundTripIndex, ct);
+                last = await CallToolAsync(
+                    connection, browser, "reset_order", "{}", $"{callIdPrefix}_{i}", roundTripIndex, ct);
+            }
+            else
+            {
+                var argsJson = JsonSerializer.Serialize(new
+                {
+                    action = step.Action,
+                    item_name = step.Item,
+                    size = step.Size,
+                    quantity = step.Quantity,
+                    price = step.Price,
+                });
+                last = await CallToolAsync(
+                    connection, browser, "update_order", argsJson, $"{callIdPrefix}_{i}", roundTripIndex, ct);
+            }
             roundTripIndex = last.RoundTripIndex;
             i++;
         }
@@ -155,14 +192,63 @@ public static class OrderScenarioHelpers
         return last!;
     }
 
-    public static double GetOrderTotal(string orderSummaryJson) =>
-        JsonDocument.Parse(orderSummaryJson).RootElement.GetProperty("total").GetDouble();
+    /// <summary>
+    /// Money-contract tolerance (PR #38 review item 1): the live Python backend computes in
+    /// IEEE-754 double and echoes back tiny float noise on the wire (e.g. 0.8151999999999999
+    /// instead of the exact decimal 0.8152); this absolute tolerance absorbs exactly that noise
+    /// while still failing a genuinely wrong implementation (e.g. one that rounds tax to cents
+    /// per line before summing, which differs by far more than a double-rounding error's width).
+    /// </summary>
+    public const decimal MoneyTolerance = 0.000001m;
 
-    public static double GetOrderFinalTotal(string orderSummaryJson) =>
-        JsonDocument.Parse(orderSummaryJson).RootElement.GetProperty("finalTotal").GetDouble();
+    /// <summary>
+    /// Asserts two money values are equal within <see cref="MoneyTolerance"/>. Never use xUnit's
+    /// `Assert.Equal(double, double, precision: N)` for money in this stream — that rounds via
+    /// `Math.Round(double, N)` semantics, which both wrongly fails some correct decimal-exact
+    /// values (e.g. 10.185m rounds to 10.18, not 10.19) and wrongly passes some incorrect ones
+    /// (e.g. a per-line-rounded tax that happens to land within half a cent of the correct total).
+    /// </summary>
+    public static void AssertMoneyEqual(decimal expected, decimal actual, string? because = null)
+    {
+        var diff = Math.Abs(expected - actual);
+        Assert.True(diff <= MoneyTolerance,
+            because ?? $"Expected {expected} but got {actual} (difference {diff} exceeds tolerance {MoneyTolerance}).");
+    }
+
+    public static decimal GetOrderTotal(string orderSummaryJson) =>
+        JsonDocument.Parse(orderSummaryJson).RootElement.GetProperty("total").GetDecimal();
+
+    public static decimal GetOrderTax(string orderSummaryJson) =>
+        JsonDocument.Parse(orderSummaryJson).RootElement.GetProperty("tax").GetDecimal();
+
+    public static decimal GetOrderFinalTotal(string orderSummaryJson) =>
+        JsonDocument.Parse(orderSummaryJson).RootElement.GetProperty("finalTotal").GetDecimal();
 
     public static int GetOrderItemCount(string orderSummaryJson) =>
         JsonDocument.Parse(orderSummaryJson).RootElement.GetProperty("items").GetArrayLength();
+
+    /// <summary>
+    /// True if <paramref name="text"/> parses as a JSON object carrying both an "items" and a
+    /// "finalTotal" key — i.e., looks like the order-summary payload `update_order`/`get_order`/
+    /// `reset_order` embed as `client_text` (see app/backend/tools.py), rather than a plain
+    /// natural-language string. Used to positively prove a rejected/dropped tool call's
+    /// function_call_output is a genuine apology, not an order summary in disguise (PR #38 review
+    /// item 3, Rick's M4).
+    /// </summary>
+    private static bool LooksLikeOrderSummary(string text)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(text);
+            return doc.RootElement.ValueKind == JsonValueKind.Object &&
+                   doc.RootElement.TryGetProperty("items", out _) &&
+                   doc.RootElement.TryGetProperty("finalTotal", out _);
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
 }
 
 /// <summary>Result of one scripted tool-call round trip.</summary>
