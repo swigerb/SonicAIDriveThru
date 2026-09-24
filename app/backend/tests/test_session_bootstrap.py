@@ -291,6 +291,58 @@ class SessionBootstrapTests(_RealtimeHarness):
         await browser.close()
 
 
+class SessionUpdatedScrubTests(_RealtimeHarness):
+    """swigerb/SonicAIDriveThru#27: the middle tier scrubbed `instructions` and
+    `tools` from `session.created` before relaying it to the browser, but had
+    no case for `session.updated` in `_process_message_to_client`'s match
+    statement -- and `session.updated` is also not in
+    `_PASSTHROUGH_SERVER_TYPES`, so it fell through unmodified. GA fires
+    `session.updated` after every accepted session.update (starting with our
+    own bootstrap one), echoing the full session object back, so every
+    browser connection received the real system prompt and tool schemas.
+    """
+
+    async def test_bootstrap_session_updated_reaching_the_browser_has_no_instructions_or_tools(self):
+        browser = await self.client.ws_connect("/realtime")
+        # The bootstrap session.update (sent before any browser frame) is
+        # acknowledged by the fake with a session.updated that carries the
+        # real instructions/tools -- exactly what the real GA service does.
+        events = await self._browser_events(browser, duration=1.0)
+        updates = [e for e in events if e["type"] == "session.updated"]
+        self.assertTrue(updates, "no session.updated reached the browser")
+
+        # Sanity check: the *upstream* fake really did receive our real
+        # prompt and tool schemas, so this test would fail for the right
+        # reason if the scrub were ever removed.
+        self.assertEqual(self.fake.session["instructions"], SYSTEM_PROMPT)
+        self.assertEqual([t.get("name") for t in self.fake.session["tools"]], TOOL_NAMES)
+
+        for event in updates:
+            session = event["session"]
+            self.assertEqual(session.get("instructions"), "",
+                              "session.updated leaked the system prompt to the browser")
+            self.assertEqual(session.get("tools"), [],
+                              "session.updated leaked tool schemas to the browser")
+        await browser.close()
+
+    async def test_session_updated_for_the_browsers_own_update_is_also_scrubbed(self):
+        browser = await self.client.ws_connect("/realtime")
+        await self._browser_events(browser, duration=0.3)     # drain the bootstrap ack
+
+        await browser.send_json(BROWSER_SESSION_UPDATE)
+        events = await self._browser_events(browser, duration=1.0)
+        updates = [e for e in events if e["type"] == "session.updated"]
+        self.assertTrue(updates, "expected a session.updated for the browser's own session.update too")
+
+        for event in updates:
+            session = event["session"]
+            self.assertEqual(session.get("instructions"), "",
+                              "session.updated leaked the system prompt to the browser")
+            self.assertEqual(session.get("tools"), [],
+                              "session.updated leaked tool schemas to the browser")
+        await browser.close()
+
+
 class SessionUpdateFallbackTests(_RealtimeHarness):
     """A rejected session.update must never silently cost us the tools.
 

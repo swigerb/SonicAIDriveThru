@@ -331,6 +331,98 @@ as a hard requirement, not just the graceful `IAsyncDisposable.DisposeAsync` pat
   (already uploaded as an artifact on failure) well before the job-level timeout would otherwise
   kill it with no diagnostics at all.
 
+### Upstream socket lifecycle on browser disconnect (PR #22 review item N14)
+
+`ConformanceFixture.RunAsync` waits for all upstream connections to close after each scenario
+(`Realtime.WaitForNoOpenConnectionsAsync`, 30s) before letting the next scenario start. **A
+backend must close its upstream socket when the browser disconnects.** Python does this today
+(`RTMiddleTier`'s `finally` block closes `target_ws`/detaches the session as soon as the browser
+socket loop exits, independent of the resume grace hold on the *session*, which only keeps the
+order/transcript around in memory — it never keeps the old upstream socket open). A C# (or any
+other) backend that instead kept its upstream connection open through the full grace hold (120s in
+production, 1s under `BackendProfiles.ShortTimers`) would fail every scenario after the first
+30s — `WaitForNoOpenConnectionsAsync` would time out waiting for a connection nothing is ever
+going to close. Documented here (rather than newly enforced) since `ConformanceFixture` already
+behaves this way; see `ConformanceFixture.cs`'s `RunAsync`.
+
+### WebSocket Origin validation (swigerb/SonicAIDriveThru#25)
+
+A backend **must** validate the `Origin` header on the `/realtime` WebSocket upgrade by an
+**exact** match — not a string-suffix match — against one of:
+
+- the request's own `Host` header (host, and port when non-default, case-insensitive), or
+- an entry in the backend's configured cross-origin allow-list (`security.allowed_origins` in
+  `app/backend/config.yaml`), when that list is non-empty.
+
+A `.endswith(host)`-style suffix check (the bug fixed by #25) is **not** conformant: it accepts a
+lookalike Origin an attacker actually controls, e.g. `https://evil-<host>`, because the string
+`"evil-<host>"` ends with `"<host>"` even though the two are different domains. Python's fix
+(`_origin_matches_host` in `app/backend/rtmt.py`) parses the Origin with `urllib.parse.urlsplit`
+and compares its `netloc` to `Host` for equality.
+
+A request with **no** `Origin` header at all is accepted unchanged (pre-existing, #25-unaffected
+behaviour) — this covers non-browser callers (e.g. server-to-server, curl) that never send one.
+The Origin check runs *before* session-token validation, so it rejects a bad Origin with `403`
+regardless of `security.require_session_token`.
+
+Exercised by `Scenarios/Security/OriginValidationTests.cs`: exact origin accepted, lookalike-suffix
+origin rejected with `403`, and missing origin accepted (documenting the unchanged behaviour).
+
+An empty `host` (e.g. a malformed or missing request `Host` header) is treated as **no possible
+match** — `_origin_matches_host` returns `False` rather than comparing against an empty string,
+which would otherwise let a lookalike Origin with an empty host component slip through. The
+rejection warning log line includes both values (`host=%s origin=%s`) so a real-world 403 is
+diagnosable from logs alone.
+
+## Session-scrub conversation item contract (swigerb/SonicAIDriveThru#29)
+
+A backend must never let the browser see operator-only text: the bootstrap `session.instructions`
+and `tools[].description`/`parameters` (scrubbed from every `session.created`/`session.updated`
+echo — see `_scrub_session_for_client` in `rtmt.py`), and any conversation item the middle tier
+itself authored (the greeting, resume rehydration, silence nudge, and a tool's
+`function_call_output`) — none of these may reach the browser verbatim, across **every** GA
+subtype that can carry a full item (`conversation.item.created`/`.added`/`.done`/`.retrieved`).
+
+**Client item ids.** Every item the middle tier creates is stamped with an id from
+`new_middle_tier_item_id()`: prefix `sonic_mt_` followed by 12 hex characters
+(`secrets.token_hex(6)`), generated **fresh on every send** — including the greeting, which is
+rebuilt (not cached) so a second greeting send on a different connection never reuses the first
+one's id. `_drop_from_client` treats this prefix as the primary authorship signal (dropping any
+`conversation.item.*` whose `item.id` starts with it, whichever subtype it arrives on), with the
+legacy `role == "system"` check kept only as a second-line backstop — the greeting item is
+`role: "user"`, not `"system"`, so the id-prefix check is load-bearing, not redundant.
+
+GA accepts client-supplied item ids on `conversation.item.create` (verified live against
+`gpt-realtime-2.1` / `gpt-realtime-2.1-dz`, swigerb/SonicAIDriveThru#30 review "G1"): `message`,
+`function_call`, and `function_call_output` items with a `sonic_mt_<12hex>` id are accepted and
+echoed back on both `.added` and `.done`. A **duplicate id within the same conversation is
+rejected** with:
+
+```json
+{"type":"invalid_request_error","code":"item_create_duplicate_item_id","message":"Error adding item: an item with id '<id>' already exists.","param":null,"event_id":null}
+```
+
+A backend must therefore never reuse an item id within one upstream conversation. The fake
+upstream (`RealtimeScript.cs`) models this: it tracks every client-supplied id it has seen on a
+connection (`RealtimeSessionState.SeenConversationItemIds`) and replies with the exact error above
+— same `code`, `type`, `param: null`, `event_id: null` — on a repeat, instead of `.added`/`.done`.
+It also tracks `previous_item_id` the way GA does (set on the next item's `.added` to the
+preceding item's id, client-created ids included). `WholeSessionLeakTests`' `AssertNoRepeatedItemId`
+checks every `conversation.item.create` id sent upstream is unique per connection as a black-box
+proof of this contract; `session_manager.py`'s own id generator is unit-tested for freshness
+directly (`test_greeting_msg_gets_a_fresh_id_on_every_call` and friends).
+
+**Session keep-alive.** `session_manager.py`'s idle-disconnect timer is reset by
+`SessionManager.touch_activity`, called from `rtmt.py` on: (a) every browser→upstream client frame
+*except* raw mic audio-append frames (silence streams constantly and must not count, PR #22's
+idle-timeout intent), and (b) independently, on the upstream→browser path, whenever GA reports
+`input_audio_buffer.speech_started` or `input_audio_transcription.completed` — i.e. the backend
+also resets the idle clock on genuine guest-speech signals coming back from GA, not only on raw
+client traffic. A backend that only touched activity on client frames (and never on upstream
+speech-detection echoes) would still be conformant for a guest actively sending frames, but would
+diverge from Python's behaviour for a guest who is speaking while some other client-frame gap
+exists — documented here since it's easy to miss when porting the timer semantics (F3).
+
 ## Test hooks (`app/backend/conformance_hooks.py`)
 
 Everything in this section is gated behind `CONFORMANCE_TEST_HOOKS=1` and is a complete no-op

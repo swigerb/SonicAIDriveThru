@@ -768,6 +768,17 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
                 ["output_index"] = outputIndex,
                 ["item"] = completedItem.DeepClone(),
             }, ct).ConfigureAwait(false);
+            // GA also emits conversation.item.done "when the item is finalized" for a completed
+            // assistant message item -- a second, separate event on the conversation.item.*
+            // family (distinct from response.output_item.done above), carrying the full item
+            // again (PR #30 review "M1"/"M2").
+            await connection.SendAsync(new JsonObject
+            {
+                ["type"] = "conversation.item.done",
+                ["event_id"] = FakeRealtimeConnection.NewEventId(),
+                ["previous_item_id"] = state.LastConversationItemId,
+                ["item"] = completedItem.DeepClone(),
+            }, ct).ConfigureAwait(false);
 
             output.Add(completedItem.DeepClone());
             outputIndex++;
@@ -929,6 +940,17 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
                             ["event_id"] = FakeRealtimeConnection.NewEventId(),
                             ["response_id"] = responseId,
                             ["output_index"] = outputIndex,
+                            ["item"] = completedCallItem.DeepClone(),
+                        }, ct).ConfigureAwait(false);
+                        // GA also emits conversation.item.done "when the item is finalized" for a
+                        // completed function_call item -- a second, separate event on the
+                        // conversation.item.* family carrying the full item (including its
+                        // arguments) again (PR #30 review "M1"/"M2").
+                        await connection.SendAsync(new JsonObject
+                        {
+                            ["type"] = "conversation.item.done",
+                            ["event_id"] = FakeRealtimeConnection.NewEventId(),
+                            ["previous_item_id"] = state.LastConversationItemId,
                             ["item"] = completedCallItem.DeepClone(),
                         }, ct).ConfigureAwait(false);
 
