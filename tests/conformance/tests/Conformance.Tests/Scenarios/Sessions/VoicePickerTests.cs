@@ -46,19 +46,31 @@ public sealed class VoicePickerTests(VoicePickerConformanceFixture fixture)
         // default so this would be a genuine voice change if it were sent at all.
         await browser.SendExtensionSetVoiceAsync("cedar", cancellationToken: ct);
 
-        // Bounded absence check: rtmt.py's extension.set_voice handler updates its own
-        // voice_choice in-process but -- once assistant_audio_seen -- sends NO session.update
-        // upstream at all (fully deferred, not merely voice-stripped). A short, generous window
-        // is enough to catch a regression that resumed sending it; there is nothing else to wait
-        // on, since correctly deferring is the absence of a frame.
-        var spurious = await connection.ReceivedFrames.WaitForAsync(
-            f => f.Sequence >= watermark && f.Type == "session.update", TimeSpan.FromSeconds(2), ct);
-        Assert.True(spurious is null,
-            "extension.set_voice must defer (send nothing upstream) once assistant audio was already seen, " +
-            $"but a session.update arrived: {spurious?.Json}");
+        // PR #42 review item 8 ("VoicePickerTests defer test: sentinel instead of a bounded
+        // absence window"): rather than sleeping for a fixed window and hoping nothing shows up
+        // in it, provoke a second, deterministic upstream frame right after the pick -- the
+        // browser's own follow-up session.update (rtmt.py always forwards this; voice omitted
+        // once locked, see VoiceLockTests.cs) -- and assert THAT is the very next session.update
+        // to reach upstream, with the update count only having increased by one. If
+        // extension.set_voice had regressed to sending its own (voice-carrying) session.update,
+        // it would arrive before this sentinel and be the frame this wait actually captures,
+        // failing the "voice omitted" assertion below immediately rather than relying on a race
+        // against a fixed sleep.
+        await browser.SendStartSessionAsync(cancellationToken: ct);
+        var sentinelUpdate = await connection.ReceivedFrames.WaitForAsync(
+            f => f.Sequence >= watermark && f.Type == "session.update", FrameTimeout, ct);
+        Assert.True(sentinelUpdate is not null, "Expected the browser's own follow-up session.update to reach upstream.");
 
         var updateCountAfter = connection.ReceivedFrames.Snapshot().Count(f => f.Type == "session.update");
-        Assert.Equal(updateCountBefore, updateCountAfter);
+        Assert.Equal(updateCountBefore + 1, updateCountAfter);
+
+        var sentinelSession = sentinelUpdate!.Json.GetProperty("session");
+        var sentinelHasVoice = sentinelSession.TryGetProperty("audio", out var sentinelAudio)
+            && sentinelAudio.TryGetProperty("output", out var sentinelOutput) && sentinelOutput.TryGetProperty("voice", out _);
+        Assert.False(sentinelHasVoice,
+            "extension.set_voice must defer (send nothing upstream) once assistant audio was already seen -- " +
+            "the only session.update to reach upstream after the pick must be the browser's own follow-up, " +
+            $"with voice still omitted (locked): {sentinelUpdate.Json}");
     });
 
     /// <summary>
