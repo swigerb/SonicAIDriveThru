@@ -35,8 +35,14 @@ public sealed class SearchToolTests(ConformanceFixture fixture)
 
         // Unique query text (module-scope `_search_cache` in tools.py is process-wide) so this
         // test's request is guaranteed to actually reach FakeSearchServer rather than short-
-        // circuiting on a cache hit from another test that searched the same text.
-        const string query = "sonic issue9 search happy path cherry limeade";
+        // circuiting on a cache hit from another test that searched the same text. The first
+        // "word" is a nonce that deliberately matches nothing (keeping the whole query text
+        // unique for the cache key) rather than a real menu term like "sonic" -- almost every
+        // item's name is brand-prefixed with "SONIC(R)", so a broad term like that would match
+        // (and, with no relevance ranking in the fake, bury "cherry"/"limeade" behind burgers
+        // that happen to sort earlier in menuItems.json) far more of the catalog than intended,
+        // defeating the point of asserting on a specific matched item.
+        const string query = "conformance-issue9-search-happypath cherry limeade";
         var result = await OrderScenarioHelpers.CallToolAsync(
             connection, browser, "search",
             $$"""{"query":"{{query}}"}""",
@@ -44,6 +50,15 @@ public sealed class SearchToolTests(ConformanceFixture fixture)
 
         Assert.False(string.IsNullOrWhiteSpace(result.FunctionCallOutputText));
         Assert.Null(result.ToolResultJson);
+
+        // PR #38 review item 4 (Rick's M3): prove the function_call_output actually reflects
+        // FakeSearchServer's matched document rather than a generic "no results" apology that
+        // would pass regardless of what the fake search index returned. tools.py::search embeds
+        // `f"Item: {item_name}, ..."` verbatim per matched document into the model-facing output
+        // text (see FakeSearchServer.Filter's per-term case-insensitive Contains match against the
+        // query), so a mutation that ignores the fake's results and always returns a fixed
+        // placeholder string must fail this.
+        Assert.Contains("Cherry Limeade", result.FunctionCallOutputText);
 
         // Belt-and-braces: prove no extension.middle_tier_tool_response for "search" ever arrived
         // on the browser at all (not just that we didn't wait for one) -- ToolResultDirection
@@ -130,7 +145,7 @@ public sealed class SearchToolTests(ConformanceFixture fixture)
 
         var orderResult = await OrderScenarioHelpers.RunOrderStepsAsync(
             connection, browser,
-            [("add", "Tots", "medium", 1, 2.79)],
+            [("add", "Tots", "medium", 1, 2.79m)],
             searchResult.RoundTripIndex, ct);
 
         var order = JsonDocument.Parse(orderResult.ToolResultJson!).RootElement;
