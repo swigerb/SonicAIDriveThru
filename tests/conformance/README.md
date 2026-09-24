@@ -29,7 +29,14 @@ under test:
   cannot simultaneously satisfy the Default profile's requirements and a different profile's
   `CONFORMANCE_TEST_HOOKS` overrides, and every profile collection would otherwise try to bind
   the same fixed fake ports concurrently and race for them. Run non-Default profile scenarios
-  with `CONFORMANCE_BACKEND=python` (harness-launched) instead.
+  with `CONFORMANCE_BACKEND=python` (harness-launched) instead. **The same skip applies to any
+  fixture that overrides `Deployment`** (PR #42 review item 2) — e.g. the
+  `gpt-realtime-1.5-conformance`/`gpt-realtime-2.1-dz-conformance` fixtures in
+  `ReasoningDeploymentFixtures.cs` — even when that fixture's `Profile` is otherwise Default:
+  external mode's one already-running backend was started with whatever
+  `AZURE_OPENAI_REALTIME_DEPLOYMENT` its operator gave it, which the harness cannot know or
+  change, so running (say) the "reasoning is never sent for 1.5" assertions against it would pass
+  or fail for the wrong reason instead of skipping.
 - `CONFORMANCE_BACKEND=python` (the default) — launch `app/backend` via `.venv`.
 - `CONFORMANCE_BACKEND=dotnet` — the S2 .NET backend placeholder (issue #7; the backend doesn't
   exist yet). **This FAILS the suite by default** (PR #22 review item 15) — CI must never silently

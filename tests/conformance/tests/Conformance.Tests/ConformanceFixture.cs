@@ -54,7 +54,8 @@ public class ConformanceFixture : IAsyncLifetime
         SkipReason = ExternalModeProfilePolicy.ShouldSkip(
             Environment.GetEnvironmentVariable("CONFORMANCE_BACKEND_URL"),
             Profile.Name,
-            BackendProfiles.Default.Name);
+            BackendProfiles.Default.Name,
+            Deployment);
         if (SkipReason is not null)
         {
             return;
