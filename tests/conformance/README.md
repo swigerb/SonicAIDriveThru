@@ -532,17 +532,20 @@ summary:
 ```json
 {
   "items": [
-    { "item": "<name>", "size": "<display size, or empty>", "quantity": <int>, "price": "<unit price>", "display": "<full display string>" }
+    { "item": "<name>", "size": "<display size, or empty>", "quantity": <int>, "price": <number>, "display": "<full display string>" }
   ],
-  "total": "<subtotal, pre-tax>",
-  "tax": "<tax>",
-  "finalTotal": "<total>"
+  "total": <number>,
+  "tax": <number>,
+  "finalTotal": <number>
 }
 ```
 
 All four money fields (`items[].price`, `total`, `tax`, `finalTotal`) are numbers on the wire (not
 quoted, unlike the golden file's storage format) and must always be parsed via
-`JsonElement.GetDecimal()` per the money contract above. `search`'s `tool_result` is always `null`
+`JsonElement.GetDecimal()` per the money contract above. Any valid JSON spelling of the same numeric
+value is equivalent on the wire (`10.185`, `10.1850`, `1.0185e1` all parse to the identical
+`decimal`) — this suite must never assert on the literal token text, only on the parsed `decimal`
+value, per `AssertMoneyEqual`. `search`'s `tool_result` is always `null`
 (it's `ToolResultDirection.TO_SERVER`-only and never reaches the browser at all) — its
 model-visible content is instead the plain-text `function_call_output` sent upstream.
 
