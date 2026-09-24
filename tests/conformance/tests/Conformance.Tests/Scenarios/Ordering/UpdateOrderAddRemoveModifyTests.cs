@@ -26,13 +26,13 @@ public sealed class UpdateOrderAddRemoveModifyTests(ConformanceFixture fixture)
 
         var result = await OrderScenarioHelpers.RunOrderStepsAsync(
             connection, browser,
-            [("add", "Tots", "medium", 1, 2.79)],
+            [("add", "Tots", "medium", 1, 2.79m)],
             roundTripIndex, ct);
 
         Assert.NotNull(result.ToolResultJson);
         var order = JsonDocument.Parse(result.ToolResultJson!).RootElement;
         Assert.Equal(1, order.GetProperty("items").GetArrayLength());
-        Assert.Equal(2.79, order.GetProperty("total").GetDouble(), precision: 2);
+        OrderScenarioHelpers.AssertMoneyEqual(2.79m, order.GetProperty("total").GetDecimal());
     });
 
     [Fact]
@@ -49,8 +49,8 @@ public sealed class UpdateOrderAddRemoveModifyTests(ConformanceFixture fixture)
         var result = await OrderScenarioHelpers.RunOrderStepsAsync(
             connection, browser,
             [
-                ("add", "Tots", "medium", 1, 2.79),
-                ("add", "Tots", "medium", 2, 2.79),
+                ("add", "Tots", "medium", 1, 2.79m),
+                ("add", "Tots", "medium", 2, 2.79m),
             ],
             roundTripIndex, ct);
 
@@ -58,7 +58,7 @@ public sealed class UpdateOrderAddRemoveModifyTests(ConformanceFixture fixture)
         var items = order.GetProperty("items");
         Assert.Equal(1, items.GetArrayLength());
         Assert.Equal(3, items[0].GetProperty("quantity").GetInt32());
-        Assert.Equal(3 * 2.79, order.GetProperty("total").GetDouble(), precision: 2);
+        OrderScenarioHelpers.AssertMoneyEqual(3 * 2.79m, order.GetProperty("total").GetDecimal());
     });
 
     [Fact]
@@ -71,8 +71,8 @@ public sealed class UpdateOrderAddRemoveModifyTests(ConformanceFixture fixture)
         var result = await OrderScenarioHelpers.RunOrderStepsAsync(
             connection, browser,
             [
-                ("add", "Tots", "medium", 3, 2.79),
-                ("remove", "Tots", "medium", 1, 2.79),
+                ("add", "Tots", "medium", 3, 2.79m),
+                ("remove", "Tots", "medium", 1, 2.79m),
             ],
             roundTripIndex, ct);
 
@@ -92,14 +92,14 @@ public sealed class UpdateOrderAddRemoveModifyTests(ConformanceFixture fixture)
         var result = await OrderScenarioHelpers.RunOrderStepsAsync(
             connection, browser,
             [
-                ("add", "Tots", "medium", 1, 2.79),
-                ("remove", "Tots", "medium", 1, 2.79),
+                ("add", "Tots", "medium", 1, 2.79m),
+                ("remove", "Tots", "medium", 1, 2.79m),
             ],
             roundTripIndex, ct);
 
         var order = JsonDocument.Parse(result.ToolResultJson!).RootElement;
         Assert.Equal(0, order.GetProperty("items").GetArrayLength());
-        Assert.Equal(0.0, order.GetProperty("total").GetDouble());
+        OrderScenarioHelpers.AssertMoneyEqual(0m, order.GetProperty("total").GetDecimal());
     });
 
     [Fact]
@@ -111,7 +111,7 @@ public sealed class UpdateOrderAddRemoveModifyTests(ConformanceFixture fixture)
 
         var result = await OrderScenarioHelpers.RunOrderStepsAsync(
             connection, browser,
-            [("remove", "Onion Rings", "medium", 1, 3.89)],
+            [("remove", "Onion Rings", "medium", 1, 3.89m)],
             roundTripIndex, ct);
 
         var order = JsonDocument.Parse(result.ToolResultJson!).RootElement;
@@ -141,11 +141,7 @@ public sealed class UpdateOrderAddRemoveModifyTests(ConformanceFixture fixture)
     });
 
     [Theory]
-    [InlineData("rt44")]
-    [InlineData("rt 44")]
-    [InlineData("route 44")]
-    [InlineData("44")]
-    [InlineData("44oz")]
+    [MemberData(nameof(Route44AliasCases))]
     public Task Route_44_size_aliases_all_display_as_Route_44(string sizeAlias) => fixture.RunAsync(async () =>
     {
         var ct = TestContext.Current.CancellationToken;
@@ -158,13 +154,69 @@ public sealed class UpdateOrderAddRemoveModifyTests(ConformanceFixture fixture)
 
         var result = await OrderScenarioHelpers.RunOrderStepsAsync(
             connection, browser,
-            [("add", "Cherry Limeade", sizeAlias, 1, 3.79)],
+            [("add", "Cherry Limeade", sizeAlias, 1, 3.79m)],
             roundTripIndex, ct);
 
         var order = JsonDocument.Parse(result.ToolResultJson!).RootElement;
         var items = order.GetProperty("items");
         Assert.Equal(1, items.GetArrayLength());
         Assert.Equal($"{golden.Route44.ExpectedDisplayPrefix} Cherry Limeade", items[0].GetProperty("display").GetString());
+    });
+
+    /// <summary>Data-driven over the golden file's `route44.aliases` list (PR #38 review item 4,
+    /// Rick's M5) rather than a hardcoded `[InlineData]` set, so the mixed/upper-case aliases
+    /// (`RT44`, `Route 44`) added there specifically to prove case-insensitive matching are
+    /// exercised without this test file needing to know about them explicitly.</summary>
+    public static TheoryData<string> Route44AliasCases()
+    {
+        var golden = GoldenOrderPricingData.Load(RepoPaths.FindRepoRoot());
+        var data = new TheoryData<string>();
+        foreach (var alias in golden.Route44.Aliases)
+        {
+            data.Add(alias);
+        }
+        return data;
+    }
+
+    /// <summary>PR #38 review item 6: wires up the previously-unenforced `sizeDisplayCases` golden
+    /// table (ported from test_order_state.py/menu_utils.py size-display coverage — small/medium/
+    /// large, mini, the three Route 44 aliases again, and the "no display" sizes: standard/n/a/na/
+    /// none/empty/n.a.) against the live backend's `display` field, rather than leaving it dead
+    /// data nothing in this suite reads.</summary>
+    public static TheoryData<int> SizeDisplayCaseIndexes()
+    {
+        var golden = GoldenOrderPricingData.Load(RepoPaths.FindRepoRoot());
+        var data = new TheoryData<int>();
+        for (var i = 0; i < golden.SizeDisplayCases.Count; i++)
+        {
+            data.Add(i);
+        }
+        return data;
+    }
+
+    [Theory]
+    [MemberData(nameof(SizeDisplayCaseIndexes))]
+    public Task Size_aliases_and_hidden_sizes_display_correctly(int caseIndex) => fixture.RunAsync(async () =>
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var golden = GoldenOrderPricingData.Load(RepoPaths.FindRepoRoot());
+        var sizeCase = golden.SizeDisplayCases[caseIndex];
+
+        var (browser, connection, roundTripIndex) = await OrderScenarioHelpers.ConnectAndGreetAsync(fixture, ct);
+        await using var _ = browser;
+
+        // update_order's price is caller-supplied and never menu-validated (see
+        // order_state.py::_handle_order_update), so an arbitrary placeholder price is fine here —
+        // this Theory is only proving the `display` field, not pricing.
+        var result = await OrderScenarioHelpers.RunOrderStepsAsync(
+            connection, browser,
+            [("add", sizeCase.Item, sizeCase.Size, 1, 1.00m)],
+            roundTripIndex, ct);
+
+        var order = JsonDocument.Parse(result.ToolResultJson!).RootElement;
+        var items = order.GetProperty("items");
+        Assert.Equal(1, items.GetArrayLength());
+        Assert.Equal(sizeCase.ExpectedDisplay, items[0].GetProperty("display").GetString());
     });
 
     [Fact]
@@ -179,7 +231,7 @@ public sealed class UpdateOrderAddRemoveModifyTests(ConformanceFixture fixture)
 
         var atLimit = await OrderScenarioHelpers.RunOrderStepsAsync(
             connection, browser,
-            [("add", "Tots", "medium", max, 2.79)],
+            [("add", "Tots", "medium", max, 2.79m)],
             roundTripIndex, ct);
         var orderAtLimit = JsonDocument.Parse(atLimit.ToolResultJson!).RootElement;
         Assert.Equal(max, orderAtLimit.GetProperty("items")[0].GetProperty("quantity").GetInt32());
@@ -219,9 +271,9 @@ public sealed class UpdateOrderAddRemoveModifyTests(ConformanceFixture fixture)
         var filled = await OrderScenarioHelpers.RunOrderStepsAsync(
             connection, browser,
             [
-                ("add", "Tots", "medium", maxPerItem, 2.79),
-                ("add", "Onion Rings", "medium", maxPerItem, 3.89),
-                ("add", "Groovy Fries", "medium", remainder, 2.79),
+                ("add", "Tots", "medium", maxPerItem, 2.79m),
+                ("add", "Onion Rings", "medium", maxPerItem, 3.89m),
+                ("add", "Groovy Fries", "medium", remainder, 2.79m),
             ],
             roundTripIndex, ct);
         var orderFilled = JsonDocument.Parse(filled.ToolResultJson!).RootElement;
