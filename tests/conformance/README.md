@@ -176,6 +176,20 @@ as a hard requirement, not just the graceful `IAsyncDisposable.DisposeAsync` pat
   (already uploaded as an artifact on failure) well before the job-level timeout would otherwise
   kill it with no diagnostics at all.
 
+### Upstream socket lifecycle on browser disconnect (PR #22 review item N14)
+
+`ConformanceFixture.RunAsync` waits for all upstream connections to close after each scenario
+(`Realtime.WaitForNoOpenConnectionsAsync`, 30s) before letting the next scenario start. **A
+backend must close its upstream socket when the browser disconnects.** Python does this today
+(`RTMiddleTier`'s `finally` block closes `target_ws`/detaches the session as soon as the browser
+socket loop exits, independent of the resume grace hold on the *session*, which only keeps the
+order/transcript around in memory — it never keeps the old upstream socket open). A C# (or any
+other) backend that instead kept its upstream connection open through the full grace hold (120s in
+production, 1s under `BackendProfiles.ShortTimers`) would fail every scenario after the first
+30s — `WaitForNoOpenConnectionsAsync` would time out waiting for a connection nothing is ever
+going to close. Documented here (rather than newly enforced) since `ConformanceFixture` already
+behaves this way; see `ConformanceFixture.cs`'s `RunAsync`.
+
 ## Test hooks (`app/backend/conformance_hooks.py`)
 
 Everything in this section is gated behind `CONFORMANCE_TEST_HOOKS=1` and is a complete no-op
