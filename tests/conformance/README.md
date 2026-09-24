@@ -131,6 +131,20 @@ otherwise. `PythonBackendLauncher.WaitForHealthAsync` polls this endpoint until 
 the backend process exits early, in which case captured stdout/stderr is included in the
 failure).
 
+### Backend logging is not a wire contract (PR #42 review item 1)
+
+`ConformanceFixture.RunAsync(body, allowedNewBackendErrors)` bounds — from **above only** — how
+many new backend ERROR-level log lines (`CapturedProcessOutput.CountUnhandledErrors`) a scenario's
+own body may cause, asserted as `actual <= baseline + allowedNewBackendErrors`, never exact
+equality. This is deliberately a ceiling, not a pinned count: *how many* ERROR-level lines a
+backend logs for a given recovered condition (one line vs. two, or ERROR vs. WARNING) is a
+logging/observability choice specific to this backend's own code, not part of the neutral contract
+a correct backend in another language must reproduce. A future .NET backend that logs one line
+where the Python backend logs two — or logs at a level this harness doesn't count as an "unhandled
+error" at all — must still pass every scenario that uses this overload. Only genuinely *unexpected*
+errors (anything above the declared ceiling) fail a scenario. The zero-arg `RunAsync(body)` overload
+still asserts a hard `0` ceiling, i.e. this scenario must cause no new backend errors at all.
+
 ### Shared files
 
 | File | Consumed by | Purpose |
@@ -473,13 +487,19 @@ zero). A scenario that deliberately provokes one **caught-and-reported** applica
 exception — the kind `tools.py` itself catches and turns into a graceful apology `ToolResult`
 rather than letting propagate — is expected, even in a fully correct implementation, to log exactly
 one such ERROR line for that exception. Use the second overload,
-`RunAsync(Func<Task> body, int expectedNewBackendErrorCount)`, to declare that expected delta instead
-of letting the zero-new-errors invariant block an otherwise-passing scenario
+`RunAsync(Func<Task> body, int allowedNewBackendErrors)`, to declare an upper bound on that count
+instead of letting the zero-new-errors invariant block an otherwise-passing scenario
 (`ToolErrorSessionSurvivesTests.cs`'s `Session_survives_an_unhandled_tool_exception` — currently
 `[Fact(Skip = ...)]` pending the Python fix tracked in #36 — is written to pass
-`expectedNewBackendErrorCount: 1` once that fix lands). This overload is shared harness (added by
-the parallel issue #8 stream, `100ed8c`), which also added a `Deployment` fixture extension point
-unrelated to this stream's scenarios.
+`allowedNewBackendErrors: 1` once that fix lands). The assertion is `actual <= baseline +
+allowedNewBackendErrors`, never exact equality: per PR #42 review item 1 (see "Backend logging is
+not a wire contract" above), *how many* ERROR-level lines a backend logs for a given recovered
+condition is a logging/observability choice, not a wire contract — a correct backend that logs
+fewer lines (or none, if it logs at a level this harness doesn't count) must still pass. This
+overload is shared harness (added by the parallel issue #8 stream, originally `100ed8c` as
+`expectedNewBackendErrorCount` with exact-equality semantics, superseded by `39de3e1`'s rename and
+ceiling semantics), which also added a `Deployment` fixture extension point unrelated to this
+stream's scenarios.
 
 ### `search`'s two `select` field sets (should-fix #8)
 
