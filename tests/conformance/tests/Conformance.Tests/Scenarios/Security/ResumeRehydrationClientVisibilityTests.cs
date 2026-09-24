@@ -11,17 +11,33 @@ namespace Conformance.Tests.Scenarios.Security;
 /// a `role: "system"` conversation item (`build_rehydration_item` -- recent transcript + order
 /// JSON, session_manager.py) *before* letting the model speak. GA (and this fake, via
 /// <see cref="RealtimeScript.WithVadDefaults"/>'s built-in `conversation.item.create` ->
-/// `conversation.item.added` echo) acknowledges every conversation item it's given by sending it
-/// straight back down the same socket -- which used to be relayed to the browser unmodified,
-/// putting the operator-only rehydration briefing (guest transcript + order contents) in
-/// devtools. Fixed in `RTMiddleTier._process_message_to_client`'s
-/// `conversation.item.created`/`conversation.item.added` case: any item with `role == "system"`
-/// is dropped rather than relayed, since the model itself never originates one -- only
-/// `build_rehydration_item` / `build_nudge_item` do, and both send straight to the upstream
-/// socket, never to the browser.
+/// `conversation.item.added` -> `conversation.item.done` echo, see PR #30 review "M2") acknowledges
+/// every conversation item it's given by sending it back down the same socket at least twice --
+/// which used to be relayed to the browser unmodified, putting the operator-only rehydration
+/// briefing (guest transcript + order contents) in devtools. Fixed in
+/// `RTMiddleTier._process_message_to_client`'s `conversation.item.created` /
+/// `conversation.item.added` / `conversation.item.done` / `conversation.item.retrieved` cases (PR
+/// #30 review "M1"): any item authored by the middle tier itself (identified primarily by its
+/// `sonic_mt_`-prefixed `item.id`, with `role == "system"` kept as a second guard -- see #29
+/// follow-up commit b32c656) is dropped rather than relayed, since the model itself never
+/// originates one -- only `build_rehydration_item` / `build_nudge_item` do, and both send straight
+/// to the upstream socket, never to the browser.
 ///
-/// Runs under <see cref="BackendProfiles.ShortTimers"/> so the resume grace hold (1s here vs the
-/// 120s production default) fits in a fast test.
+/// PR #30 review "S3": originally this waited a fixed 2s after seeing the rehydration item go
+/// upstream and then inspected whatever had arrived -- a real gap Rick's review caught, because a
+/// leak that took slightly longer than 2s to round-trip (or that only reached the browser via a
+/// frame type the fixed-window snapshot never checked) could slip through undetected. Waiting
+/// instead for a browser-visible frame that is *causally* guaranteed to follow the rehydration
+/// item's full echo removes the race: after a mid-conversation resume, the only upstream traffic
+/// on this connection is the rehydration item followed (after
+/// <see cref="BackendProfiles.ShortTimers"/>'s ~1s nudge timer) by the silence nudge item and its
+/// `response.create` -- so the nudge's `response.created` reaching the browser cannot have
+/// happened before the backend finished relaying (or correctly dropping) every
+/// `conversation.item.*` frame the fake sent for both the rehydration and nudge items, on the same
+/// single, order-preserving connection.
+///
+/// Runs under <see cref="BackendProfiles.ShortTimers"/> so the resume grace hold and nudge timer
+/// (1s here vs the 120s / 30s production defaults) fit in a fast test.
 /// </summary>
 [Collection(ShortTimersConformanceCollection.Name)]
 public sealed class ResumeRehydrationClientVisibilityTests(ShortTimersConformanceFixture fixture)
@@ -80,14 +96,49 @@ public sealed class ResumeRehydrationClientVisibilityTests(ShortTimersConformanc
         Assert.True(upstreamSystemItem is not null,
             "Precondition failed: the backend never sent the rehydration item upstream on the resumed connection.");
 
-        // Give the fake's auto-echo (conversation.item.create -> conversation.item.added, see
-        // RealtimeScript.WithVadDefaults) time to round-trip back through the backend, then make
-        // sure none of it reached the browser.
-        await secondConnection.ReceivedFrames.WaitForAsync(
-            f => f.Sequence > upstreamSystemItem!.Sequence, TimeSpan.FromSeconds(2), ct);
+        // Wait for a browser-visible frame that is causally guaranteed to follow the rehydration
+        // item's full upstream echo (PR #30 review "S3"), instead of a fixed-window sleep: the
+        // only upstream traffic on a mid-conversation resume is the rehydration item, then (after
+        // ShortTimers' ~1s nudge timer) the silence nudge item plus its own response.create. The
+        // nudge's response.created cannot reach the browser before the backend has already
+        // forwarded-or-dropped every conversation.item.* frame the fake sent for both items, since
+        // frames on a single connection are relayed in the order the backend's upstream reader
+        // receives them.
+        //
+        // ShortTimers pins the idle-session sweep to the same ~1s as the nudge timer, so without
+        // any browser traffic the idle sweep can race the nudge and close the session first
+        // (rtmt.py's touch_activity resets on any non-audio-append client frame without cancelling
+        // the pending nudge). Send an inert, already-false extension.set_verbose_logging as a
+        // keepalive every 200ms while waiting, so the nudge always gets to fire.
+        using var keepAliveCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var keepAliveTask = Task.Run(async () =>
+        {
+            try
+            {
+                while (!keepAliveCts.IsCancellationRequested)
+                {
+                    await second.SendExtensionSetVerboseLoggingAsync(false, keepAliveCts.Token);
+                    await Task.Delay(TimeSpan.FromMilliseconds(200), keepAliveCts.Token);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // Expected once the wait below cancels the keepalive loop.
+            }
+        }, CancellationToken.None);
+
+        var nudgeResponseCreated = await second.ReceivedFrames.WaitForAsync(
+            f => f.Type == "response.created", FrameTimeout, ct);
+
+        keepAliveCts.Cancel();
+        await keepAliveTask;
+
+        Assert.True(nudgeResponseCreated is not null,
+            "Expected the silence nudge's response.created to reach the browser after the resume.");
 
         var leaked = second.ReceivedFrames.Snapshot().FirstOrDefault(f =>
-            (f.Type == "conversation.item.created" || f.Type == "conversation.item.added") &&
+            (f.Type == "conversation.item.created" || f.Type == "conversation.item.added" ||
+             f.Type == "conversation.item.done" || f.Type == "conversation.item.retrieved") &&
             f.Json.TryGetProperty("item", out var item) &&
             item.TryGetProperty("role", out var role) &&
             role.GetString() == "system");
