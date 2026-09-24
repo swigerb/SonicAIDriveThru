@@ -21,25 +21,39 @@ namespace Conformance.Tests;
 /// following `input_audio_buffer.append` is then forwarded normally.
 ///
 /// M4 specifically needs an *isolated* proof that `echo.on_barge_in()` itself is what lifts
-/// suppression: both this fake and real GA also emit an audio-done-shaped completion for a
-/// *cancelled* response (`response.output_audio.done` then `response.done`), which runs through
-/// `echo.on_audio_done()` -- the same cooldown-clearing path a normal completion uses -- moments
-/// after any cancellation. That means "cancel an active response, then wait (however patiently)
-/// for mic audio to resume" can pass even with `on_barge_in()` gutted to a no-op, because the
-/// *other* path still clears suppression a little later regardless -- confirmed empirically: a
-/// timestamp-ordering variant of this test (append must beat the cancelled response's own
-/// response.done on the wire) still failed under *correct* code, because the fake's own
-/// audio-done+response.done sequence for a cancelled response completes fast enough in-process to
-/// win that race regardless of on_barge_in. Phase A below sidesteps the confound entirely instead
-/// of racing it: right after the greeting round trip, `echo.ai_speaking` is still `True` from
-/// `echo.start_greeting_suppression()` (armed before the greeting's own `response.create`, per
-/// rtmt.py), and -- because the greeting's own fake response here is scripted with no audio
-/// output at all -- `echo.on_audio_done()` is never called for it, so nothing *but*
-/// `on_barge_in()` can ever clear that particular `ai_speaking=True`. Sending `response.cancel`
-/// with no active upstream response at all (harmless; the fake just errors it back) and then
-/// observing mic audio start flowing is therefore proof of `on_barge_in()` specifically, with no
-/// race against a competing completion event. Phase B then separately exercises the full,
-/// realistic "AI is genuinely speaking real audio" sequence end-to-end for M3 and M7.
+/// suppression: both this fake and real GA also emit an audio-done-shaped completion
+/// (`response.output_audio.done`, `response.content_part.done`, etc. -- confirmed against the
+/// official GA server-events reference, see below) for a *cancelled* response, which runs
+/// through `echo.on_audio_done()` -- the same cooldown-clearing path a normal completion uses --
+/// moments after any cancellation. That means "cancel an active response, then wait (however
+/// patiently) for mic audio to resume" can pass even with `on_barge_in()` gutted to a no-op,
+/// because the *other* path still clears suppression a little later regardless. Phase A below
+/// sidesteps the confound entirely instead of racing it: right after the greeting round trip,
+/// `echo.ai_speaking` is still `True` from `echo.start_greeting_suppression()` (armed before the
+/// greeting's own `response.create`, per rtmt.py), and -- because the greeting's own fake
+/// response is explicitly scripted (see the `connection.Script.Enqueue` call before
+/// `SendStartSessionAsync` below) with no audio output at all -- `echo.on_audio_done()` is never
+/// called for it, so nothing *but* `on_barge_in()` can ever clear that particular
+/// `ai_speaking=True`. Sending `response.cancel` with no active upstream response at all
+/// (harmless; the fake just errors it back) and then observing mic audio start flowing is
+/// therefore proof of `on_barge_in()` specifically, with no race against a competing completion
+/// event. Phase B then separately exercises the full, realistic "AI is genuinely speaking real
+/// audio" sequence end-to-end for M3 and M7.
+///
+/// **Bug found and fixed (#8, PR #42 follow-up):** the "no audio output at all" premise above was
+/// only true in the *docstring*, not in the code -- nothing was actually enqueued into
+/// `connection.Script` before the greeting fired, so the greeting used
+/// `ResponseScript.Default`, which *does* contain one `AudioDeltaEvent` plus a completing
+/// `DoneEvent`. That meant the greeting's own NORMAL completion silently called
+/// `echo.on_audio_done()` (clearing `ai_speaking` and arming a real, greeting-doubled cooldown)
+/// well before Phase A's `response.cancel` ever ran, so by the time `on_barge_in()` executed,
+/// `ai_speaking` was already `False` and suppression was being held open only by `cooldown_end`
+/// -- which `on_barge_in()`'s surviving `cooldown_end = 0.0` line was sufficient to clear on its
+/// own. A live mutation of `on_barge_in()` (removing only its `self.ai_speaking = False` line,
+/// keeping `self.cooldown_end = 0.0`) survived this test as a result. Explicitly enqueuing an
+/// audio-free `ResponseScript` for the greeting (see below) restores the isolation this docstring
+/// always claimed, and the mutation now fails (see the squad's report to the coordinator for the
+/// re-run confirming this).
 /// </summary>
 [Collection(ConformanceCollection.Name)]
 public sealed class EchoSuppressionBargeInTests(ConformanceFixture fixture)
@@ -63,17 +77,34 @@ public sealed class EchoSuppressionBargeInTests(ConformanceFixture fixture)
         var connection = await connectionTask;
         Assert.True(connection is not null, $"No upstream connection was accepted within {FrameTimeout}.");
 
+        // Phase A's isolation (below) depends on the greeting producing NO audio at all, so that
+        // echo.on_audio_done() is never invoked for it and the only thing that can ever clear
+        // echo.ai_speaking is echo.on_barge_in() itself. `ResponseScript.Default` (what the fake
+        // falls back to when nothing has been enqueued, which is what this line was relying on
+        // before this fix) actually contains one `AudioDeltaEvent` + a completing `DoneEvent` --
+        // real audio -- so the greeting's own NORMAL completion was already calling
+        // echo.on_audio_done() (clearing ai_speaking and arming a real, greeting-doubled cooldown)
+        // well before Phase A's response.cancel ever ran. That masked exactly the mutation this
+        // test exists to catch: with on_barge_in()'s `self.ai_speaking = False` line removed
+        // (keeping only `self.cooldown_end = 0.0`), the test still passed, because ai_speaking was
+        // already False from the greeting's own completion, and on_barge_in()'s surviving
+        // `cooldown_end = 0.0` line was sufficient on its own to lift the (cooldown-driven, not
+        // ai_speaking-driven) suppression. Enqueuing an audio-free script here restores the
+        // isolation this test's own docstring already claimed: cooldown_end is never touched by
+        // anything before Phase A's cancel, so suppression here is driven purely by ai_speaking,
+        // and only on_barge_in() can lift it.
+        connection!.Script.Enqueue(new ResponseScript([new DoneEvent()]));
+
         await browser.SendStartSessionAsync(cancellationToken: ct);
         var greetingRoundTrip = await browser.ReceivedFrames.WaitForAsync(
             f => f.Type == "extension.round_trip_token", FrameTimeout, ct);
         Assert.True(greetingRoundTrip is not null, "Greeting round trip never completed.");
 
         // ── Phase A: isolate echo.on_barge_in() itself (M4), with no competing completion event ──
-        // The greeting's own fake response produces no audio (nothing has been enqueued into
-        // connection.Script yet at this point -- the default script), so echo.on_audio_done() is
-        // never called for it and echo.ai_speaking stays True (armed by
-        // echo.start_greeting_suppression() before the greeting fired) until something explicitly
-        // clears it. Confirm that stuck suppression is genuinely active first.
+        // The greeting's own fake response produces no audio (the audio-free script enqueued
+        // above), so echo.on_audio_done() is never called for it and echo.ai_speaking stays True
+        // (armed by echo.start_greeting_suppression() before the greeting fired) until something
+        // explicitly clears it. Confirm that stuck suppression is genuinely active first.
         await browser.SendInputAudioAppendAsync(MicWhileGreetingStuckSuppressed, ct);
 
         // There is no active upstream response at this point (the greeting's own already

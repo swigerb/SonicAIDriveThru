@@ -572,3 +572,48 @@ primary source cited by `GaSessionValidator`):
   `Cancel_while_streaming_stops_the_response_early_and_reports_cancelled_status`,
   `Response_create_while_a_response_is_already_active_is_rejected`. All three are mutation-checked
   (see PR history / squad history for outputs).
+
+### `response.cancel` still emits the normal `.done`-shaped events (#8 follow-up)
+
+A question came up while re-checking `EchoSuppressionBargeInTests` (barge-in, #8): does GA skip the
+usual per-item/per-response `.done` events for a *cancelled* response, or still emit them (just with
+an "incomplete"/"cancelled" status instead of "completed")? This matters because
+`app/backend/rtmt.py` drives `audio_pipeline.EchoSuppressor.on_audio_done()` off
+`response.output_audio.done` regardless of why the response ended, so if GA silently dropped that
+event for a cancellation, the fake would need a corresponding special case.
+
+**Checked against the official GA realtime reference** (no live probe needed — the docs are
+unambiguous on this point):
+
+- <https://developers.openai.com/api/reference/resources/realtime/client-events.md>, `response.cancel`
+  section: cancelling an in-progress response makes "the server ... respond with a `response.done`
+  event with a status of `response.status=cancelled`."
+- <https://developers.openai.com/api/reference/resources/realtime/server-events.md>:
+  `response.output_audio.done`, `response.content_part.done`, `response.output_text.done`,
+  `response.output_audio_transcript.done`, and `response.function_call_arguments.done` are each
+  documented as **"Also emitted when a Response is interrupted, incomplete, or cancelled."**
+  `response.done` itself is documented as **"Always emitted, no matter the final state"**
+  (completed/cancelled/failed/incomplete).
+
+**Conclusion: GA does not skip these events on cancellation** — it still emits the full
+`...output_item.done` / `response.content_part.done` / `response.output_audio.done` /
+`response.done(status:"cancelled")` sequence for whatever output had already started streaming,
+exactly matching what `FakeRealtimeUpstreamServer.RespondAsync`'s cancellation path already does via
+`CloseOpenAudioItemAsync(itemStatus: "incomplete")` followed by the cancelled `response.done`. **No
+fake change was needed here** — the fake was already GA-accurate on this point.
+
+That said, this GA behaviour is exactly why isolating `on_barge_in()` from `on_audio_done()` in a
+test is subtle: any scenario where the AI has spoken real audio and then gets cancelled will *also*
+run `on_audio_done()`'s own cooldown-clearing path a moment later, on the same wire sequence. A live
+mutation of `on_barge_in()` (removing its `self.ai_speaking = False` line, keeping only
+`self.cooldown_end = 0.0`) surfaced exactly this: `EchoSuppressionBargeInTests`'s "Phase A" was
+*intended* to sidestep the race entirely by giving the greeting a silent (audio-free) fake response,
+so nothing but `on_barge_in()` could ever clear `ai_speaking` before its own isolated
+`response.cancel`+append proof ran — but the greeting was actually still using
+`ResponseScript.Default` (which *does* carry one `AudioDeltaEvent`), so the greeting's own normal
+completion cleared `ai_speaking` via `on_audio_done()` before Phase A's cancel was even sent, leaving
+only `cooldown_end` to drive suppression by that point — which the mutation's surviving
+`cooldown_end = 0.0` line was sufficient to lift on its own. Fixed by explicitly enqueuing an
+audio-free `ResponseScript` (`[new DoneEvent()]`, no `AudioDeltaEvent`) for the greeting in that test
+before triggering it, restoring genuine isolation; the mutation now fails Phase A as intended. See
+the updated docstring on `EchoSuppressionBargeInTests` for the full account.
