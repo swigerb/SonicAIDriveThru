@@ -22,9 +22,9 @@ public sealed class GetOrderResetOrderTests(ConformanceFixture fixture)
 
         var order = JsonDocument.Parse(result.ToolResultJson!).RootElement;
         Assert.Equal(0, order.GetProperty("items").GetArrayLength());
-        Assert.Equal(0.0, order.GetProperty("total").GetDouble());
-        Assert.Equal(0.0, order.GetProperty("tax").GetDouble());
-        Assert.Equal(0.0, order.GetProperty("finalTotal").GetDouble());
+        OrderScenarioHelpers.AssertMoneyEqual(0m, order.GetProperty("total").GetDecimal());
+        OrderScenarioHelpers.AssertMoneyEqual(0m, order.GetProperty("tax").GetDecimal());
+        OrderScenarioHelpers.AssertMoneyEqual(0m, order.GetProperty("finalTotal").GetDecimal());
     });
 
     [Fact]
@@ -36,7 +36,7 @@ public sealed class GetOrderResetOrderTests(ConformanceFixture fixture)
 
         var added = await OrderScenarioHelpers.RunOrderStepsAsync(
             connection, browser,
-            [("add", "Tots", "medium", 2, 2.79)],
+            [("add", "Tots", "medium", 2, 2.79m)],
             roundTripIndex, ct);
 
         var firstGet = await OrderScenarioHelpers.CallToolAsync(
@@ -45,12 +45,19 @@ public sealed class GetOrderResetOrderTests(ConformanceFixture fixture)
             connection, browser, "get_order", "{}", "call_get_order_2", firstGet.RoundTripIndex, ct);
 
         // get_order is read-only: calling it twice in a row must return the identical summary.
-        Assert.Equal(firstGet.ToolResultJson, secondGet.ToolResultJson);
+        // Compared structurally (JsonElement.DeepEquals) rather than as raw strings (PR #38 review
+        // nit) so this stays correct even if a future backend reorders JSON object keys or changes
+        // insignificant whitespace between the two calls.
+        using var firstGetDoc = JsonDocument.Parse(firstGet.ToolResultJson!);
+        using var secondGetDoc = JsonDocument.Parse(secondGet.ToolResultJson!);
+        Assert.True(JsonElement.DeepEquals(firstGetDoc.RootElement, secondGetDoc.RootElement),
+            $"Expected two consecutive get_order calls to return identical order summaries, but they differed:\n" +
+            $"first:  {firstGet.ToolResultJson}\nsecond: {secondGet.ToolResultJson}");
 
-        var order = JsonDocument.Parse(secondGet.ToolResultJson!).RootElement;
+        var order = secondGetDoc.RootElement;
         Assert.Equal(1, order.GetProperty("items").GetArrayLength());
         Assert.Equal(2, order.GetProperty("items")[0].GetProperty("quantity").GetInt32());
-        Assert.Equal(2 * 2.79, order.GetProperty("total").GetDouble(), precision: 2);
+        OrderScenarioHelpers.AssertMoneyEqual(2 * 2.79m, order.GetProperty("total").GetDecimal());
     });
 
     [Fact]
@@ -63,8 +70,8 @@ public sealed class GetOrderResetOrderTests(ConformanceFixture fixture)
         var added = await OrderScenarioHelpers.RunOrderStepsAsync(
             connection, browser,
             [
-                ("add", "Tots", "medium", 1, 2.79),
-                ("add", "Cherry Limeade", "medium", 1, 2.99),
+                ("add", "Tots", "medium", 1, 2.79m),
+                ("add", "Cherry Limeade", "medium", 1, 2.99m),
             ],
             roundTripIndex, ct);
         var beforeReset = JsonDocument.Parse(added.ToolResultJson!).RootElement;
@@ -75,8 +82,8 @@ public sealed class GetOrderResetOrderTests(ConformanceFixture fixture)
 
         var order = JsonDocument.Parse(reset.ToolResultJson!).RootElement;
         Assert.Equal(0, order.GetProperty("items").GetArrayLength());
-        Assert.Equal(0.0, order.GetProperty("total").GetDouble());
-        Assert.Equal(0.0, order.GetProperty("finalTotal").GetDouble());
+        OrderScenarioHelpers.AssertMoneyEqual(0m, order.GetProperty("total").GetDecimal());
+        OrderScenarioHelpers.AssertMoneyEqual(0m, order.GetProperty("finalTotal").GetDecimal());
     });
 
     [Fact]
@@ -95,7 +102,7 @@ public sealed class GetOrderResetOrderTests(ConformanceFixture fixture)
         // Prove the session is still fully usable afterwards.
         var afterReset = await OrderScenarioHelpers.RunOrderStepsAsync(
             connection, browser,
-            [("add", "Tots", "medium", 1, 2.79)],
+            [("add", "Tots", "medium", 1, 2.79m)],
             reset.RoundTripIndex, ct);
         var orderAfter = JsonDocument.Parse(afterReset.ToolResultJson!).RootElement;
         Assert.Equal(1, orderAfter.GetProperty("items").GetArrayLength());
