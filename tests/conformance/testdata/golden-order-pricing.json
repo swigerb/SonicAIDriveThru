@@ -1,0 +1,251 @@
+{
+  "$schema": "Golden pricing/tax/combo/Route-44 dataset for issue #9 (tests/conformance). Ported from app/backend/tests/test_order_state.py, test_tool_calling.py, and test_combo_orders.py so both the S1-3 conformance scenarios and a future C# backend (S4) assert against the exact same cent-accurate cases. All money values are raw IEEE-754 doubles matching Python's un-rounded float arithmetic in order_state.py's _update_summary (total = price*qty [*0.5 if happy-hour drink]; tax = total*taxRate; finalTotal = total+tax) -- do not pre-round when comparing.",
+  "businessRules": {
+    "taxRate": 0.08,
+    "happyHourDiscount": 0.5,
+    "happyHourStartHour": 14,
+    "happyHourEndHour": 16,
+    "maxItemQuantity": 10,
+    "maxOrderItems": 25,
+    "storeTimezone": "America/Chicago",
+    "source": "app/backend/config.yaml business_rules block"
+  },
+  "happyHourBoundaryInstants": {
+    "note": "order_state.py's is_happy_hour() only compares now().hour (start <= hour < end); minutes/seconds are irrelevant. All four instants below use the same date as the pre-existing FixedClockConformanceFixture (2026-07-04, CDT/-05:00) purely for consistency.",
+    "cases": [
+      { "instant": "2026-07-04T13:59:59-05:00", "expectedHappyHour": false, "description": "one second before the window opens" },
+      { "instant": "2026-07-04T14:00:00-05:00", "expectedHappyHour": true, "description": "exact opening instant" },
+      { "instant": "2026-07-04T15:59:59-05:00", "expectedHappyHour": true, "description": "one second before the window closes" },
+      { "instant": "2026-07-04T16:00:00-05:00", "expectedHappyHour": false, "description": "exact closing instant" }
+    ]
+  },
+  "taxCases": [
+    {
+      "description": "Single non-drink item, no happy hour (test_tool_calling.py::TaxCalculationTests::test_tax_rate_applied_correctly)",
+      "items": [ { "item": "Tots", "size": "medium", "quantity": 1, "unitPrice": 10.00, "isDrink": false } ],
+      "happyHour": false,
+      "expectedSubtotal": 10.00,
+      "expectedTax": 0.80,
+      "expectedFinalTotal": 10.80
+    },
+    {
+      "description": "Two non-drink items, no happy hour (test_order_state.py::test_handle_order_update_adds_and_updates_totals)",
+      "items": [
+        { "item": "Caramel Craze Latte", "size": "medium", "quantity": 2, "unitPrice": 4.99, "isDrink": false },
+        { "item": "Glazed Donut", "size": "standard", "quantity": 1, "unitPrice": 1.49, "isDrink": false }
+      ],
+      "happyHour": false,
+      "expectedSubtotal": 11.47,
+      "expectedTax": 0.9176000000000001,
+      "expectedFinalTotal": 12.3876
+    },
+    {
+      "description": "Drink + non-drink, no happy hour (test_tool_calling.py::TaxCalculationTests::test_tax_on_multiple_items)",
+      "items": [
+        { "item": "Cherry Limeade", "size": "medium", "quantity": 2, "unitPrice": 2.99, "isDrink": true },
+        { "item": "Tots", "size": "medium", "quantity": 1, "unitPrice": 2.79, "isDrink": false }
+      ],
+      "happyHour": false,
+      "expectedSubtotal": 8.77,
+      "expectedTax": 0.7016,
+      "expectedFinalTotal": 9.471599999999999
+    },
+    {
+      "description": "Same order during happy hour: only the drink line is halved before tax (test_tool_calling.py::TaxCalculationTests::test_tax_on_multiple_items_during_happy_hour)",
+      "items": [
+        { "item": "Cherry Limeade", "size": "medium", "quantity": 2, "unitPrice": 2.99, "isDrink": true },
+        { "item": "Tots", "size": "medium", "quantity": 1, "unitPrice": 2.79, "isDrink": false }
+      ],
+      "happyHour": true,
+      "expectedSubtotal": 5.78,
+      "expectedTax": 0.46240000000000003,
+      "expectedFinalTotal": 6.2424
+    },
+    {
+      "description": "Single standalone drink during happy hour (precedent: HappyHourPricingTests.cs)",
+      "items": [ { "item": "Cherry Limeade", "size": "Regular", "quantity": 1, "unitPrice": 4.00, "isDrink": true } ],
+      "happyHour": true,
+      "expectedSubtotal": 2.00,
+      "expectedTax": 0.16,
+      "expectedFinalTotal": 2.16
+    },
+    {
+      "description": "Non-drink item is unaffected even when happy hour is active (test_combo_orders.py::TestComboHappyHour, price unchanged)",
+      "items": [ { "item": "Tots", "size": "medium", "quantity": 1, "unitPrice": 2.79, "isDrink": false } ],
+      "happyHour": true,
+      "expectedSubtotal": 2.79,
+      "expectedTax": 0.22320000000000001,
+      "expectedFinalTotal": 3.0132
+    },
+    {
+      "description": "Standalone drink, no happy hour, full price (test_combo_orders.py::TestComboHappyHour::test_no_happy_hour_no_discount)",
+      "items": [ { "item": "Cherry Limeade", "size": "large", "quantity": 1, "unitPrice": 3.39, "isDrink": true } ],
+      "happyHour": false,
+      "expectedSubtotal": 3.39,
+      "expectedTax": 0.2712,
+      "expectedFinalTotal": 3.6612000000000005
+    },
+    {
+      "description": "Standalone Route 44 drink during happy hour is still 50% off (test_combo_orders.py::TestRoute44WithCombos::test_route_44_standalone_gets_happy_hour)",
+      "items": [ { "item": "Cherry Limeade", "size": "route 44", "quantity": 1, "unitPrice": 3.79, "isDrink": true } ],
+      "happyHour": true,
+      "expectedSubtotal": 1.895,
+      "expectedTax": 0.1516,
+      "expectedFinalTotal": 2.0466
+    }
+  ],
+  "route44": {
+    "aliases": ["rt44", "rt 44", "route 44", "44", "44oz"],
+    "expectedDisplayPrefix": "Route 44",
+    "source": "app/backend/tests/test_combo_orders.py::TestRoute44WithCombos::test_route_44_size_aliases_all_work"
+  },
+  "sizeDisplayCases": [
+    { "item": "Latte", "size": "small", "expectedDisplay": "Small Latte" },
+    { "item": "Latte", "size": "medium", "expectedDisplay": "Medium Latte" },
+    { "item": "Latte", "size": "large", "expectedDisplay": "Large Latte" },
+    { "item": "Cherry Limeade", "size": "mini", "expectedDisplay": "Mini Cherry Limeade" },
+    { "item": "Cherry Limeade", "size": "rt44", "expectedDisplay": "Route 44 Cherry Limeade" },
+    { "item": "Cherry Limeade", "size": "rt 44", "expectedDisplay": "Route 44 Cherry Limeade" },
+    { "item": "Cherry Limeade", "size": "route 44", "expectedDisplay": "Route 44 Cherry Limeade" },
+    { "item": "Donut", "size": "standard", "expectedDisplay": "Donut" },
+    { "item": "Donut", "size": "n/a", "expectedDisplay": "Donut" },
+    { "item": "Donut", "size": "na", "expectedDisplay": "Donut" },
+    { "item": "Donut", "size": "none", "expectedDisplay": "Donut" },
+    { "item": "Donut", "size": "", "expectedDisplay": "Donut" },
+    { "item": "Donut", "size": "n.a.", "expectedDisplay": "Donut" },
+    { "item": "Cold Brew", "size": "pot", "expectedDisplay": "Cold Brew" },
+    { "item": "Cold Brew", "size": "kannchen", "expectedDisplay": "Cold Brew" }
+  ],
+  "quantityLimits": {
+    "maxItemQuantity": 10,
+    "maxOrderItems": 25,
+    "source": "app/backend/tests/test_tool_calling.py::UpdateOrderQuantityLimitTests"
+  },
+  "combos": {
+    "expectedCount": 10,
+    "source": "app/frontend/src/data/menuItems.json 'Combos' category; count asserted by app/backend/tests/test_combo_orders.py::TestComboMenuItems::test_combo_items_in_menu_category_map",
+    "items": [
+      { "name": "SONIC\u00ae Cheeseburger Combo", "size": "Standard", "price": 8.49, "expectedTax": 0.6792, "expectedFinalTotal": 9.1692 },
+      { "name": "SuperSONIC\u00ae Double Cheeseburger Combo", "size": "Standard", "price": 10.19, "expectedTax": 0.8151999999999999, "expectedFinalTotal": 11.005199999999999 },
+      { "name": "SuperSONIC\u00ae Bacon Double Cheeseburger Combo", "size": "Standard", "price": 10.99, "expectedTax": 0.8792, "expectedFinalTotal": 11.8692 },
+      { "name": "All-American SONIC Smasher\u2122 Combo", "size": "Standard", "price": 9.49, "expectedTax": 0.7592, "expectedFinalTotal": 10.2492 },
+      { "name": "All-American Bacon SONIC Smasher\u2122 Combo", "size": "Standard", "price": 10.49, "expectedTax": 0.8392000000000001, "expectedFinalTotal": 11.3292 },
+      { "name": "Crispy Chicken Sandwich Combo", "size": "Standard", "price": 9.29, "expectedTax": 0.7432, "expectedFinalTotal": 10.033199999999999 },
+      { "name": "Double SONIC Smasher\u2122 Combo", "size": "Standard", "price": 10.19, "expectedTax": 0.8151999999999999, "expectedFinalTotal": 11.005199999999999 },
+      { "name": "Fish Sandwich Combo", "size": "Standard", "price": 8.49, "expectedTax": 0.6792, "expectedFinalTotal": 9.1692 },
+      { "name": "Jr Double Cheeseburger Combo", "size": "Standard", "price": 6.99, "expectedTax": 0.5592, "expectedFinalTotal": 7.5492 },
+      { "name": "Triple SONIC Smasher\u2122 Combo", "size": "Standard", "price": 11.29, "expectedTax": 0.9032, "expectedFinalTotal": 12.1932 }
+    ]
+  },
+  "comboAbsorptionScenarios": [
+    {
+      "description": "Combo alone needs a side and a drink (test_combo_orders.py::TestAddCombo::test_combo_needs_side_and_drink)",
+      "steps": [
+        { "action": "add", "item": "SONIC\u00ae Cheeseburger Combo", "size": "standard", "quantity": 1, "price": 8.49 }
+      ],
+      "happyHour": false,
+      "expectedLineItemCount": 1,
+      "expectedTotal": 8.49,
+      "expectedComboComplete": false
+    },
+    {
+      "description": "Combo + side + drink absorbs both, total stays at combo price only (test_combo_orders.py::TestAddCombo::test_combo_with_side_and_drink_is_complete)",
+      "steps": [
+        { "action": "add", "item": "SONIC\u00ae Cheeseburger Combo", "size": "standard", "quantity": 1, "price": 8.49 },
+        { "action": "add", "item": "Tots", "size": "medium", "quantity": 1, "price": 2.79 },
+        { "action": "add", "item": "Cherry Limeade", "size": "medium", "quantity": 1, "price": 2.89 }
+      ],
+      "happyHour": false,
+      "expectedLineItemCount": 1,
+      "expectedTotal": 8.49,
+      "expectedComboComplete": true
+    },
+    {
+      "description": "Standalone burger converted to a combo removes the standalone line (test_combo_orders.py::TestComboConversion::test_conversion_price_is_combo_only)",
+      "steps": [
+        { "action": "add", "item": "SONIC\u00ae Cheeseburger", "size": "standard", "quantity": 1, "price": 5.29 },
+        { "action": "add", "item": "SONIC\u00ae Cheeseburger Combo", "size": "standard", "quantity": 1, "price": 8.49 }
+      ],
+      "happyHour": false,
+      "expectedLineItemCount": 1,
+      "expectedTotal": 8.49,
+      "expectedComboComplete": false
+    },
+    {
+      "description": "Standalone burger + existing side both absorbed on conversion (test_combo_orders.py::TestComboConversion::test_conversion_with_existing_side_absorbs_it)",
+      "steps": [
+        { "action": "add", "item": "SONIC\u00ae Cheeseburger", "size": "standard", "quantity": 1, "price": 5.29 },
+        { "action": "add", "item": "Tots", "size": "medium", "quantity": 1, "price": 2.79 },
+        { "action": "add", "item": "SONIC\u00ae Cheeseburger Combo", "size": "standard", "quantity": 1, "price": 8.49 }
+      ],
+      "happyHour": false,
+      "expectedLineItemCount": 1,
+      "expectedTotal": 8.49,
+      "expectedComboComplete": false
+    },
+    {
+      "description": "Second side beyond the one combo slot is charged in full (test_combo_orders.py::TestAbsorptionPricing::test_second_side_not_absorbed_charged_full)",
+      "steps": [
+        { "action": "add", "item": "Fish Sandwich Combo", "size": "standard", "quantity": 1, "price": 8.49 },
+        { "action": "add", "item": "Tots", "size": "medium", "quantity": 1, "price": 2.79 },
+        { "action": "add", "item": "Onion Rings", "size": "medium", "quantity": 1, "price": 3.89 }
+      ],
+      "happyHour": false,
+      "expectedLineItemCount": 2,
+      "expectedTotal": 12.38,
+      "expectedComboComplete": true
+    },
+    {
+      "description": "Two combos need two sides and two drinks; all four absorbed leaving only the combo line (test_combo_orders.py::TestAbsorptionPricing::test_two_combos_need_two_sides_two_drinks)",
+      "steps": [
+        { "action": "add", "item": "SONIC\u00ae Cheeseburger Combo", "size": "standard", "quantity": 2, "price": 8.49 },
+        { "action": "add", "item": "Tots", "size": "medium", "quantity": 1, "price": 2.79 },
+        { "action": "add", "item": "Groovy Fries", "size": "medium", "quantity": 1, "price": 2.79 },
+        { "action": "add", "item": "Cherry Limeade", "size": "medium", "quantity": 1, "price": 2.89 },
+        { "action": "add", "item": "Ocean Water\u00ae", "size": "medium", "quantity": 1, "price": 2.89 }
+      ],
+      "happyHour": false,
+      "expectedLineItemCount": 1,
+      "expectedTotal": 16.98,
+      "expectedComboComplete": true
+    },
+    {
+      "description": "Combo fully satisfied plus an extra standalone drink: extra drink priced separately, no happy hour (test_combo_orders.py::TestAbsorptionPricing::test_combo_plus_standalone_drink_at_full_price)",
+      "steps": [
+        { "action": "add", "item": "SONIC\u00ae Cheeseburger Combo", "size": "standard", "quantity": 1, "price": 8.49 },
+        { "action": "add", "item": "Tots", "size": "medium", "quantity": 1, "price": 2.79 },
+        { "action": "add", "item": "Cherry Limeade", "size": "medium", "quantity": 1, "price": 2.89 },
+        { "action": "add", "item": "Ocean Water\u00ae", "size": "large", "quantity": 1, "price": 3.39 }
+      ],
+      "happyHour": false,
+      "expectedLineItemCount": 2,
+      "expectedTotal": 11.88,
+      "expectedComboComplete": true
+    },
+    {
+      "description": "Same as above but during happy hour: only the extra standalone drink is halved, the combo price and the absorbed drink are untouched (test_combo_orders.py::TestComboHappyHour::test_combo_plus_extra_standalone_drink_discounted)",
+      "steps": [
+        { "action": "add", "item": "SONIC\u00ae Cheeseburger Combo", "size": "standard", "quantity": 1, "price": 8.49 },
+        { "action": "add", "item": "Tots", "size": "medium", "quantity": 1, "price": 2.79 },
+        { "action": "add", "item": "Cherry Limeade", "size": "medium", "quantity": 1, "price": 2.89 },
+        { "action": "add", "item": "Ocean Water\u00ae", "size": "large", "quantity": 1, "price": 3.39 }
+      ],
+      "happyHour": true,
+      "expectedLineItemCount": 2,
+      "expectedTotal": 10.185,
+      "expectedComboComplete": true
+    },
+    {
+      "description": "Route 44 drink absorbed into a combo slot still completes the combo at combo price only (test_combo_orders.py::TestRoute44WithCombos::test_route_44_drink_absorbed_into_combo)",
+      "steps": [
+        { "action": "add", "item": "SONIC\u00ae Cheeseburger Combo", "size": "standard", "quantity": 1, "price": 8.49 },
+        { "action": "add", "item": "Tots", "size": "medium", "quantity": 1, "price": 2.79 },
+        { "action": "add", "item": "Cherry Limeade", "size": "rt44", "quantity": 1, "price": 3.79 }
+      ],
+      "happyHour": false,
+      "expectedLineItemCount": 1,
+      "expectedTotal": 8.49,
+      "expectedComboComplete": true
+    }
+  ]
+}
