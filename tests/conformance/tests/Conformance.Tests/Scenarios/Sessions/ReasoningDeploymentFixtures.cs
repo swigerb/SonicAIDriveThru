@@ -65,3 +65,25 @@ public sealed class Gpt15ForcedReasoningConformanceCollection : ICollectionFixtu
 {
     public const string Name = "ConformanceGpt15ForcedReasoning";
 }
+
+/// <summary>
+/// PR #42 review item 10: the tri-state's third value (explicit `false`) had no coverage at all --
+/// only "auto" (name-based, <see cref="ConformanceFixture"/>/<see cref="Gpt21DzConformanceFixture"/>
+/// /<see cref="Gpt15ConformanceFixture"/>) and explicit `true` (<see cref="Gpt15ForcedReasoningConformanceFixture"/>)
+/// were exercised. Forces AZURE_OPENAI_REALTIME_REASONING_MODEL=false onto
+/// <see cref="BackendContract.DefaultDeployment"/> itself -- a reasoning-capable-by-name (2.1)
+/// deployment that would otherwise send `reasoning` by the "auto" default -- proving the explicit
+/// switch beats the deployment-name check in the OFF direction too, not just the ON direction.
+/// </summary>
+public sealed class Gpt21ReasoningSwitchOffConformanceFixture : ConformanceFixture
+{
+    protected override BackendProfile Profile { get; } = new(
+        "Gpt21ReasoningSwitchOff",
+        new Dictionary<string, string> { ["AZURE_OPENAI_REALTIME_REASONING_MODEL"] = "false" });
+}
+
+[CollectionDefinition(Name)]
+public sealed class Gpt21ReasoningSwitchOffConformanceCollection : ICollectionFixture<Gpt21ReasoningSwitchOffConformanceFixture>
+{
+    public const string Name = "ConformanceGpt21ReasoningSwitchOff";
+}

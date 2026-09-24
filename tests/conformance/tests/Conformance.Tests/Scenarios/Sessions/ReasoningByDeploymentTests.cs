@@ -80,3 +80,28 @@ public sealed class ReasoningNeverSentForGpt15DeploymentTests(Gpt15ConformanceFi
             "must never send it for a 1.5-named deployment in the first place.");
     });
 }
+
+/// <summary>
+/// PR #42 review item 10: completes tri-state coverage for AZURE_OPENAI_REALTIME_REASONING_MODEL.
+/// "auto" (name-based) is covered above; explicit `true` on a non-reasoning-by-name deployment is
+/// covered by SessionUpdateFallbackTests.cs's Gpt15ForcedReasoningConformanceFixture. This is the
+/// missing third state: explicit `false` on a deployment that WOULD be reasoning-by-name (the
+/// suite's own default, gpt-realtime-2.1) -- proving the explicit switch beats the deployment-name
+/// check in the OFF direction too, symmetrically with the ON direction the forced-reasoning
+/// fixture already proves.
+/// </summary>
+[Collection(Gpt21ReasoningSwitchOffConformanceCollection.Name)]
+public sealed class ReasoningSwitchedOffOverridesReasoningCapableNameTests(Gpt21ReasoningSwitchOffConformanceFixture fixture)
+{
+    [Fact]
+    public Task Reasoning_is_not_sent_when_the_switch_is_explicitly_false_even_for_a_reasoning_capable_name() => fixture.RunAsync(async () =>
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var session = await ReasoningByDeploymentTestHelpers.ConnectAndGetBootstrapSessionAsync(fixture, ct);
+
+        Assert.False(session.TryGetProperty("reasoning", out _),
+            $"Deployment '{BackendContract.DefaultDeployment}' is reasoning-capable by name, but " +
+            "AZURE_OPENAI_REALTIME_REASONING_MODEL=false must still win over the name-based default " +
+            "and keep `reasoning` off the bootstrap entirely.");
+    });
+}

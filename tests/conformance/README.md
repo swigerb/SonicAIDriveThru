@@ -213,6 +213,61 @@ error" at all — must still pass every scenario that uses this overload. Only g
 errors (anything above the declared ceiling) fail a scenario. The zero-arg `RunAsync(body)` overload
 still asserts a hard `0` ceiling, i.e. this scenario must cause no new backend errors at all.
 
+### Reasoning contract (PR #42 review item 10)
+
+Whether `reasoning` is sent upstream at all (`RTMiddleTier.reasoning_enabled()`/`_reasoning_model()`
+in `app/backend/rtmt.py`) is decided by three independent inputs, checked in this precedence order —
+a correct backend in another language must reproduce all three, in this order:
+
+1. **A runtime rejection always wins, for the rest of the process.** If the upstream ever rejects a
+   session.update because of `reasoning` (the fallback path — see the wire-ordering section above),
+   an in-memory latch (`self._reasoning_rejected`, an instance field on the single per-process
+   `RTMiddleTier`) flips to `True` and `reasoning` is never sent again on that connection *or any
+   later connection in the same process*, regardless of what the other two inputs say. This is
+   intentionally process-wide, not per-connection: a deployment that has already proven it rejects
+   `reasoning` once shouldn't keep re-triggering the fallback path for every new browser tab.
+2. **The explicit `reasoning_model` switch, tri-state.** `AZURE_OPENAI_REALTIME_REASONING_MODEL`
+   (env) / `model.reasoning_model` (config.yaml) is parsed by `parse_reasoning_model` into
+   `True` / `False` / `None`: the literal strings `"true"`/`"false"` (case-insensitive) force the
+   feature on or off outright; anything else — `"auto"`, unset, empty, or an unrecognised value —
+   is `None` and falls through to the name-based default (input 3). `None` is *not* the same as
+   `False`: an explicit `false` and an unset/`"auto"` value are different tri-state members and are
+   asserted separately (see below).
+3. **The deployment-name check, `auto`'s default only.** `deployment_supports_reasoning` matches the
+   deployment name against `_NON_REASONING_DEPLOYMENT_RE`, copied here **verbatim** from
+   `app/backend/rtmt.py` so this doesn't silently drift from the real regex:
+
+   ```python
+   _NON_REASONING_DEPLOYMENT_RE = re.compile(
+       r"^(gpt-4o.*|gpt-realtime(-mini.*|-1(\.\d+)?(-.*)?|-\d{4}-\d{2}-\d{2})?)$",
+       re.IGNORECASE,
+   )
+   ```
+
+   A match means *not* reasoning-capable (`gpt-4o*`, `gpt-realtime-mini*`, `gpt-realtime-1*`
+   including `-1.5`, and the dated `gpt-realtime-YYYY-MM-DD` snapshot, which is the original
+   non-reasoning `gpt-realtime`, not `gpt-realtime-2`). Everything else — including
+   `gpt-realtime-2.1[-dz]`, this suite's own default deployment, and any unrecognised custom name —
+   is assumed reasoning-capable, so an unrecognised name fails open into the fallback path (input 1)
+   rather than silently omitting a feature it might actually support.
+
+All four combinations input 2/3 can produce are covered, each pinned on its own dedicated fixture in
+`ReasoningDeploymentFixtures.cs` (a distinct deployment name and/or env var forces its own backend
+process, since `AZURE_OPENAI_REALTIME_DEPLOYMENT`/`AZURE_OPENAI_REALTIME_REASONING_MODEL` are read
+once at Python module-import time):
+
+| Deployment name | `reasoning_model` | Expected | Fixture |
+|---|---|---|---|
+| `gpt-realtime-2.1-conformance` (default) | `auto` (unset) | sent | `ConformanceFixture` (Default collection) |
+| `gpt-realtime-2.1-dz-conformance` | `auto` (unset) | sent | `Gpt21DzConformanceFixture` |
+| `gpt-realtime-1.5-conformance` | `auto` (unset) | **not** sent | `Gpt15ConformanceFixture` |
+| `gpt-realtime-1.5-conformance` | `true` (forced) | sent (then rejected upstream → exactly one fallback) | `Gpt15ForcedReasoningConformanceFixture` |
+| `gpt-realtime-2.1-conformance` (default) | `false` (forced) | **not** sent | `Gpt21ReasoningSwitchOffConformanceFixture` |
+
+The last row is the tri-state's third member and completes the coverage: the explicit switch must
+beat the name-based default in *both* directions, not just the "force reasoning on for a
+non-reasoning name" direction the fourth row already proved.
+
 ### Shared files
 
 | File | Consumed by | Purpose |
