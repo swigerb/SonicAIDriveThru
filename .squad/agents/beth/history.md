@@ -184,5 +184,17 @@
 - Full suite: 74 passed / 1 skipped / 75 total. No regressions.
 - Commit: `4ce9195`.
 
+## 2026-09-24 — feat/conformance-harness Stage C item N3 (#7)
+
+- Rick's N3: rule handlers (and the VAD-like defaults) run fire-and-forget relative to the connection's receive loop; an exception thrown inside one was only ever seen (if at all) by the single `Task.WhenAll` awaited at connection-close time, deep inside Kestrel's own pipeline — no test could ever observe it, so a scenario whose scripted rule silently threw could still look green.
+- `FakeRealtimeConnection` now records handler faults in a lock-guarded list: `RecordHandlerFault(Exception)` appends, `DrainHandlerFaults()` snapshots-and-clears (draining, not just reading, so a fault can't leak from one scenario into the next, or vanish silently).
+- `ConnectionRegistry.Snapshot()` added — a lock-protected defensive copy of every connection ever accepted (open or closed) — needed to aggregate faults across a scenario's connections.
+- `FakeRealtimeUpstreamServer.HandleConnectionAsync`'s `TrackHandler` now wraps every dispatched handler task in `ObserveHandlerFaultsAsync`, which catches and records instead of letting it reach the close-time `Task.WhenAll`. New public `AssertNoHandlerFaults()` drains every connection via the registry snapshot: no-op if empty, rethrows the single fault via `ExceptionDispatchInfo` (preserves the original stack) if exactly one, `AggregateException` for more than one.
+- `ConformanceFixture.RunAsync` calls `Realtime.AssertNoHandlerFaults()` right after a successful scenario body, still inside the existing `try` (so it inherits the same backend-diagnostics wrapping on failure) — surfaces a fault even when the scenario's own assertions happened to pass.
+- New test `A_throwing_rule_handler_is_surfaced_by_AssertNoHandlerFaults`: scripts a rule that throws on `conversation.item.create` (a real GA event type — an invented `test.*` type would be rejected by the item-9 unknown-event-type check before ever reaching the rule loop), sends that frame, then polls `AssertNoHandlerFaults()` (safe to call repeatedly while empty — it just returns) until the fault appears rather than assuming timing, and asserts the exact exception plus that draining clears it.
+- Mutation-checked: made `ObserveHandlerFaultsAsync`'s catch swallow instead of recording → the new test failed by timing out (10s) waiting for a fault that never arrives; restored the recording call → green again.
+- Full suite: 75 passed / 1 skipped / 76 total, run 3×. No regressions.
+- Commit: `013c233`.
+
 
 
