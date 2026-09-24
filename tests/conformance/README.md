@@ -276,6 +276,16 @@ The last row is the tri-state's third member and completes the coverage: the exp
 beat the name-based default in *both* directions, not just the "force reasoning on for a
 non-reasoning name" direction the fourth row already proved.
 
+**`Gpt15ForcedReasoningConformanceFixture`'s collection must stay a single test (PR #42 review item
+16).** Because the rejection latch (input 1 above, `self._reasoning_rejected`) is process-wide and
+permanent for the fixture's whole backend process's lifetime, a second `[Fact]` added to
+`SessionUpdateFallbackTests`'s `[Collection(Gpt15ForcedReasoningConformanceCollection.Name)]` class
+would run *after* the first test has already tripped the rejection and the fallback, so it would
+silently observe `reasoning_enabled() == False` for the wrong reason (the latch, not a fresh
+name/switch decision) — passing or failing without actually exercising what it claims to. Any new
+scenario that also needs a forced-reasoning-then-rejected deployment must get its own dedicated
+fixture/collection (a fresh backend process), not add a second `[Fact]` here.
+
 ### Shared files
 
 | File | Consumed by | Purpose |
