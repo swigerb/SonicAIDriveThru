@@ -131,6 +131,67 @@ otherwise. `PythonBackendLauncher.WaitForHealthAsync` polls this endpoint until 
 the backend process exits early, in which case captured stdout/stderr is included in the
 failure).
 
+### Wire ordering the conformance scenarios depend on (issue #8)
+
+These orderings are asserted directly by frame sequence number in the scenarios below — they are
+not incidental details of `app/backend/rtmt.py`'s current implementation, and any backend under
+test (Python today, a future .NET backend for issue #7) must reproduce all of them, not just the
+shape of each individual frame.
+
+1. **The bootstrap `session.update` is the first upstream frame on the connection**, `Sequence == 0`
+   on this connection's own upstream socket, before anything the browser has sent is ever
+   forwarded. Asserted by frame index, not by content alone, so a backend that sent it second would
+   fail even if the frame's own shape were otherwise correct.
+   (`SmokeSessionBootstrapTests.Bootstrap_session_update_with_four_tools_is_the_first_upstream_frame`)
+
+2. **The greeting `response.create` is gated on `session.updated`, but *triggered* by the browser's
+   `session.update`, not the bootstrap's own reply.** `rtmt.py` arms a single `session_configured`
+   gate the moment *any* `session.updated` arrives from upstream — in practice that's almost always
+   the bootstrap's own near-instant reply, well before the browser sends anything (`rtmt.py`, ~line
+   1320: "The bootstrap session.updated arrives as soon as the socket opens, so it must NOT trigger
+   the greeting — the browser's session.update (conversation start) does that."). Only forwarding
+   the *browser's* `session.update` upstream fires `send_greeting_once`, which then awaits that gate
+   (already set, in the normal case) before actually emitting `response.create`. If no
+   `session.updated` arrives at all within `CONFORMANCE_GREETING_TIMEOUT_SECONDS` (production
+   default 5s), the greeting fires anyway rather than blocking forever.
+   (`SmokeSessionBootstrapTests.Greeting_response_create_arrives_only_after_the_browser_session_update`,
+   `GreetingTimeoutFallbackTests`)
+
+3. **`extension.round_trip_token` reaches the browser strictly before `response.done` for the same
+   turn.** `rtmt.py`'s `response.done` handler (inside `_process_message_to_client`) calls
+   `emit_session_identifiers(client_ws, "extension.round_trip_token", ...)` directly and awaits it
+   to completion *before returning* the (possibly tool-call-filtered) `response.done` payload; the
+   caller only sends `response.done` to the browser after `_process_message_to_client` returns. This
+   is a synchronous prerequisite, not a race that merely usually resolves in this order — no code
+   path can reorder the two sends. (`ResponseCancelRelayTests`, `HeartbeatPongSurvivalTests`,
+   `VoiceLockTests`, `SessionUpdateFallbackTests`, `UnrelatedErrorsDoNotTriggerFallbackTests` all
+   assert this by comparing `Sequence` values directly rather than relying on arrival timing.)
+
+4. **A rejected `session.update` recovers with exactly one fallback, sent before any
+   browser-forwarded `session.update`.** When the bootstrap's own `session.update` (sequence 0) is
+   rejected by an upstream `error`, the fallback (`instructions`/`tools`/`tool_choice`/`type` only)
+   is sent upstream before the browser's `session.update` is ever forwarded —
+   `bootstrap.Sequence < fallback.Sequence < browserUpdate.Sequence` — and no `error` frame ever
+   reaches the browser for that rejection. (`SessionUpdateFallbackTests`)
+
+5. **Close handshake ordering:**
+   - **1000 `session_ended`** only fires in direct response to an `extension.end_session` frame from
+     the browser; the backend closes immediately with no acknowledgement frame first.
+   - **4002 `superseded`** — only the *original*, still-attached socket receives the 4002 close, and
+     only *after* the resuming socket has already received its own `extension.session_resumed`
+     confirmation, i.e. the resumer's success frame precedes the superseded socket's close on the
+     wire. (`CloseCodeTests.Resuming_a_still_attached_session_supersedes_the_original_socket_with_4002`)
+   - **4000 `idle_timeout`** fires with no client frame at all once the idle sweep interval elapses.
+     Only the close-code *shape* is a contract fact here — the exact idle *timing* is issue #10's
+     concern, not this suite's. (`IdleCloseCodeTests`)
+
+6. **The resume-vs-fresh-start decision is made on the connection's very first client frame only.**
+   Only a connection's first frame may be an `extension.resume`; sending anything else first (e.g.
+   `session.update`) commits that connection to a fresh session and forecloses resuming on it later,
+   and any resume attempt after the first frame is rejected outright.
+   (`CloseCodeTests.Resuming_a_still_attached_session_supersedes_the_original_socket_with_4002`'s
+   "A's very first client frame — not a resume — makes the resume decision fresh" comment)
+
 ### Shared files
 
 | File | Consumed by | Purpose |
