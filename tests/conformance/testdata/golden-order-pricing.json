@@ -286,6 +286,18 @@
       "expectedLineItemCount": 1,
       "expectedTotal": "8.49",
       "expectedComboComplete": false
+    },
+    {
+      "description": "N5 (PR #38 re-review should-fix 4): two combos need two side slots total; Tots quantity 2 in a single call exactly fills both slots (order_state.py's per-call `to_absorb = min(quantity, slots_available)` then `session['absorbed_sides'] += to_absorb`), leaving nothing standalone for Tots; Onion Rings x1 then finds zero side slots remaining and is charged in full as its own line. A mutation that increments absorbed_sides by a flat 1 per call instead of by to_absorb would under-count the two-unit Tots absorption as only one slot filled, letting Onion Rings wrongly absorb into the still-apparently-open second slot -- collapsing this to 1 line item at 16.98 instead of 2 at 20.87.",
+      "steps": [
+        { "action": "add", "item": "SONIC\u00ae Cheeseburger Combo", "size": "standard", "quantity": 2, "price": "8.49" },
+        { "action": "add", "item": "Tots", "size": "medium", "quantity": 2, "price": "2.79" },
+        { "action": "add", "item": "Onion Rings", "size": "medium", "quantity": 1, "price": "3.89" }
+      ],
+      "happyHour": false,
+      "expectedLineItemCount": 2,
+      "expectedTotal": "20.87",
+      "expectedComboComplete": false
     }
   ]
 }
