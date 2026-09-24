@@ -79,10 +79,6 @@ public sealed class SessionUpdateFallbackTests(Gpt15ForcedReasoningConformanceFi
         Assert.False(string.IsNullOrWhiteSpace(bootstrapInstructions), "Precondition failed: bootstrap instructions must be non-empty.");
         Assert.Equal(bootstrapInstructions, fallbackSession.GetProperty("instructions").GetString());
 
-        // The rejection must never reach the browser as an `error` -- it's fully recovered
-        // upstream, invisible to useRealtime.tsx.
-        Assert.DoesNotContain(browser.ReceivedFrames.Snapshot(), f => f.Type == "error");
-
         // Once reasoning is rejected once, rtmt.py flips `_reasoning_rejected` process-wide, so
         // every later session.update (including the browser's own) must also omit it -- proving
         // this isn't a one-off fix-up of just the bootstrap's own payload.
@@ -92,6 +88,23 @@ public sealed class SessionUpdateFallbackTests(Gpt15ForcedReasoningConformanceFi
         Assert.True(browserUpdate is not null, "The browser's session.update was never forwarded upstream.");
         Assert.False(browserUpdate!.Json.GetProperty("session").TryGetProperty("reasoning", out _),
             "Reasoning must stay switched off for the rest of the process once rejected once.");
+
+        // PR #42 review item 7: a bare Assert.DoesNotContain(..., "error") right after the
+        // upstream-side fallback frame proves nothing about the browser side -- a would-be
+        // erroneous forward of the rejection is a separate async write to a different socket, not
+        // ordered against the upstream fallback frame by anything. Wait for the greeting's own
+        // extension.round_trip_token (a genuine browser-side sentinel: it can only be emitted
+        // after the browser's session.update above was processed and its response completed) so
+        // that a bug forwarding either rejection to the browser would provably have already
+        // arrived in ReceivedFrames on the SAME socket, strictly before this sentinel, by the time
+        // we snapshot it below.
+        var roundTripToken = await browser.ReceivedFrames.WaitForAsync(
+            f => f.Type == "extension.round_trip_token", FrameTimeout, ct);
+        Assert.True(roundTripToken is not null, "extension.round_trip_token never reached the browser (greeting never completed).");
+
+        // Neither the bootstrap's rejection nor the fallback recovery ever surfaces to the
+        // browser as an `error` -- it's fully recovered upstream, invisible to useRealtime.tsx.
+        Assert.DoesNotContain(browser.ReceivedFrames.Snapshot(), f => f.Type == "error");
 
         // No loop: exactly bootstrap + one fallback + the browser's own update -- never a second,
         // repeated fallback for the same rejection, and never an error frame anywhere in the log.
@@ -210,10 +223,11 @@ public sealed class SecondSessionUpdateRejectionLoopGuardTests(Gpt15ConformanceF
             f => f.Sequence > bootstrap.Sequence && f.Type == "session.update", FrameTimeout, ct);
         Assert.True(fallback is not null, "Expected exactly one fallback after the bootstrap's scripted rejection.");
 
-        // The bootstrap's own rejection must still be fully recovered -- no error for it reaches
-        // the browser (same guarantee as SessionUpdateFallbackTests, re-proven here because this
-        // scenario's rejection source is different).
-        Assert.DoesNotContain(browser.ReceivedFrames.Snapshot(), f => f.Type == "error");
+        // PR #42 review item 7: don't assert "no error reached the browser yet" here -- the
+        // fallback frame above is an upstream-side milestone and proves nothing about whether a
+        // buggy premature forward of the bootstrap's rejection has landed on the browser's
+        // separate socket yet. The bootstrap's rejection recovering silently is instead proven
+        // below by the browserErrorCount == 1 assertion, anchored on the sentinel round trip.
 
         // The fallback itself was ALSO scripted-rejected. If the guard looped (M1: "rejected
         // fallback triggers another fallback"), it would send a THIRD session.update instead of
