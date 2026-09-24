@@ -19,6 +19,18 @@ public class ConformanceFixture : IAsyncLifetime
     /// </summary>
     protected virtual BackendProfile Profile => BackendProfiles.Default;
 
+    /// <summary>
+    /// The AZURE_OPENAI_REALTIME_DEPLOYMENT name the Python backend is launched with. Null uses
+    /// BackendLauncherFactory/BackendContract's own default (<see cref="BackendContract.DefaultDeployment"/>,
+    /// "gpt-realtime-2.1-conformance" — a reasoning-capable name by rtmt.py's deployment-name
+    /// classification). Derived fixtures override this to exercise reasoning-by-deployment-name
+    /// behaviour (issue #8) on their own dedicated collection — like <see cref="Profile"/>, the
+    /// deployment name is read once at Python module-import time and can't change for an
+    /// already-running process, so each distinct value needs its own collection/backend process.
+    /// See tests/conformance/tests/Conformance.Tests/Scenarios/Sessions/ReasoningDeploymentFixtures.cs.
+    /// </summary>
+    protected virtual string? Deployment => null;
+
     public FakeRealtimeUpstreamServer Realtime { get; } = new();
     public FakeSearchServer Search { get; private set; } = null!;
 
@@ -73,7 +85,7 @@ public class ConformanceFixture : IAsyncLifetime
         try
         {
             Backend = await BackendLauncherFactory.StartAsync(
-                Realtime.BaseUri, Search.BaseUri, port, extraEnvironment: Profile.ExtraEnvironment)
+                Realtime.BaseUri, Search.BaseUri, port, extraEnvironment: Profile.ExtraEnvironment, deployment: Deployment)
                 .ConfigureAwait(false);
         }
         catch (ConformanceBackendNotImplementedException ex)
@@ -104,22 +116,27 @@ public class ConformanceFixture : IAsyncLifetime
     /// Wraps a scenario body so any failure carries the backend's captured stdout/stderr in the
     /// exception message — xUnit displays inner-exception text on failure without needing
     /// ITestOutputHelper plumbing through every scenario. Equivalent to
-    /// <c>RunAsync(body, expectedNewUnhandledErrors: 0)</c>.
+    /// <c>RunAsync(body, expectedNewBackendErrorCount: 0)</c>.
     /// </summary>
-    public Task RunAsync(Func<Task> body) => RunAsync(body, expectedNewUnhandledErrors: 0);
+    public Task RunAsync(Func<Task> body) => RunAsync(body, expectedNewBackendErrorCount: 0);
 
     /// <summary>
-    /// Same as <see cref="RunAsync(Func{Task})"/>, but lets a scenario declare that its body is
-    /// expected to cause exactly <paramref name="expectedNewUnhandledErrors"/> additional
-    /// unhandled-error log lines relative to the baseline captured before it runs (PR #38 review
-    /// item 2). A caught-and-reported application-level tool exception (see
-    /// ToolErrorSessionSurvivesTests's README-documented "one ERROR" contract) is expected to log
-    /// exactly one such line even in a correct implementation — without this overload, the
-    /// zero-new-errors invariant below would itself block an otherwise-passing scenario from ever
-    /// passing, which is exactly what PR #38's Rick review flagged: "the body passes and only the
-    /// error count blocked it."
+    /// Same as <see cref="RunAsync(Func{Task})"/>, but for scenarios whose entire subject matter
+    /// is a deterministic, application-level error path (e.g. a rejected session.update, or an
+    /// unrelated upstream error) that the backend legitimately logs at ERROR level as part of
+    /// proving recovery actually happened. <paramref name="expectedNewBackendErrorCount"/> is the
+    /// exact number of new backend ERROR-level log lines (per
+    /// <see cref="Conformance.Harness.CapturedProcessOutput.CountUnhandledErrors"/>) this
+    /// scenario's own body deliberately, deterministically causes — the zero-arg overload's
+    /// baseline-delta invariant (PR #22 review item N5) still applies on top of that expected
+    /// count, so any *additional*, unexpected backend error still fails the scenario. A
+    /// caught-and-reported application-level tool exception (see ToolErrorSessionSurvivesTests's
+    /// README-documented "one ERROR" contract) is one such deliberate case (PR #38 review item 2)
+    /// — without this overload, the zero-new-errors invariant below would itself block an
+    /// otherwise-passing scenario from ever passing, which is exactly what PR #38's Rick review
+    /// flagged: "the body passes and only the error count blocked it."
     /// </summary>
-    public async Task RunAsync(Func<Task> body, int expectedNewUnhandledErrors)
+    public async Task RunAsync(Func<Task> body, int expectedNewBackendErrorCount)
     {
         if (SkipReason is not null)
         {
@@ -196,12 +213,12 @@ public class ConformanceFixture : IAsyncLifetime
             // Language-neutral, fixture-wide equivalent of "backend logged no (unexpected)
             // traceback" (item N5): a future C# backend under test reports the same
             // baseline-plus-delta contract without ever producing a Python-shaped traceback
-            // string. Most scenarios pass expectedNewUnhandledErrors: 0 (via the single-arg
+            // string. Most scenarios pass expectedNewBackendErrorCount: 0 (via the single-arg
             // RunAsync overload); a scenario that deliberately provokes one caught-and-reported
             // tool exception passes 1 instead (PR #38 review item 2).
             if (Backend is not null)
             {
-                Assert.Equal(baselineUnhandledErrors + expectedNewUnhandledErrors, Backend.UnhandledErrorCount());
+                Assert.Equal(baselineUnhandledErrors + expectedNewBackendErrorCount, Backend.UnhandledErrorCount());
             }
         }
         catch (Exception ex) when (Backend is not null)

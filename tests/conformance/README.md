@@ -381,11 +381,13 @@ zero). A scenario that deliberately provokes one **caught-and-reported** applica
 exception — the kind `tools.py` itself catches and turns into a graceful apology `ToolResult`
 rather than letting propagate — is expected, even in a fully correct implementation, to log exactly
 one such ERROR line for that exception. Use the second overload,
-`RunAsync(Func<Task> body, int expectedNewUnhandledErrors)`, to declare that expected delta instead
+`RunAsync(Func<Task> body, int expectedNewBackendErrorCount)`, to declare that expected delta instead
 of letting the zero-new-errors invariant block an otherwise-passing scenario
 (`ToolErrorSessionSurvivesTests.cs`'s `Session_survives_an_unhandled_tool_exception` — currently
 `[Fact(Skip = ...)]` pending the Python fix tracked in #36 — is written to pass
-`expectedNewUnhandledErrors: 1` once that fix lands).
+`expectedNewBackendErrorCount: 1` once that fix lands). This overload is shared harness (added by
+the parallel issue #8 stream, `100ed8c`), which also added a `Deployment` fixture extension point
+unrelated to this stream's scenarios.
 
 ### `search`'s two `select` field sets (should-fix #8)
 

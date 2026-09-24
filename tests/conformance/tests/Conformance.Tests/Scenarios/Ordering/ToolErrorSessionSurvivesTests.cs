@@ -129,5 +129,5 @@ public sealed class ToolErrorSessionSurvivesTests(ConformanceFixture fixture)
             nextIndex, ct);
         var order = JsonDocument.Parse(next.ToolResultJson!).RootElement;
         Assert.Equal(1, order.GetProperty("items").GetArrayLength());
-    }, expectedNewUnhandledErrors: 1);
+    }, expectedNewBackendErrorCount: 1);
 }
