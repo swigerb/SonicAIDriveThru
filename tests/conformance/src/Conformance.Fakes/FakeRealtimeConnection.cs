@@ -113,6 +113,18 @@ public sealed class FakeRealtimeConnection
     /// </summary>
     internal CancellationTokenSource? ActiveResponseCancellation { get; set; }
 
+    /// <summary>
+    /// Cancelled once this connection's socket loop begins tearing down — the client's close was
+    /// observed, or the server itself is shutting the connection down — and crucially *before*
+    /// any outstanding handler task is awaited (see <see cref="FakeRealtimeUpstreamServer"/>'s
+    /// connection handler). A response-streaming loop (<c>RespondAsync</c>) links its own
+    /// per-response cancellation to this token so a mid-stream drop stops it promptly instead of
+    /// racing one more doomed <see cref="SendAsync"/> call against the now-closing socket; the
+    /// resulting <see cref="OperationCanceledException"/>, once this token has fired, is expected
+    /// teardown, not a bug, and must not be recorded as a handler fault (PR #22 review item N3).
+    /// </summary>
+    internal CancellationTokenSource TeardownCancellation { get; } = new();
+
     private readonly SemaphoreSlim _sendLock = new(1, 1);
     private WebSocket? _socket;
 
@@ -141,14 +153,15 @@ public sealed class FakeRealtimeConnection
     /// handler/response stream can legitimately want to write to the same socket at once — this
     /// serializes them behind a send lock instead of corrupting the wire.
     /// </summary>
-    /// <exception cref="InvalidOperationException">
+    /// <exception cref="FakeConnectionClosedException">
     /// The socket hasn't been attached yet (this connection was returned by
     /// <see cref="ConnectionRegistry.WaitForNextAsync"/> before <see cref="AttachSocket"/> ran —
     /// no longer possible since PR #22 review item N2, but kept as a defensive throw rather than a
     /// silent no-op), or it is no longer in the <see cref="WebSocketState.Open"/> state (already
-    /// closing/closed). Silently swallowing a send here used to hide real bugs — a handler racing
-    /// a closed connection would just look like "no response ever arrived" instead of a clear
-    /// failure pointing at the actual cause.
+    /// closing/closed — e.g. a browser dropping mid-response, which is normal, not a bug: see PR
+    /// #22 review item N3). Silently swallowing a send here used to hide real bugs — a handler
+    /// racing a closed connection would just look like "no response ever arrived" instead of a
+    /// clear failure pointing at the actual cause.
     /// </exception>
     public async Task SendAsync(object payload, CancellationToken cancellationToken = default)
     {
@@ -157,7 +170,7 @@ public sealed class FakeRealtimeConnection
         {
             if (_socket is null)
             {
-                throw new InvalidOperationException(
+                throw new FakeConnectionClosedException(
                     $"FakeRealtimeConnection {Id}: cannot send — the socket has not been attached yet " +
                     "(AttachSocket hasn't run). This connection should not have been observable yet; " +
                     "see ConnectionRegistry.Publish.");
@@ -165,7 +178,7 @@ public sealed class FakeRealtimeConnection
 
             if (_socket.State != WebSocketState.Open)
             {
-                throw new InvalidOperationException(
+                throw new FakeConnectionClosedException(
                     $"FakeRealtimeConnection {Id}: cannot send — the socket is in state " +
                     $"'{_socket.State}', not Open. The connection is already closing or closed.");
             }

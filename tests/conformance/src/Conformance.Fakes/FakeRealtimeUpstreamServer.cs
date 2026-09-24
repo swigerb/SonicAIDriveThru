@@ -162,22 +162,41 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
         _connections.WaitForNoneOpenAsync(timeout, cancellationToken);
 
     /// <summary>
-    /// Drains and asserts there are no recorded handler faults across every connection this server
-    /// has ever accepted. A scripted rule (or a built-in dispatch case) throwing used to be
+    /// Total connections ever accepted by this server. Callers capture this at the start of a
+    /// scenario and pass it back as <paramref name="since"/> to <see cref="AssertNoHandlerFaults"/>
+    /// so a fault recorded on a connection an *earlier* scenario accepted (including one still
+    /// asynchronously tearing down when that earlier scenario's own checks ran) is never
+    /// attributed to this one (PR #22 review item N3).
+    /// </summary>
+    public int ConnectionWatermark => _connections.TotalAcceptedCount;
+
+    /// <summary>Ids of every connection accepted so far whose socket loop hasn't exited yet — used
+    /// to build a clear failure message when <see cref="WaitForNoOpenConnectionsAsync"/> times out
+    /// (PR #22 review item N3).</summary>
+    public IReadOnlyList<Guid> OpenConnectionIds =>
+        [.. _connections.Snapshot().Where(c => !c.IsClosed).Select(c => c.Id)];
+
+    /// <summary>
+    /// Drains and asserts there are no recorded handler faults across every connection accepted at
+    /// or after <paramref name="since"/> (a watermark from <see cref="ConnectionWatermark"/>;
+    /// defaults to 0, i.e. every connection ever accepted, for standalone tests that create a
+    /// fresh server per test). A scripted rule (or a built-in dispatch case) throwing used to be
     /// silently lost — nothing surfaced it to the test that scripted it, so a scenario would just
     /// look like "no response ever arrived" and fail (or worse, hang) with no hint at the real
-    /// cause. Tests call this once at the end of a scenario (via <see cref="ConformanceFixture.RunAsync"/>)
-    /// so a throwing rule's exception is surfaced directly instead (PR #22 review item N3).
-    /// Draining (not just reading) means a fault from one scenario can never leak into failing —
-    /// or silently disappearing from — a later one sharing the same fixture.
+    /// cause. Tests call this once at the end of a scenario (via <see cref="ConformanceFixture.RunAsync"/>,
+    /// only after that scenario's own connections have actually finished closing — see
+    /// <see cref="WaitForNoOpenConnectionsAsync"/>) so a throwing rule's exception is surfaced
+    /// directly instead (PR #22 review item N3). Draining (not just reading) means a fault from
+    /// one scenario can never leak into failing — or silently disappearing from — a later one
+    /// sharing the same fixture.
     /// </summary>
     /// <exception cref="Exception">The single recorded fault, rethrown with its original stack
     /// trace preserved, if exactly one connection faulted exactly once.</exception>
     /// <exception cref="AggregateException">Every recorded fault, if more than one was recorded.</exception>
-    public void AssertNoHandlerFaults()
+    public void AssertNoHandlerFaults(int since = 0)
     {
         List<Exception> faults = [];
-        foreach (var connection in _connections.Snapshot())
+        foreach (var connection in _connections.SnapshotSince(since))
         {
             faults.AddRange(connection.DrainHandlerFaults());
         }
@@ -273,6 +292,19 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
         _connections.Publish(connection);
         var ct = context.RequestAborted;
 
+        // ct itself firing (a harder, transport-level abort -- as opposed to the receive loop
+        // observing a graceful client-sent Close frame) must *also* mark this connection as
+        // tearing down, and must do so before any ct-linked continuation elsewhere (notably
+        // RespondAsync's paced Task.Delay, linked via responseCts) can possibly observe the
+        // cancellation and run its own catch block -- otherwise which one wins the race is
+        // scheduler-dependent, and RespondAsync's continuation can beat this method's own receive
+        // loop to noticing the abort, checking connection.TeardownCancellation.IsCancellationRequested
+        // before this method ever gets a chance to set it. Registering a callback on ct runs
+        // synchronously as part of ct.Cancel() itself, strictly before any *other* ct-linked
+        // continuation is scheduled to resume -- so by the time RespondAsync's own catch runs,
+        // this is guaranteed to have already fired (PR #22 review item N3).
+        using var teardownOnAbort = ct.Register(() => connection.TeardownCancellation.Cancel());
+
         // Frame handling runs off the receive loop (non-blocking receive loop, item 8) so a
         // slow-streaming response.create reply, a VAD-default echo, and the next incoming client
         // frame can all be in flight concurrently -- writes are serialized by
@@ -288,12 +320,37 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
         // closes, so an unhandled fault used to either vanish entirely or surface once, deep
         // inside Task.WhenAll below, in a place no test could see it. Recording it on the
         // connection instead lets AssertNoHandlerFaults surface it clearly at the end of a
-        // scenario (PR #22 review item N3).
+        // scenario (PR #22 review item N3). A handler racing this connection's own teardown --
+        // notably RespondAsync's paced streaming loop reacting to a browser dropping mid-response,
+        // which is normal, expected behaviour, not a bug -- must not be recorded: it either throws
+        // the dedicated FakeConnectionClosedException (its next SendAsync landed on a socket
+        // that's already closing), or an OperationCanceledException once either teardown signal has
+        // fired. Checking ct.IsCancellationRequested directly here (not only
+        // connection.TeardownCancellation) matters: a harder, transport-level abort cancels ct
+        // itself, and while HandleConnectionAsync also relays that into TeardownCancellation (via
+        // ct.Register below), relying solely on that relay would race the very same
+        // ct-cancellation cascading into a handler's own ct-linked token -- two independently
+        // registered callbacks on the same CancellationTokenSource have no documented ordering
+        // guarantee relative to each other. Reading ct.IsCancellationRequested is a plain,
+        // synchronous field read that is guaranteed true the instant ct.Cancel() runs -- strictly
+        // before any callback or continuation it triggers -- so it carries no such race (PR #22
+        // review item N3). Anything else is still a genuine fault.
         async Task ObserveHandlerFaultsAsync(Task handlerTask)
         {
             try
             {
                 await handlerTask.ConfigureAwait(false);
+            }
+            catch (FakeConnectionClosedException)
+            {
+                // Expected: a handler tried to send after this connection's socket was already
+                // closing/closed.
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested || connection.TeardownCancellation.IsCancellationRequested)
+            {
+                // Expected: this handler's own cancellation is linked to one of the connection's
+                // two teardown signals (a hard abort via ct, or a graceful close observed by the
+                // receive loop via TeardownCancellation).
             }
             catch (Exception ex)
             {
@@ -309,6 +366,25 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
                 outstanding.RemoveAll(t => t.IsCompleted);
                 outstanding.Add(observed);
             }
+        }
+
+        /// <summary>Snapshots and awaits every outstanding (already fault-observed-and-wrapped, so
+        /// never throwing) handler task. Called both after the receive loop exits normally and
+        /// again, unconditionally, from the <c>finally</c> below -- the receive loop can also exit
+        /// by *throwing* (e.g. <paramref name="ct"/> itself firing on a harder abort), which skips
+        /// straight past the first call, so without the second, <see cref="ConnectionRegistry.NotifyClosed"/>
+        /// could fire while a handler (notably <c>RespondAsync</c>'s paced delta loop) is still
+        /// running -- reintroducing exactly the "connection looks closed but its fault hasn't been
+        /// recorded/excluded yet" race this whole mechanism exists to close (PR #22 review item
+        /// N3). Idempotent: a second await of already-completed tasks resolves immediately.</summary>
+        async Task AwaitOutstandingHandlersAsync()
+        {
+            List<Task> toAwait;
+            lock (outstandingGate)
+            {
+                toAwait = [.. outstanding];
+            }
+            await Task.WhenAll(toAwait).ConfigureAwait(false);
         }
 
         try
@@ -327,12 +403,12 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
                 TrackHandler(HandleFrameAsync(connection, frame, deployment, ct));
             }
 
-            List<Task> toAwait;
-            lock (outstandingGate)
-            {
-                toAwait = [.. outstanding];
-            }
-            await Task.WhenAll(toAwait).ConfigureAwait(false);
+            // Signal any handler still running (notably RespondAsync's paced delta loop) that
+            // this connection is tearing down -- *before* awaiting outstanding handler tasks
+            // below, so a handler linked to this token stops itself instead of racing one more
+            // doomed send against the now-closing socket (PR #22 review item N3).
+            connection.TeardownCancellation.Cancel();
+            await AwaitOutstandingHandlersAsync().ConfigureAwait(false);
 
             if (socket.State is WebSocketState.Open or WebSocketState.CloseReceived)
             {
@@ -344,6 +420,13 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
         }
         finally
         {
+            // Idempotent, and also covers a path that threw before reaching the calls above (e.g.
+            // ReceiveJsonAsync itself faulting on an abrupt/aborted disconnect, which skips both
+            // the Cancel() and the await above entirely) -- either way, nothing downstream should
+            // still be racing this socket, and every handler must have actually settled, before
+            // the connection is marked closed (PR #22 review item N3).
+            connection.TeardownCancellation.Cancel();
+            await AwaitOutstandingHandlersAsync().ConfigureAwait(false);
             _connections.NotifyClosed(connection);
         }
     }
@@ -528,10 +611,13 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
         // Tracks this response as "active" for the lifetime of this method, so a concurrent
         // response.cancel (handled by HandleResponseCancelAsync off the same non-blocking receive
         // loop, item 8) has something to signal and a concurrent response.create has something to
-        // reject (PR #22 review item N7). Linked to the connection's own ct so a socket-level
-        // teardown still cancels this exactly as before; response.cancel additionally trips this
-        // same source without affecting ct.
-        using var responseCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        // reject (PR #22 review item N7). Linked to both the connection's own ct (a hard,
+        // transport-level abort) and its TeardownCancellation (a graceful client close, observed
+        // by the receive loop, which does not reliably trip ct promptly) so a browser dropping
+        // mid-stream stops this loop the same way a harder abort always has, instead of racing one
+        // more doomed send against the now-closing socket (PR #22 review item N3);
+        // response.cancel additionally trips this same source without affecting either.
+        using var responseCts = CancellationTokenSource.CreateLinkedTokenSource(ct, connection.TeardownCancellation.Token);
         connection.ActiveResponseId = responseId;
         connection.ActiveResponseCancellation = responseCts;
 
@@ -796,11 +882,16 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
                 }
             }
         }
-        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested && !connection.TeardownCancellation.IsCancellationRequested)
         {
             // Only a response.cancel (which trips responseCts without touching the connection's
-            // own ct) is swallowed here — a real socket-level teardown (ct itself cancelled)
-            // still propagates normally, same as before this method tracked cancellation.
+            // own ct or its teardown signal) is swallowed here — a real socket-level teardown
+            // (either ct itself, or the connection's TeardownCancellation, has fired: a browser
+            // dropping mid-stream) still propagates normally, same as before this method tracked
+            // cancellation. ObserveHandlerFaultsAsync recognises a teardown-caused
+            // OperationCanceledException as expected and does not record it as a handler fault —
+            // and skipping the cancelled-response softlanding below means this loop doesn't also
+            // waste a doomed send against the now-closing socket (PR #22 review item N3).
             cancelled = true;
         }
         finally
@@ -812,12 +903,19 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
             connection.ActiveResponseCancellation = null;
         }
 
-        if (cancelled)
+        if (cancelled && !ct.IsCancellationRequested && !connection.TeardownCancellation.IsCancellationRequested)
         {
             // GA (Response Cancel Event): "the server will respond with a response.done event
             // with a status of response.status=cancelled". Any item still open when the cancel
             // landed is closed as "incomplete" rather than "completed" — it stopped mid-stream,
-            // it didn't finish (PR #22 review item N7).
+            // it didn't finish (PR #22 review item N7). Skipped entirely when this connection is
+            // tearing down (a browser dropping mid-stream, observed via the loop's own
+            // responseCts.IsCancellationRequested check above, which fires for either teardown
+            // signal same as this guard) — these sends would just throw
+            // FakeConnectionClosedException (or an OperationCanceledException on the ct-linked
+            // SendAsync below) against the now-closing socket for no benefit; nothing downstream
+            // is listening for a cancelled response.done on a connection that's already gone
+            // (PR #22 review item N3).
             await CloseOpenAudioItemAsync(itemStatus: "incomplete").ConfigureAwait(false);
 
             await connection.SendAsync(new JsonObject

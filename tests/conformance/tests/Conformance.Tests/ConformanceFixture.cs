@@ -95,6 +95,11 @@ public class ConformanceFixture : IAsyncLifetime
         await Realtime.DisposeAsync().ConfigureAwait(false);
     }
 
+    /// <summary>How long a scenario's connections get to finish closing before <see
+    /// cref="RunAsync"/> gives up and fails with a clear message — matches the <c>FrameTimeout</c>
+    /// convention used throughout the scenario tests themselves (PR #22 review item N3).</summary>
+    private static readonly TimeSpan ScenarioTeardownTimeout = TimeSpan.FromSeconds(30);
+
     /// <summary>
     /// Wraps a scenario body so any failure carries the backend's captured stdout/stderr in the
     /// exception message — xUnit displays inner-exception text on failure without needing
@@ -115,6 +120,16 @@ public class ConformanceFixture : IAsyncLifetime
         // review item N9). See FakeRealtimeUpstreamServer.AssertNoPendingOneShotSwitches.
         Realtime.AssertNoPendingOneShotSwitches();
 
+        // Captured BEFORE the scenario runs, not after: only a handler fault recorded on a
+        // connection accepted at or after this point belongs to *this* scenario. A connection an
+        // earlier scenario accepted can still be asynchronously tearing down (e.g. its
+        // RespondAsync loop reacting to that scenario's browser dropping mid-stream) when this
+        // scenario starts — without this watermark, that connection's eventual, entirely expected
+        // "socket already closing" outcome would otherwise get attributed to whichever scenario
+        // happened to call AssertNoHandlerFaults first, not the one that actually caused it (PR
+        // #22 review item N3).
+        var connectionWatermark = Realtime.ConnectionWatermark;
+
         // Baseline captured BEFORE the scenario runs, not compared against zero: the backend
         // process is shared across every test in this collection (starting a fresh Python
         // process per test would make the suite too slow), so an earlier scenario's own
@@ -129,10 +144,35 @@ public class ConformanceFixture : IAsyncLifetime
         try
         {
             await body().ConfigureAwait(false);
-            // Surfaces any handler fault recorded during the scenario (a throwing script rule, or
-            // a bug in a built-in dispatch case) even when the scenario's own assertions all
-            // happened to pass -- see FakeRealtimeUpstreamServer.AssertNoHandlerFaults (item N3).
-            Realtime.AssertNoHandlerFaults();
+
+            // Let every connection this scenario touched actually finish closing before checking
+            // for handler faults. A graceful drop (e.g. this scenario's own browser client
+            // disposing at the end of its `await using` block) does not mean the *backend's*
+            // upstream connection to the fake has finished tearing down yet — that happens
+            // asynchronously, on the backend's own schedule, once it notices the browser
+            // disconnected. Asserting faults immediately after the scenario body returns risked
+            // missing a fault that hadn't been recorded yet (this scenario would wrongly pass) and
+            // then discovering it later, misattributed to whichever *next* scenario happened to
+            // call AssertNoHandlerFaults first (PR #22 review item N3).
+            var settled = await Realtime.WaitForNoOpenConnectionsAsync(ScenarioTeardownTimeout).ConfigureAwait(false);
+            if (!settled)
+            {
+                var stillOpen = string.Join(", ", Realtime.OpenConnectionIds);
+                throw new InvalidOperationException(
+                    $"{Realtime.OpenConnectionIds.Count} upstream connection(s) were still open " +
+                    $"{ScenarioTeardownTimeout} after this scenario's body returned: [{stillOpen}]. " +
+                    "A handler is still running (or a browser client this scenario opened was " +
+                    "never closed) -- this must settle before handler faults can be checked " +
+                    "reliably.");
+            }
+
+            // Surfaces any *genuine* handler fault recorded during the scenario (a throwing
+            // script rule, or a bug in a built-in dispatch case) even when the scenario's own
+            // assertions all happened to pass -- see FakeRealtimeUpstreamServer.AssertNoHandlerFaults
+            // (item N3). Scoped to connections this scenario itself accepted (the watermark
+            // above) so a fault from an earlier scenario's already-settled teardown can never
+            // fail this one either.
+            Realtime.AssertNoHandlerFaults(since: connectionWatermark);
 
             // Language-neutral, fixture-wide equivalent of "backend logged no traceback" (item
             // N5): a future C# backend under test reports the same zero-new-errors contract

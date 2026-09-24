@@ -61,6 +61,33 @@ internal sealed class ConnectionRegistry
         }
     }
 
+    /// <summary>Total connections ever accepted, usable as a watermark: capture this at the start
+    /// of a scenario and pass it back to <see cref="SnapshotSince"/> once the scenario ends so a
+    /// handler fault recorded on a connection an *earlier* scenario accepted (including one still
+    /// asynchronously tearing down when that earlier scenario's own checks ran) is never
+    /// attributed to this one (PR #22 review item N3).</summary>
+    public int TotalAcceptedCount
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _connections.Count;
+            }
+        }
+    }
+
+    /// <summary>Defensive snapshot of every connection accepted at or after <paramref
+    /// name="watermark"/> (an index previously read from <see cref="TotalAcceptedCount"/>), oldest
+    /// first (PR #22 review item N3).</summary>
+    public IReadOnlyList<FakeRealtimeConnection> SnapshotSince(int watermark)
+    {
+        lock (_gate)
+        {
+            return watermark >= _connections.Count ? [] : [.. _connections.Skip(watermark)];
+        }
+    }
+
     /// <summary>
     /// Waits for the next connection published (via <see cref="Publish"/>) after this call is
     /// made (not one already published when called). By the time this returns a non-null

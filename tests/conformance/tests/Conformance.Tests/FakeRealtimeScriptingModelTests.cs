@@ -339,7 +339,7 @@ public sealed class FakeRealtimeScriptingModelTests
         await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
         await fake.WaitForNoOpenConnectionsAsync(FrameTimeout, TestContext.Current.CancellationToken);
 
-        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+        var ex = await Assert.ThrowsAsync<FakeConnectionClosedException>(
             () => connection!.SendAsync(new JsonObject { ["type"] = "test.after_close" }, TestContext.Current.CancellationToken));
         Assert.Contains("not Open", ex.Message);
     }
