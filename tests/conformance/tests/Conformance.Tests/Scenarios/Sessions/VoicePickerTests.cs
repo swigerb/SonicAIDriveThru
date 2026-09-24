@@ -27,6 +27,14 @@ public sealed class VoicePickerTests(VoicePickerConformanceFixture fixture)
         Assert.True(connection is not null, $"No upstream connection was accepted within {FrameTimeout}.");
 
         await browser.SendStartSessionAsync(cancellationToken: ct);
+
+        // PR #42 review item 8: wait for actual assistant audio to reach the browser, not just
+        // the round trip token -- see VoiceLockTests.cs's matching comment for why round_trip_token
+        // alone doesn't prove assistant_audio_seen.
+        var greetingAudio = await browser.ReceivedFrames.WaitForAsync(
+            f => f.Type == "response.audio.delta", FrameTimeout, ct);
+        Assert.True(greetingAudio is not null, "Expected the greeting to send assistant audio to the browser before the voice lock can be exercised.");
+
         var roundTripToken = await browser.ReceivedFrames.WaitForAsync(
             f => f.Type == "extension.round_trip_token", FrameTimeout, ct);
         Assert.True(roundTripToken is not null, "extension.round_trip_token never reached the browser (greeting never completed).");
@@ -51,6 +59,44 @@ public sealed class VoicePickerTests(VoicePickerConformanceFixture fixture)
 
         var updateCountAfter = connection.ReceivedFrames.Snapshot().Count(f => f.Type == "session.update");
         Assert.Equal(updateCountBefore, updateCountAfter);
+    });
+
+    /// <summary>
+    /// PR #42 review item 8 ("set_voice before lock"): the deferred behaviour only applies once
+    /// <c>assistant_audio_seen</c> is true. Picking a voice BEFORE the greeting has sent any
+    /// assistant audio must take effect immediately -- a session.update carrying the new voice
+    /// forwarded upstream right away -- exercising the `else` branch of rtmt.py's
+    /// extension.set_voice handler that the other tests in this class never reach.
+    /// </summary>
+    [Fact]
+    public Task Voice_picker_updates_immediately_before_any_assistant_audio_has_been_sent() => fixture.RunAsync(async () =>
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var noneOpen = await fixture.Realtime.WaitForNoOpenConnectionsAsync(FrameTimeout, ct);
+        Assert.True(noneOpen, $"Expected no open upstream connections at test start, but " +
+            $"{fixture.Realtime.OpenConnectionCount} are still open — a previous test leaked a connection.");
+
+        var connectionTask = fixture.Realtime.WaitForNextConnectionAsync(FrameTimeout, ct);
+        await using var browser = await RealtimeBrowserClient.ConnectAsync(fixture.Backend!.BaseUri, cancellationToken: ct);
+        var connection = await connectionTask;
+        Assert.True(connection is not null, $"No upstream connection was accepted within {FrameTimeout}.");
+
+        // Deliberately pick the voice before ever calling SendStartSessionAsync (no browser
+        // session.update, no greeting, no assistant audio at all yet) -- only the bootstrap
+        // session.update (Sequence == 0) has been sent on this connection so far.
+        var bootstrap = await connection!.ReceivedFrames.WaitForAsync(f => f.Sequence == 0, FrameTimeout, ct);
+        Assert.True(bootstrap is not null, "Bootstrap session.update never arrived.");
+
+        await browser.SendExtensionSetVoiceAsync("cedar", cancellationToken: ct);
+
+        var immediateUpdate = await connection.ReceivedFrames.WaitForAsync(
+            f => f.Sequence > bootstrap!.Sequence && f.Type == "session.update", FrameTimeout, ct);
+        Assert.True(immediateUpdate is not null,
+            "extension.set_voice must be forwarded upstream immediately when no assistant audio has been seen yet, not deferred.");
+
+        var pickedVoice = immediateUpdate!.Json.GetProperty("session").GetProperty("audio")
+            .GetProperty("output").GetProperty("voice").GetString();
+        Assert.Equal("cedar", pickedVoice);
     });
 
     /// <summary>

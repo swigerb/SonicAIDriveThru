@@ -52,9 +52,18 @@ public sealed class VoiceLockTests(ConformanceFixture fixture)
         var voiceBeforeLock = firstAudio.GetProperty("output").GetProperty("voice").GetString();
         Assert.Equal(BackendContract.DefaultVoice, voiceBeforeLock);
 
-        // Wait for the greeting's assistant audio to actually arrive at the browser (proves
-        // assistant_audio_seen is genuinely true on the backend's connection to the fake before
-        // the second session.update below is sent, not merely "greeting requested").
+        // PR #42 review item 8 ("voice-lock sentinel" / "assert audio reached browser"):
+        // extension.round_trip_token only proves the greeting's response *completed* -- it does
+        // NOT by itself prove rtmt.py's assistant_audio_seen flag (the actual thing that drives
+        // the voice lock) ever became true, since a response can complete without ever emitting
+        // audio. Wait for an actual response.audio.delta frame to reach the browser first: that
+        // is the exact same marker rtmt.py itself uses to flip assistant_audio_seen (see
+        // _MARKER_AUDIO_DELTA in from_server_to_client), so this is a true precondition sentinel
+        // for the lock, not a proxy for it.
+        var greetingAudio = await browser.ReceivedFrames.WaitForAsync(
+            f => f.Type == "response.audio.delta", FrameTimeout, ct);
+        Assert.True(greetingAudio is not null, "Expected the greeting to send assistant audio to the browser before the voice lock can be exercised.");
+
         var roundTripToken = await browser.ReceivedFrames.WaitForAsync(
             f => f.Type == "extension.round_trip_token", FrameTimeout, ct);
         Assert.True(roundTripToken is not null, "extension.round_trip_token never reached the browser (greeting never completed).");
