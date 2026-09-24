@@ -24,6 +24,18 @@ public sealed class FakeSearchServer : IAsyncDisposable
 
     public string? LastApiKeyHeader { get; private set; }
 
+    /// <summary>
+    /// Issue #9 / harness follow-up #23: opt-in, one-shot field-name-mismatch simulation. When
+    /// set to a field name (e.g. "sizes"), the *next* request whose `select` list contains that
+    /// field is answered with HTTP 400 and an Azure-AI-Search-shaped error body whose message
+    /// contains "Could not find a property named '&lt;field&gt;'" — the exact substring
+    /// app/backend/tools.py's `search()` matches on to trigger its fallback retry with a minimal
+    /// `select`. The flag clears itself immediately after firing once, so the retry (which asks
+    /// for a different, always-present field set) and every other unrelated request/scenario
+    /// succeed normally. Defaults to null (inert) — no existing scenario's behavior changes.
+    /// </summary>
+    public string? RejectSelectFieldOnce { get; set; }
+
     public FakeSearchServer(string menuItemsJsonPath)
     {
         _menuItemsJsonPath = menuItemsJsonPath;
@@ -73,6 +85,25 @@ public sealed class FakeSearchServer : IAsyncDisposable
         var selectFields = root.TryGetProperty("select", out var sel) && sel.ValueKind == JsonValueKind.String
             ? sel.GetString()!.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
             : null;
+
+        var rejectField = RejectSelectFieldOnce;
+        if (rejectField is not null && selectFields is not null &&
+            selectFields.Contains(rejectField, StringComparer.OrdinalIgnoreCase))
+        {
+            RejectSelectFieldOnce = null; // one-shot: only this request is rejected
+            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+            context.Response.ContentType = "application/json;odata.metadata=none";
+            var errorBody = new JsonObject
+            {
+                ["error"] = new JsonObject
+                {
+                    ["code"] = "InvalidRequestParameter",
+                    ["message"] = $"Could not find a property named '{rejectField}' on type 'search.document'.",
+                },
+            };
+            await context.Response.WriteAsync(errorBody.ToJsonString(), context.RequestAborted).ConfigureAwait(false);
+            return;
+        }
 
         var matches = Filter(searchText).Take(top);
 
