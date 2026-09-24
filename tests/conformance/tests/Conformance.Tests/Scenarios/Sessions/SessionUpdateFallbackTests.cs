@@ -181,11 +181,13 @@ public sealed class UnrelatedErrorsDoNotTriggerFallbackTests(ConformanceFixture 
 /// exercised. <see cref="Conformance.Fakes.FakeRealtimeUpstreamServer.RejectNextSessionUpdates"/>
 /// scripts an arbitrary rejection independent of GA's built-in rules, so both the bootstrap's
 /// session.update AND its own fallback can be forced to fail here. Uses <c>echoEventId: true</c>
-/// (the reasoning fixture's built-in rejection omits it) to additionally prove
-/// <c>_SessionUpdateGuard.correlate</c>'s event_id-keyed path, not just its order-based fallback.
-/// Uses <c>echoEventId: true</c>
-/// (the reasoning fixture's built-in rejection omits it) to additionally prove
-/// <c>_SessionUpdateGuard.correlate</c>'s event_id-keyed path, not just its order-based fallback.
+/// (the reasoning fixture's built-in rejection omits it) to additionally exercise
+/// <c>_SessionUpdateGuard.correlate</c>'s event_id-echoing branch of the fake -- NOT to distinguish
+/// event_id-keyed correlation from simpler order-based matching, since only one session.update is
+/// ever outstanding at a time here (the guard never sends a second before the first's rejection
+/// comes back), so there is only ever one candidate either strategy could possibly correlate
+/// against; a test that actually needs two simultaneously-outstanding candidates to tell the two
+/// strategies apart is a separate, not-yet-written scenario.
 /// Deliberately runs on <see cref="Gpt15ConformanceFixture"/> (never sends `reasoning`), not the
 /// plain Default deployment: this is about the guard's loop protection alone, and the Default
 /// deployment's bootstrap already sends `reasoning` by default, which would make the scripted
@@ -237,8 +239,9 @@ public sealed class SecondSessionUpdateRejectionLoopGuardTests(Gpt15ConformanceF
         Assert.Equal("invalid_value", error!.Json.GetProperty("error").GetProperty("code").GetString());
 
         // echoEventId: true was requested -- the fallback's own event_id must be the one echoed
-        // back, proving the guard correlated this rejection to the fallback specifically (not
-        // just "the oldest thing in flight", which the order-based path would also get right).
+        // back. This exercises the guard's event_id-echoing branch of the fake; it does NOT by
+        // itself prove event_id-keyed correlation over simpler order-based matching, since only
+        // one session.update is ever outstanding at a time here (see the class docstring above).
         var fallbackEventId = fallback!.Json.GetProperty("event_id").GetString();
         Assert.Equal(fallbackEventId, error.Json.GetProperty("error").GetProperty("event_id").GetString());
 
