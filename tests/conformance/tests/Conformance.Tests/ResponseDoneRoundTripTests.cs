@@ -37,7 +37,10 @@ public sealed class ResponseDoneRoundTripTests(ConformanceFixture fixture)
         Assert.True(roundTripToken is not null,
             $"extension.round_trip_token never reached the browser within {FrameTimeout}.");
 
-        var diagnostics = fixture.Backend!.DumpDiagnostics();
-        Assert.DoesNotContain("Traceback", diagnostics, StringComparison.Ordinal);
+        // The "backend logged no unhandled error during this scenario" invariant (PR #22 review
+        // item N5) -- this test's original raison d'être before the KeyError-shaped
+        // response.done regression was fixed -- is now a fixture-wide, language-neutral check
+        // applied by ConformanceFixture.RunAsync after every scenario, immune to which other
+        // scenario ran earlier against the same shared backend process.
     });
 }

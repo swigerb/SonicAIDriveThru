@@ -95,6 +95,17 @@ public class ConformanceFixture : IAsyncLifetime
             return;
         }
 
+        // Baseline captured BEFORE the scenario runs, not compared against zero: the backend
+        // process is shared across every test in this collection (starting a fresh Python
+        // process per test would make the suite too slow), so an earlier scenario's own
+        // deliberately-triggered backend error (e.g. a handshake-rejection or malformed-frame
+        // test) would otherwise permanently poison every later scenario's "zero errors" check
+        // with a stale, unrelated count. Comparing to a per-scenario baseline delta instead
+        // makes the invariant "this scenario introduced no new unhandled backend errors" --
+        // which is what review item N5 actually wants -- immune to run order (PR #22 review
+        // item N5).
+        var baselineUnhandledErrors = Backend?.UnhandledErrorCount() ?? 0;
+
         try
         {
             await body().ConfigureAwait(false);
@@ -102,6 +113,14 @@ public class ConformanceFixture : IAsyncLifetime
             // a bug in a built-in dispatch case) even when the scenario's own assertions all
             // happened to pass -- see FakeRealtimeUpstreamServer.AssertNoHandlerFaults (item N3).
             Realtime.AssertNoHandlerFaults();
+
+            // Language-neutral, fixture-wide equivalent of "backend logged no traceback" (item
+            // N5): a future C# backend under test reports the same zero-new-errors contract
+            // without ever producing a Python-shaped traceback string.
+            if (Backend is not null)
+            {
+                Assert.Equal(baselineUnhandledErrors, Backend.UnhandledErrorCount());
+            }
         }
         catch (Exception ex) when (Backend is not null)
         {

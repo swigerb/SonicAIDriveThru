@@ -81,7 +81,8 @@ public sealed class HappyHourPricingTests(FixedClockConformanceFixture fixture)
         const double expectedFinalTotal = price * 0.5 * 1.08;
         Assert.Equal(expectedFinalTotal, finalTotal, precision: 2);
 
-        var diagnostics = fixture.Backend!.DumpDiagnostics();
-        Assert.DoesNotContain("Traceback", diagnostics, StringComparison.Ordinal);
+        // The "backend logged no unhandled error during this scenario" invariant (PR #22 review
+        // item N5) is now a fixture-wide, language-neutral check applied by
+        // ConformanceFixture.RunAsync after every scenario -- no per-test assertion needed here.
     });
 }

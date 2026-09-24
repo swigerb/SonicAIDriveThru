@@ -80,6 +80,21 @@ public sealed class FakeRealtimeConnection
     /// future per-server-instance <see cref="TimeProvider"/> injection point is a one-line change.</summary>
     public TimeProvider TimeProvider { get; }
 
+    /// <summary>
+    /// When true, every `session.update` this connection accepts is still validated and merged
+    /// into <see cref="SessionState"/> as normal, but no `session.updated` acknowledgement is ever
+    /// sent back — simulates an upstream that never confirms session configuration, so a backend's
+    /// session-configured fallback timeout path can be exercised deterministically. Set once, at
+    /// connection-construction time (see <see cref="FakeRealtimeUpstreamServer.SuppressSessionUpdatedOnNextConnection"/>),
+    /// not toggled mid-connection — PR #22 review item N5 replaced the previous exact-count,
+    /// server-wide "suppress the next N session.updated replies across any connection" mechanism
+    /// with this per-connection switch: the old one required a test to know in advance exactly how
+    /// many session.update frames a whole connection's lifecycle would send (fragile — one wrong
+    /// guess either left a should-be-suppressed reply un-suppressed, or suppressed one more reply
+    /// than intended, on a completely unrelated later connection).
+    /// </summary>
+    public bool SuppressAllSessionUpdated { get; internal set; }
+
     private readonly SemaphoreSlim _sendLock = new(1, 1);
     private WebSocket? _socket;
 

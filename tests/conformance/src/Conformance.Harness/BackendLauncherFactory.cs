@@ -5,6 +5,7 @@ internal sealed class ExternalBackend(Uri baseUri) : IBackendUnderTest
 {
     public Uri BaseUri { get; } = baseUri;
     public string DumpDiagnostics() => "(external backend — no captured output)";
+    public int UnhandledErrorCount() => 0;
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 }
 

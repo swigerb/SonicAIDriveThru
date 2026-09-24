@@ -235,6 +235,8 @@ internal sealed class ProcessBackend(
 
     public string DumpDiagnostics() => output.Dump();
 
+    public int UnhandledErrorCount() => output.CountUnhandledErrors();
+
     public async ValueTask DisposeAsync()
     {
         if (processExitHandler is not null)

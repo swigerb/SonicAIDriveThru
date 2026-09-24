@@ -27,13 +27,12 @@ public sealed class GreetingTimeoutFallbackTests(ShortTimersConformanceFixture f
         // session.update frames are (1) its own bootstrap send and (2) the browser's
         // session.update forwarded upstream once SendStartSessionAsync below is called --
         // rtmt.py's session_configured event is set on *either* one's reply (see rtmt.py's
-        // "bootstrap session.updated arrives as soon as the socket opens" comment), so both
-        // must be suppressed or the second reply would set it before the fallback timeout ever
-        // has to fire. There's no race to win here — suppression is consumed synchronously by
-        // whichever session.update the fake processes next, and nothing else could reach the
-        // fake first.
-        fixture.Realtime.SuppressNextSessionUpdatedResponse();
-        fixture.Realtime.SuppressNextSessionUpdatedResponse();
+        // "bootstrap session.updated arrives as soon as the socket opens" comment), so both must
+        // be suppressed or the second reply would set it before the fallback timeout ever has to
+        // fire. A single per-connection switch (PR #22 review item N5) suppresses every
+        // session.updated for the whole connection about to be created -- no need to predict how
+        // many session.update frames this connection's lifecycle will actually send.
+        fixture.Realtime.SuppressSessionUpdatedOnNextConnection();
 
         var connectionTask = fixture.Realtime.WaitForNextConnectionAsync(FrameTimeout, ct);
         await using var browser = await RealtimeBrowserClient.ConnectAsync(fixture.Backend!.BaseUri, cancellationToken: ct);

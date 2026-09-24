@@ -40,35 +40,39 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
     }
 
     private readonly Lock _suppressionGate = new();
-    private int _pendingSessionUpdatedSuppressions;
+    private bool _suppressSessionUpdatedOnNextConnection;
 
     /// <summary>
-    /// Arms a one-shot suppression: the next `session.update` accepted on any connection is
-    /// validated and merged into that connection's effective session as normal, but no
-    /// `session.updated` response is sent back. FIFO across multiple calls, like
-    /// <see cref="RejectNextConnectionWith"/>. Used to exercise a backend's session-configured
-    /// fallback timeout (e.g. CONFORMANCE_GREETING_TIMEOUT_SECONDS) deterministically — armed
-    /// before the connection is even created, so there is no race with the connection's own
-    /// bootstrap `session.update` arriving first.
+    /// Arms a one-shot switch: the *next* connection accepted (not any connection already open)
+    /// will have <see cref="FakeRealtimeConnection.SuppressAllSessionUpdated"/> set from the
+    /// moment it's constructed, so every `session.update` it ever sends is validated/merged as
+    /// normal but never acknowledged. Replaces the previous server-wide, exact-count
+    /// <c>SuppressNextSessionUpdatedResponse</c> (PR #22 review item N5) — that required a test to
+    /// predict exactly how many `session.update` frames a whole connection's lifecycle would emit
+    /// (the bootstrap send plus the browser's forwarded one, in
+    /// <c>GreetingTimeoutFallbackTests</c>'s case) and call it that many times; a per-connection
+    /// switch instead suppresses *all* of them for one connection, with nothing left to predict.
+    /// Consumed by <see cref="HandleConnectionAsync"/> right when the connection is created (before
+    /// the socket is even accepted), like <see cref="RejectNextConnectionWith"/>.
     /// </summary>
-    public void SuppressNextSessionUpdatedResponse()
+    public void SuppressSessionUpdatedOnNextConnection()
     {
         lock (_suppressionGate)
         {
-            _pendingSessionUpdatedSuppressions++;
+            _suppressSessionUpdatedOnNextConnection = true;
         }
     }
 
-    private bool TryConsumeSessionUpdatedSuppression()
+    private bool ConsumeSessionUpdatedSuppressionForNewConnection()
     {
         lock (_suppressionGate)
         {
-            if (_pendingSessionUpdatedSuppressions > 0)
+            if (!_suppressSessionUpdatedOnNextConnection)
             {
-                _pendingSessionUpdatedSuppressions--;
-                return true;
+                return false;
             }
-            return false;
+            _suppressSessionUpdatedOnNextConnection = false;
+            return true;
         }
     }
 
@@ -207,6 +211,10 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
         var deployment = context.Request.Query["model"].ToString();
 
         var connection = _connections.Create(context.Request.Headers["api-key"], context.Request.Query["model"]);
+        if (ConsumeSessionUpdatedSuppressionForNewConnection())
+        {
+            connection.SuppressAllSessionUpdated = true;
+        }
         using var socket = await context.WebSockets.AcceptWebSocketAsync().ConfigureAwait(false);
         connection.AttachSocket(socket);
         // Only publish (making the connection visible to WaitForNextConnectionAsync) once the
@@ -388,7 +396,7 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
             ["session"] = effective,
         };
 
-        if (TryConsumeSessionUpdatedSuppression())
+        if (connection.SuppressAllSessionUpdated)
         {
             // Deliberately swallowed: the session state above is still merged/validated as
             // normal, we just never send the acknowledgement, simulating an upstream that never

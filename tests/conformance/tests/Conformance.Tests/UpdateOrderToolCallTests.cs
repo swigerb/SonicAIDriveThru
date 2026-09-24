@@ -72,7 +72,8 @@ public sealed class UpdateOrderToolCallTests(ConformanceFixture fixture)
         Assert.True(toolResponse is not null,
             $"Expected extension.middle_tier_tool_response for update_order on the browser within {FrameTimeout}.");
 
-        var diagnostics = fixture.Backend!.DumpDiagnostics();
-        Assert.DoesNotContain("Traceback", diagnostics, StringComparison.Ordinal);
+        // The "backend logged no unhandled error during this scenario" invariant (PR #22 review
+        // item N5) is now a fixture-wide, language-neutral check applied by
+        // ConformanceFixture.RunAsync after every scenario -- no per-test assertion needed here.
     });
 }
