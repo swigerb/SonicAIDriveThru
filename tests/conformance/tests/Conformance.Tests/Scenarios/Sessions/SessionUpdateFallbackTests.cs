@@ -59,6 +59,26 @@ public sealed class SessionUpdateFallbackTests(Gpt15ForcedReasoningConformanceFi
         Assert.False(fallbackSession.TryGetProperty("reasoning", out _), "Fallback must not repeat the rejected `reasoning` field.");
         Assert.False(fallbackSession.TryGetProperty("audio", out _), "Fallback must be minimal (no audio/voice).");
 
+        // PR #42 review item 4 (M2, "fallback sends tools: []", must fail here): "minimal" means
+        // the FIELD SET shrinks, not that the carhop's persona/tools do -- the fallback's tools,
+        // tool_choice and instructions must be the exact same content as the bootstrap's own
+        // (both come from the same process-wide RTMiddleTier.tools/system_message), not merely
+        // present-and-non-empty.
+        var bootstrapSession = bootstrap.Json.GetProperty("session");
+        var bootstrapToolNames = bootstrapSession.GetProperty("tools").EnumerateArray()
+            .Select(t => t.GetProperty("name").GetString()).OrderBy(n => n, StringComparer.Ordinal).ToArray();
+        var fallbackToolNames = fallbackSession.GetProperty("tools").EnumerateArray()
+            .Select(t => t.GetProperty("name").GetString()).OrderBy(n => n, StringComparer.Ordinal).ToArray();
+        Assert.NotEmpty(bootstrapToolNames);
+        Assert.Equal(bootstrapToolNames, fallbackToolNames);
+
+        Assert.Equal("auto", fallbackSession.GetProperty("tool_choice").GetString());
+        Assert.Equal(bootstrapSession.GetProperty("tool_choice").GetString(), fallbackSession.GetProperty("tool_choice").GetString());
+
+        var bootstrapInstructions = bootstrapSession.GetProperty("instructions").GetString();
+        Assert.False(string.IsNullOrWhiteSpace(bootstrapInstructions), "Precondition failed: bootstrap instructions must be non-empty.");
+        Assert.Equal(bootstrapInstructions, fallbackSession.GetProperty("instructions").GetString());
+
         // The rejection must never reach the browser as an `error` -- it's fully recovered
         // upstream, invisible to useRealtime.tsx.
         Assert.DoesNotContain(browser.ReceivedFrames.Snapshot(), f => f.Type == "error");
