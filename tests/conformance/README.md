@@ -194,6 +194,12 @@ shape of each individual frame.
      Only the close-code *shape* is a contract fact here — the exact idle *timing* is issue #10's
      concern, not this suite's. (`IdleCloseCodeTests`)
 
+   | Code | Reason string | Triggered by | Fixture |
+   |---|---|---|---|
+   | 1000 (`NormalClosure`) | `session_ended` | Browser sends `extension.end_session` | `CloseCodeTests` (Default) |
+   | 4000 | `idle_timeout` | No client frame at all before the idle sweep fires | `IdleCloseCodeTests` (`ShortTimersConformanceFixture`, so the wait is seconds not the production 15s default) |
+   | 4002 | `superseded` | Another socket resumes the same session while this one is still attached (not merely dropped) | `CloseCodeTests` (Default) |
+
 6. **The resume-vs-fresh-start decision is made on the connection's very first client frame only.**
    Only a connection's first frame may be an `extension.resume`; sending anything else first (e.g.
    `session.update`) commits that connection to a fresh session and forecloses resuming on it later,
