@@ -136,7 +136,9 @@ needed to exercise this policy).
 `status` is `"healthy"` (HTTP 200) once every startup check passes, or `"unhealthy"` (HTTP 503)
 otherwise. `PythonBackendLauncher.WaitForHealthAsync` polls this endpoint until it returns 200 (or
 the backend process exits early, in which case captured stdout/stderr is included in the
-failure).
+failure). `version` is a **semver-shaped** string (`\d+\.\d+\.\d+` with optional pre-release/build
+metadata) — the contract is the shape, not the Python backend's own literal value, which is an
+implementation detail with its own release cadence (PR #42 review item 11).
 
 ### Wire ordering the conformance scenarios depend on (issue #8)
 

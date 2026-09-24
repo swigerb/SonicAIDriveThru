@@ -6,9 +6,12 @@ namespace Conformance.Tests;
 
 /// <summary>
 /// #8: extends HealthEndpointTests.cs's `status` check with the rest of app/backend/app.py's
-/// `/health` shape — `version` (the fixed `_APP_VERSION`) and the `checks` breakdown
-/// (`prompts_loaded`/`config_loaded`/`env_vars`), all true/"healthy" for a correctly-launched
-/// conformance backend. A new file, not an edit to the existing one, per this stream's own scope.
+/// `/health` shape — `version` and the `checks` breakdown (`prompts_loaded`/`config_loaded`/
+/// `env_vars`), all true/"healthy" for a correctly-launched conformance backend. `version` is
+/// asserted as semver-*shaped* only (PR #42 review item 11) -- the Python backend's literal
+/// `_APP_VERSION` value ("1.0.0") is an implementation detail with its own release cadence, not a
+/// wire contract a C# backend must reproduce byte-for-byte. A new file, not an edit to the existing
+/// one, per this stream's own scope.
 /// </summary>
 [Collection(ConformanceCollection.Name)]
 public sealed class HealthEndpointExtendedTests(ConformanceFixture fixture)
@@ -24,7 +27,8 @@ public sealed class HealthEndpointExtendedTests(ConformanceFixture fixture)
             await response.Content.ReadAsStreamAsync(TestContext.Current.CancellationToken));
         var root = document.RootElement;
         Assert.Equal("healthy", root.GetProperty("status").GetString());
-        Assert.Equal("1.0.0", root.GetProperty("version").GetString());
+        var version = root.GetProperty("version").GetString();
+        Assert.Matches(@"^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$", version);
 
         var checks = root.GetProperty("checks");
         Assert.True(checks.GetProperty("prompts_loaded").GetBoolean());
