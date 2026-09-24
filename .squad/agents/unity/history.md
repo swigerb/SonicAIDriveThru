@@ -217,3 +217,10 @@ Since `app/frontend/` is off-limits, the middleware (`rtmt.py` + `audio_pipeline
   - Live probe: user-turn synthesis was verbatim 1/6 (the model answered the order); `response.instructions` 6/6.
   - Live smoke passed on `gpt-realtime-2.1` (0.98) and `gpt-realtime-2.1-dz` (1.00).
 - **dz:** `gpt-realtime-2.1-dz` pinned as a reasoning deployment (test + docs note).
+
+## 2026-09-24 — feat/conformance-s1-2 Stage S1.2 (#8)
+
+- Paired with Birdperson on the #8 conformance port in worktree `SonicAIDriveThru-wt-S1-2`, contributing the realtime-protocol/GA-shape judgment calls: confirmed the bootstrap `session.update`'s GA shape (`audio.input.transcription` rename, `voice`, `tool_choice=auto`) against my earlier live-probe notes, confirmed `deployment_supports_reasoning`'s name-based classification (2.1/2.1-dz reasoning-capable, 1.5 not — matches the rate-limit-recovery/reasoning-deployment probes from R3) so the new `Deployment` fixture override could vary it additively per-collection, and confirmed the voice-lock (`_strip_output_voice`) and reasoning-rejection-fallback semantics against `rtmt.py`'s actual GA session-update rules rather than assumption.
+- Flagged and helped root-cause the wire-order subtlety in `rtmt.py`'s `_process_message_to_client`: `extension.round_trip_token` is emitted before the caller relays `response.done`, so a scenario chaining sequence-bounds between the two must account for the token arriving first on the wire — this fixed a flaky assertion in the new `ResponseCancelRelayTests.cs`.
+- Reviewed all 16 mutation-test targets across the reasoning/voice-lock/session-update-fallback/close-code/barge-in scenarios for realtime-protocol plausibility (e.g. confirmed `_SessionUpdateGuard.correlate`'s order-based fallback path is only reachable because GA's 1.5 rejection omits `error.event_id` — a genuine wire quirk, not a test artifact) before Birdperson executed each isolated scratch-mutation test run.
+- Final state: `dotnet test tests/conformance` green 3x (109 passed/2 skipped/0 failed), `pytest app/backend/tests -q` 604 passed/61 subtests unchanged, `ruff check .` clean. 5 commits, each referencing #8.
