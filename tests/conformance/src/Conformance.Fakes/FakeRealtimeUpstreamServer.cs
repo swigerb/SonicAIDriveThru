@@ -344,8 +344,8 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
     private async Task RespondAsync(FakeRealtimeConnection connection, CancellationToken ct)
     {
         var state = connection.SessionState;
-        var script = connection.Script.QueuedResponses.Count > 0
-            ? connection.Script.QueuedResponses.Dequeue()
+        var script = connection.Script.QueuedResponses.TryDequeue(out var scripted)
+            ? scripted
             : ResponseScript.Default;
         var responseId = $"resp_{Guid.NewGuid():N}";
 

@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+
 namespace Conformance.Fakes;
 
 /// <summary>
@@ -6,6 +8,15 @@ namespace Conformance.Fakes;
 /// input buffer / creates a response, without needing a new fake per scenario. Lives on the
 /// connection (not the server) so each accepted socket gets a fresh, independent script — a
 /// previous test's queued responses or custom rules can never leak into the next connection.
+///
+/// Thread-safety (PR #22 review item N1): a test's own task and the connection's frame-dispatch
+/// loop (<see cref="FakeRealtimeUpstreamServer.HandleFrameAsync"/>, running off the non-blocking
+/// receive loop per item 8) can legitimately touch this object at the same time — e.g. a test
+/// arms a new <see cref="On"/> rule right after sending a frame that's still being dispatched.
+/// Before this, <c>Rules</c> was a plain unsynchronized <see cref="List{T}"/> and
+/// <c>QueuedResponses</c> a plain unsynchronized <see cref="Queue{T}"/>; a concurrent
+/// add/clear during enumeration could throw "Collection was modified" (or silently corrupt
+/// FIFO order) with no test ever exercising that path before now.
 /// </summary>
 public sealed class RealtimeScript
 {
@@ -16,10 +27,15 @@ public sealed class RealtimeScript
     /// </summary>
     public bool AutoRespond { get; set; } = true;
 
-    /// <summary>Scripts consumed in FIFO order, one per `response.create` seen from the backend.</summary>
-    public Queue<ResponseScript> QueuedResponses { get; } = new();
+    /// <summary>Scripts consumed in FIFO order, one per `response.create` seen from the backend.
+    /// A <see cref="ConcurrentQueue{T}"/> so a test enqueueing a scripted response from one task
+    /// never races <see cref="FakeRealtimeUpstreamServer"/>'s own dequeue in RespondAsync.</summary>
+    public ConcurrentQueue<ResponseScript> QueuedResponses { get; } = new();
 
     public void Enqueue(ResponseScript script) => QueuedResponses.Enqueue(script);
+
+    private readonly Lock _rulesGate = new();
+    private readonly List<RealtimeScriptRule> _rules = [];
 
     /// <summary>
     /// Rule-based triggers: every received frame is checked against every rule in registration
@@ -27,12 +43,44 @@ public sealed class RealtimeScript
     /// loop, but serialized against other sends via <see cref="FakeRealtimeConnection.SendAsync"/>'s
     /// send lock). Two VAD-like defaults are pre-registered by <see cref="WithVadDefaults"/> so
     /// most scenarios never need to touch this directly; tests that want different (or no) VAD
-    /// behaviour can call <c>Rules.Clear()</c> and add their own.
+    /// behaviour can call <see cref="ClearRules"/> and add their own.
+    ///
+    /// Reading this property takes a defensive snapshot under <see cref="_rulesGate"/> — the same
+    /// lock <see cref="On"/> and <see cref="ClearRules"/> mutate under — so
+    /// <c>FakeRealtimeUpstreamServer.HandleFrameAsync</c>'s <c>foreach (var rule in
+    /// connection.Script.Rules)</c> always enumerates a stable copy, never the live list, no
+    /// matter what else is mutating it concurrently.
     /// </summary>
-    public List<RealtimeScriptRule> Rules { get; } = [];
+    public IReadOnlyList<RealtimeScriptRule> Rules
+    {
+        get
+        {
+            lock (_rulesGate)
+            {
+                return _rules.ToArray();
+            }
+        }
+    }
 
-    public void On(Func<RecordedFrame, bool> predicate, Func<FakeRealtimeConnection, RecordedFrame, CancellationToken, Task> handler) =>
-        Rules.Add(new RealtimeScriptRule(predicate, handler));
+    public void On(Func<RecordedFrame, bool> predicate, Func<FakeRealtimeConnection, RecordedFrame, CancellationToken, Task> handler)
+    {
+        lock (_rulesGate)
+        {
+            _rules.Add(new RealtimeScriptRule(predicate, handler));
+        }
+    }
+
+    /// <summary>Removes every currently-registered rule (e.g. to opt out of the VAD-like
+    /// defaults). Thread-safe, same as <see cref="On"/> — replaces the old
+    /// <c>Rules.Clear()</c> call pattern now that <see cref="Rules"/> returns a read-only
+    /// snapshot rather than the live, mutable list.</summary>
+    public void ClearRules()
+    {
+        lock (_rulesGate)
+        {
+            _rules.Clear();
+        }
+    }
 
     /// <summary>
     /// A fresh <see cref="RealtimeScript"/> with the two VAD-like default rules PR #22 review

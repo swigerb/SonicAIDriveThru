@@ -164,7 +164,7 @@ public sealed class FakeRealtimeScriptingModelTests
             var connectionA = await connectionTaskA;
             Assert.NotNull(connectionA);
             connectionA!.Script.Enqueue(ResponseScript.Failed("connection A only"));
-            connectionA.Script.Rules.Clear();
+            connectionA.Script.ClearRules();
             await ReceiveJsonWithTimeoutAsync(socketA, TestContext.Current.CancellationToken); // session.created
             await socketA.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
         }
@@ -202,6 +202,70 @@ public sealed class FakeRealtimeScriptingModelTests
         Assert.Equal("completed", done!.Value.GetProperty("response").GetProperty("status").GetString());
 
         await socketB.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
+    }
+
+    // --- PR #22 review item N1: RealtimeScript.Rules thread-safety. -----------------------------
+
+    [Fact]
+    public async Task Rules_can_be_mutated_safely_while_a_concurrent_enumeration_is_in_progress()
+    {
+        // Direct, minimal repro against RealtimeScript alone -- no Kestrel/socket needed: one task
+        // hammers On()/ClearRules() (exactly what a test does mid-scenario, and what
+        // FakeRealtimeConnection's constructor plus WithVadDefaults() already do) while another
+        // enumerates Rules (exactly what FakeRealtimeUpstreamServer.HandleFrameAsync's
+        // `foreach (var rule in connection.Script.Rules)` does for every received frame). Before
+        // PR #22 review item N1, Rules was a plain List<> with no synchronization at all --
+        // running this same loop against the old implementation throws
+        // System.InvalidOperationException: "Collection was modified; enumeration operation may
+        // not execute." within the first few iterations, essentially every run. Reverting
+        // RealtimeScript.Rules to `return _rules;` (instead of `_rules.ToArray()`) reproduces
+        // that failure; this test is the mutation check for PR #22 review item N1.
+        var script = RealtimeScript.WithVadDefaults();
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        cts.CancelAfter(TimeSpan.FromSeconds(2));
+
+        Task WriterLoopAsync() => Task.Run(() =>
+        {
+            var i = 0;
+            while (!cts.IsCancellationRequested)
+            {
+                if (i++ % 2 == 0)
+                {
+                    script.On(_ => false, (_, _, _) => Task.CompletedTask);
+                }
+                else
+                {
+                    script.ClearRules();
+                }
+            }
+        });
+
+        Task ReaderLoopAsync() => Task.Run(() =>
+        {
+            var dummyFrame = MakeDummyFrame();
+            while (!cts.IsCancellationRequested)
+            {
+                foreach (var rule in script.Rules)
+                {
+                    _ = rule.Predicate(dummyFrame);
+                }
+            }
+        });
+
+        // Several of each so a single unlucky thread schedule isn't the only chance to hit the
+        // race — this is what makes the mutation check reliable (near-100%) rather than flaky.
+        var writers = Enumerable.Range(0, 4).Select(_ => WriterLoopAsync()).ToArray();
+        var readers = Enumerable.Range(0, 4).Select(_ => ReaderLoopAsync()).ToArray();
+
+        // Task.WhenAll rethrows the first captured exception -- an InvalidOperationException from
+        // any reader/writer task here is exactly the pre-fix failure mode this test targets.
+        await Task.WhenAll(writers.Concat(readers));
+    }
+
+    private static RecordedFrame MakeDummyFrame()
+    {
+        var json = JsonDocument.Parse("""{"type":"input_audio_buffer.append","audio":"dGVzdA=="}""").RootElement;
+        return new FrameLog().Add(json);
     }
 
     // --- PR #22 review item 9: validation fidelity, re-derived from the official GA reference
