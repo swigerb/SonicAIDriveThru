@@ -171,9 +171,13 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
 
         var deployment = context.Request.Query["model"].ToString();
 
-        var connection = _connections.Add(context.Request.Headers["api-key"], context.Request.Query["model"]);
+        var connection = _connections.Create(context.Request.Headers["api-key"], context.Request.Query["model"]);
         using var socket = await context.WebSockets.AcceptWebSocketAsync().ConfigureAwait(false);
         connection.AttachSocket(socket);
+        // Only publish (making the connection visible to WaitForNextConnectionAsync) once the
+        // socket is attached -- otherwise a test racing the handshake could observe the
+        // connection and call SendAsync on it before there's anything to send on (item N2).
+        _connections.Publish(connection);
         var ct = context.RequestAborted;
 
         // Frame handling runs off the receive loop (non-blocking receive loop, item 8) so a

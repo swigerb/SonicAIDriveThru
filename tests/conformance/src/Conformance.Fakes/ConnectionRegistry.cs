@@ -18,12 +18,23 @@ internal sealed class ConnectionRegistry
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
-    public FakeRealtimeConnection Add(string? apiKeyHeader, string? modelQueryParam)
-    {
-        var connection = new FakeRealtimeConnection(apiKeyHeader, modelQueryParam, _timeProvider);
-        Signal(() => _connections.Add(connection));
-        return connection;
-    }
+    /// <summary>
+    /// Constructs a new connection but does not yet publish it — <see cref="WaitForNextAsync"/>
+    /// callers will not see it until <see cref="Publish"/> is called. Split into two steps (PR
+    /// #22 review item N2) so <see cref="FakeRealtimeUpstreamServer"/> can accept the socket and
+    /// call <see cref="FakeRealtimeConnection.AttachSocket"/> *before* any test-visible waiter can
+    /// observe the connection and try to use it — publishing first (the old behaviour) let a
+    /// test's own `await WaitForNextConnectionAsync()` return a connection whose socket wasn't
+    /// attached yet, so an immediate `SendAsync` on it would silently do nothing.
+    /// </summary>
+    public FakeRealtimeConnection Create(string? apiKeyHeader, string? modelQueryParam) =>
+        new(apiKeyHeader, modelQueryParam, _timeProvider);
+
+    /// <summary>Publishes a connection created by <see cref="Create"/> — from this point on it is
+    /// visible to <see cref="WaitForNextAsync"/> and counted by <see cref="OpenCount"/>. Callers
+    /// must only publish a connection whose socket is already attached (see
+    /// <see cref="FakeRealtimeConnection.AttachSocket"/>).</summary>
+    public void Publish(FakeRealtimeConnection connection) => Signal(() => _connections.Add(connection));
 
     public void NotifyClosed(FakeRealtimeConnection connection) => Signal(connection.MarkClosed);
 
@@ -40,8 +51,12 @@ internal sealed class ConnectionRegistry
     }
 
     /// <summary>
-    /// Waits for the next connection accepted after this call is made (not one already open when
-    /// called), returning it as soon as its socket handshake completes. Returns null on timeout.
+    /// Waits for the next connection published (via <see cref="Publish"/>) after this call is
+    /// made (not one already published when called). By the time this returns a non-null
+    /// connection, its socket is guaranteed already attached and open — <see cref="Publish"/> is
+    /// only ever called after <see cref="FakeRealtimeConnection.AttachSocket"/> — so callers can
+    /// immediately call <see cref="FakeRealtimeConnection.SendAsync"/> on it with no race. Returns
+    /// null on timeout.
     /// </summary>
     public async Task<FakeRealtimeConnection?> WaitForNextAsync(TimeSpan timeout, CancellationToken cancellationToken = default)
     {

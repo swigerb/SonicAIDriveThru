@@ -56,10 +56,12 @@ public sealed class FakeRealtimeConnection
 
     /// <summary>
     /// Attaches the accepted socket once the WebSocket upgrade handshake completes. Connections
-    /// are registered (and visible to <see cref="ConnectionRegistry.WaitForNextAsync"/>) *before*
-    /// the handshake finishes accepting, so this is a separate step rather than a constructor
-    /// parameter — see <see cref="FakeRealtimeUpstreamServer"/>'s connection handler for why that
-    /// ordering matters (a test's own <c>ConnectAsync</c> can otherwise race the registration).
+    /// are constructed via <see cref="ConnectionRegistry.Create"/> but not published (visible to
+    /// <see cref="ConnectionRegistry.WaitForNextAsync"/>) until *after* this runs — see
+    /// <see cref="ConnectionRegistry.Publish"/> and <see cref="FakeRealtimeUpstreamServer"/>'s
+    /// connection handler for why that ordering matters (a test's own immediate
+    /// <c>SendAsync</c> after <c>WaitForNextConnectionAsync</c> would otherwise race the socket
+    /// attach and throw or silently no-op).
     /// </summary>
     internal void AttachSocket(WebSocket socket) => _socket = socket;
 
@@ -70,15 +72,35 @@ public sealed class FakeRealtimeConnection
     /// handler/response stream can legitimately want to write to the same socket at once — this
     /// serializes them behind a send lock instead of corrupting the wire.
     /// </summary>
+    /// <exception cref="InvalidOperationException">
+    /// The socket hasn't been attached yet (this connection was returned by
+    /// <see cref="ConnectionRegistry.WaitForNextAsync"/> before <see cref="AttachSocket"/> ran —
+    /// no longer possible since PR #22 review item N2, but kept as a defensive throw rather than a
+    /// silent no-op), or it is no longer in the <see cref="WebSocketState.Open"/> state (already
+    /// closing/closed). Silently swallowing a send here used to hide real bugs — a handler racing
+    /// a closed connection would just look like "no response ever arrived" instead of a clear
+    /// failure pointing at the actual cause.
+    /// </exception>
     public async Task SendAsync(object payload, CancellationToken cancellationToken = default)
     {
         await _sendLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            if (_socket is not { State: WebSocketState.Open })
+            if (_socket is null)
             {
-                return;
+                throw new InvalidOperationException(
+                    $"FakeRealtimeConnection {Id}: cannot send — the socket has not been attached yet " +
+                    "(AttachSocket hasn't run). This connection should not have been observable yet; " +
+                    "see ConnectionRegistry.Publish.");
             }
+
+            if (_socket.State != WebSocketState.Open)
+            {
+                throw new InvalidOperationException(
+                    $"FakeRealtimeConnection {Id}: cannot send — the socket is in state " +
+                    $"'{_socket.State}', not Open. The connection is already closing or closed.");
+            }
+
             await WebSocketJson.SendAsync(_socket, payload, cancellationToken).ConfigureAwait(false);
         }
         finally

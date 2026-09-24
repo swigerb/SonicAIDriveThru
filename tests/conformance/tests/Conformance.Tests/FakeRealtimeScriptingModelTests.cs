@@ -204,6 +204,73 @@ public sealed class FakeRealtimeScriptingModelTests
         await socketB.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
     }
 
+    // --- PR #22 review item N2: publish only after AttachSocket. ---------------------------------
+
+    [Fact]
+    public async Task Awaited_connection_can_be_sent_on_immediately_with_no_race_100_times()
+    {
+        // Before item N2, ConnectionRegistry.Add published the connection (making it visible to
+        // WaitForNextConnectionAsync) *before* AttachSocket ran, so a waiter that raced ahead of
+        // the client's own ConnectAsync completing (this test deliberately does NOT await the
+        // client-side handshake before awaiting the connection, to genuinely exercise that race)
+        // could observe a connection whose socket wasn't attached yet, and SendAsync used to
+        // silently no-op instead of throwing. Looping 100 times gives a real race a good chance to
+        // show up if the publish/attach ordering regresses.
+        await using var fake = new FakeRealtimeUpstreamServer();
+        await fake.StartAsync(TestContext.Current.CancellationToken);
+        var wsUri = new Uri($"ws://{fake.BaseUri.Host}:{fake.BaseUri.Port}/openai/v1/realtime?model=gpt-realtime-test");
+
+        for (var i = 0; i < 100; i++)
+        {
+            using var socket = new ClientWebSocket();
+            var connectionTask = fake.WaitForNextConnectionAsync(FrameTimeout, TestContext.Current.CancellationToken);
+            var connectTask = socket.ConnectAsync(wsUri, TestContext.Current.CancellationToken); // deliberately not awaited yet
+
+            var connection = await connectionTask;
+            Assert.NotNull(connection);
+
+            var unsolicited = new JsonObject { ["type"] = "test.unsolicited", ["iteration"] = i };
+            await connection!.SendAsync(unsolicited, TestContext.Current.CancellationToken);
+
+            await connectTask;
+
+            // The handler's own session.created and our unsolicited send both go through the same
+            // send lock -- either can win the race to be frame #1, so check both frames without
+            // assuming an order.
+            var frame1 = await ReceiveJsonWithTimeoutAsync(socket, TestContext.Current.CancellationToken);
+            var frame2 = await ReceiveJsonWithTimeoutAsync(socket, TestContext.Current.CancellationToken);
+            Assert.NotNull(frame1);
+            Assert.NotNull(frame2);
+            var types = new[] { frame1!.Value.GetProperty("type").GetString(), frame2!.Value.GetProperty("type").GetString() };
+            Assert.Contains("session.created", types);
+            Assert.Contains("test.unsolicited", types);
+
+            await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
+        }
+    }
+
+    [Fact]
+    public async Task SendAsync_throws_a_clear_message_once_the_socket_is_no_longer_open()
+    {
+        await using var fake = new FakeRealtimeUpstreamServer();
+        await fake.StartAsync(TestContext.Current.CancellationToken);
+        var wsUri = new Uri($"ws://{fake.BaseUri.Host}:{fake.BaseUri.Port}/openai/v1/realtime?model=gpt-realtime-test");
+
+        using var socket = new ClientWebSocket();
+        var connectionTask = fake.WaitForNextConnectionAsync(FrameTimeout, TestContext.Current.CancellationToken);
+        await socket.ConnectAsync(wsUri, TestContext.Current.CancellationToken);
+        var connection = await connectionTask;
+        Assert.NotNull(connection);
+        Assert.NotNull(await ReceiveJsonWithTimeoutAsync(socket, TestContext.Current.CancellationToken)); // session.created
+
+        await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
+        await fake.WaitForNoOpenConnectionsAsync(FrameTimeout, TestContext.Current.CancellationToken);
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => connection!.SendAsync(new JsonObject { ["type"] = "test.after_close" }, TestContext.Current.CancellationToken));
+        Assert.Contains("not Open", ex.Message);
+    }
+
     // --- PR #22 review item N1: RealtimeScript.Rules thread-safety. -----------------------------
 
     [Fact]
