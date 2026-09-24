@@ -98,6 +98,10 @@ public class ConformanceFixture : IAsyncLifetime
         try
         {
             await body().ConfigureAwait(false);
+            // Surfaces any handler fault recorded during the scenario (a throwing script rule, or
+            // a bug in a built-in dispatch case) even when the scenario's own assertions all
+            // happened to pass -- see FakeRealtimeUpstreamServer.AssertNoHandlerFaults (item N3).
+            Realtime.AssertNoHandlerFaults();
         }
         catch (Exception ex) when (Backend is not null)
         {

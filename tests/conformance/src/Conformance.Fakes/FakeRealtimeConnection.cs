@@ -28,6 +28,42 @@ public sealed class FakeRealtimeConnection
     /// <summary>True once the connection's socket loop has exited (client closed, or the server tore it down).</summary>
     public bool IsClosed { get; private set; }
 
+    private readonly List<Exception> _handlerFaults = [];
+    private readonly Lock _handlerFaultsGate = new();
+
+    /// <summary>
+    /// Records an exception thrown by a frame handler (a built-in dispatch case or a
+    /// <see cref="RealtimeScript"/> rule) running off the non-blocking receive loop. These used to
+    /// be silently lost — nothing awaited the per-frame handler task until the connection closed,
+    /// and even then only the first exception from <c>Task.WhenAll</c> would surface, deep inside
+    /// Kestrel's request pipeline where no test would ever see it (PR #22 review item N3).
+    /// </summary>
+    internal void RecordHandlerFault(Exception exception)
+    {
+        lock (_handlerFaultsGate)
+        {
+            _handlerFaults.Add(exception);
+        }
+    }
+
+    /// <summary>Snapshot of every handler fault recorded so far and clears them — see
+    /// <see cref="FakeRealtimeUpstreamServer.AssertNoHandlerFaults"/>, which drains this once per
+    /// scenario so a fault from one test can never silently fail (or silently pass) another.</summary>
+    internal IReadOnlyList<Exception> DrainHandlerFaults()
+    {
+        lock (_handlerFaultsGate)
+        {
+            if (_handlerFaults.Count == 0)
+            {
+                return [];
+            }
+
+            var drained = _handlerFaults.ToArray();
+            _handlerFaults.Clear();
+            return drained;
+        }
+    }
+
     /// <summary>
     /// Mutated by tests to control what this connection does automatically (queued
     /// `response.create` replies, rule-based triggers for other client frames). Starts fresh with

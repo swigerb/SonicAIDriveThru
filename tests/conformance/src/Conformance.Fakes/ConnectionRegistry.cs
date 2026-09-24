@@ -50,6 +50,17 @@ internal sealed class ConnectionRegistry
         }
     }
 
+    /// <summary>Defensive snapshot of every connection ever accepted (open or closed), oldest
+    /// first — used by <see cref="FakeRealtimeUpstreamServer.AssertNoHandlerFaults"/> (PR #22
+    /// review item N3) to collect faults recorded across every connection a scenario touched.</summary>
+    public IReadOnlyList<FakeRealtimeConnection> Snapshot()
+    {
+        lock (_gate)
+        {
+            return [.. _connections];
+        }
+    }
+
     /// <summary>
     /// Waits for the next connection published (via <see cref="Publish"/>) after this call is
     /// made (not one already published when called). By the time this returns a non-null

@@ -1,4 +1,5 @@
 using System.Net.WebSockets;
+using System.Runtime.ExceptionServices;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.Builder;
@@ -106,6 +107,40 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
     public Task<bool> WaitForNoOpenConnectionsAsync(TimeSpan timeout, CancellationToken cancellationToken = default) =>
         _connections.WaitForNoneOpenAsync(timeout, cancellationToken);
 
+    /// <summary>
+    /// Drains and asserts there are no recorded handler faults across every connection this server
+    /// has ever accepted. A scripted rule (or a built-in dispatch case) throwing used to be
+    /// silently lost — nothing surfaced it to the test that scripted it, so a scenario would just
+    /// look like "no response ever arrived" and fail (or worse, hang) with no hint at the real
+    /// cause. Tests call this once at the end of a scenario (via <see cref="ConformanceFixture.RunAsync"/>)
+    /// so a throwing rule's exception is surfaced directly instead (PR #22 review item N3).
+    /// Draining (not just reading) means a fault from one scenario can never leak into failing —
+    /// or silently disappearing from — a later one sharing the same fixture.
+    /// </summary>
+    /// <exception cref="Exception">The single recorded fault, rethrown with its original stack
+    /// trace preserved, if exactly one connection faulted exactly once.</exception>
+    /// <exception cref="AggregateException">Every recorded fault, if more than one was recorded.</exception>
+    public void AssertNoHandlerFaults()
+    {
+        List<Exception> faults = [];
+        foreach (var connection in _connections.Snapshot())
+        {
+            faults.AddRange(connection.DrainHandlerFaults());
+        }
+
+        switch (faults.Count)
+        {
+            case 0:
+                return;
+            case 1:
+                ExceptionDispatchInfo.Capture(faults[0]).Throw();
+                break;
+            default:
+                throw new AggregateException(
+                    $"{faults.Count} handler faults were recorded across this scenario's connections.", faults);
+        }
+    }
+
     public async Task StartAsync(CancellationToken cancellationToken = default, int? fixedPort = null)
     {
         var builder = WebApplication.CreateBuilder();
@@ -190,12 +225,31 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
         var outstanding = new List<Task>();
         var outstandingGate = new Lock();
 
+        // Observes (rather than lets propagate) any exception thrown by a per-frame handler task
+        // -- these run off the receive loop with nothing else awaiting them until the connection
+        // closes, so an unhandled fault used to either vanish entirely or surface once, deep
+        // inside Task.WhenAll below, in a place no test could see it. Recording it on the
+        // connection instead lets AssertNoHandlerFaults surface it clearly at the end of a
+        // scenario (PR #22 review item N3).
+        async Task ObserveHandlerFaultsAsync(Task handlerTask)
+        {
+            try
+            {
+                await handlerTask.ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                connection.RecordHandlerFault(ex);
+            }
+        }
+
         void TrackHandler(Task task)
         {
+            var observed = ObserveHandlerFaultsAsync(task);
             lock (outstandingGate)
             {
                 outstanding.RemoveAll(t => t.IsCompleted);
-                outstanding.Add(task);
+                outstanding.Add(observed);
             }
         }
 

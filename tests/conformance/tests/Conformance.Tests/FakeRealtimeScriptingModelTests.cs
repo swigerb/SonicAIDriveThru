@@ -271,6 +271,70 @@ public sealed class FakeRealtimeScriptingModelTests
         Assert.Contains("not Open", ex.Message);
     }
 
+    // --- PR #22 review item N3: handler faults are recorded, not lost. ---------------------------
+
+    [Fact]
+    public async Task A_throwing_rule_handler_is_surfaced_by_AssertNoHandlerFaults()
+    {
+        await using var fake = new FakeRealtimeUpstreamServer();
+        await fake.StartAsync(TestContext.Current.CancellationToken);
+        var wsUri = new Uri($"ws://{fake.BaseUri.Host}:{fake.BaseUri.Port}/openai/v1/realtime?model=gpt-realtime-test");
+
+        using var socket = new ClientWebSocket();
+        var connectionTask = fake.WaitForNextConnectionAsync(FrameTimeout, TestContext.Current.CancellationToken);
+        await socket.ConnectAsync(wsUri, TestContext.Current.CancellationToken);
+        var connection = await connectionTask;
+        Assert.NotNull(connection);
+        Assert.NotNull(await ReceiveJsonWithTimeoutAsync(socket, TestContext.Current.CancellationToken)); // session.created
+
+        // Before item N3, nothing awaited this handler's task until the connection closed, and even
+        // then only the first Task.WhenAll exception would propagate -- deep inside Kestrel's
+        // request pipeline, never visible to this test. AssertNoHandlerFaults must surface it here
+        // instead, with the exact exception (message intact), even though the scenario itself never
+        // asserted anything about the response and would otherwise have looked like it passed.
+        connection!.Script.ClearRules();
+        connection.Script.On(
+            frame => frame.Type == "conversation.item.create",
+            (_, _, _) => throw new InvalidOperationException("boom from a scripted rule"));
+
+        await WebSocketJson.SendAsync(socket, new JsonObject
+        {
+            ["type"] = "conversation.item.create",
+            ["item"] = new JsonObject { ["type"] = "message", ["role"] = "user", ["content"] = new JsonArray() },
+        }, TestContext.Current.CancellationToken);
+
+        // The handler runs off the receive loop -- fire-and-forget relative to this test -- so
+        // poll (bounded by FrameTimeout, no fixed sleep) rather than assume it has already
+        // recorded the fault by the time we ask. AssertNoHandlerFaults is idempotent to call while
+        // empty (it just returns), so retrying it is safe.
+        InvalidOperationException? recorded = null;
+        var deadline = DateTime.UtcNow + FrameTimeout;
+        while (recorded is null && DateTime.UtcNow < deadline)
+        {
+            try
+            {
+                fake.AssertNoHandlerFaults();
+            }
+            catch (InvalidOperationException ex)
+            {
+                recorded = ex;
+            }
+
+            if (recorded is null)
+            {
+                await Task.Delay(10, TestContext.Current.CancellationToken);
+            }
+        }
+
+        Assert.NotNull(recorded);
+        Assert.Equal("boom from a scripted rule", recorded!.Message);
+
+        // Draining must actually clear the fault -- calling again must not re-throw the same one.
+        fake.AssertNoHandlerFaults();
+
+        await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
+    }
+
     // --- PR #22 review item N1: RealtimeScript.Rules thread-safety. -----------------------------
 
     [Fact]
