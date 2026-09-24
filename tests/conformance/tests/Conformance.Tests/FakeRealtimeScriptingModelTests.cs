@@ -83,6 +83,79 @@ public sealed class FakeRealtimeScriptingModelTests
         await accepted.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
     }
 
+    // --- PR #22 review item N9: the one-shot switches (RejectNextConnectionWith,
+    // SuppressSessionUpdatedOnNextConnection) are consumed by the *next* connection accepted --
+    // whichever scenario triggers it. AssertNoPendingOneShotSwitches lets a fixture catch, at the
+    // start of every scenario, a switch a *previous* scenario armed and then never actually
+    // consumed (instead of that switch silently misfiring against this scenario's own connection).
+
+    [Fact]
+    public async Task AssertNoPendingOneShotSwitches_does_not_throw_when_nothing_is_armed()
+    {
+        await using var fake = new FakeRealtimeUpstreamServer();
+        await fake.StartAsync(TestContext.Current.CancellationToken);
+
+        fake.AssertNoPendingOneShotSwitches();
+    }
+
+    [Fact]
+    public async Task AssertNoPendingOneShotSwitches_throws_when_a_queued_rejection_was_never_consumed()
+    {
+        await using var fake = new FakeRealtimeUpstreamServer();
+        await fake.StartAsync(TestContext.Current.CancellationToken);
+
+        fake.RejectNextConnectionWith(401);
+
+        var ex = Assert.Throws<InvalidOperationException>(fake.AssertNoPendingOneShotSwitches);
+        Assert.Contains("RejectNextConnectionWith", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AssertNoPendingOneShotSwitches_throws_when_a_suppression_arm_was_never_consumed()
+    {
+        await using var fake = new FakeRealtimeUpstreamServer();
+        await fake.StartAsync(TestContext.Current.CancellationToken);
+
+        fake.SuppressSessionUpdatedOnNextConnection();
+
+        var ex = Assert.Throws<InvalidOperationException>(fake.AssertNoPendingOneShotSwitches);
+        Assert.Contains("SuppressSessionUpdatedOnNextConnection", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AssertNoPendingOneShotSwitches_does_not_throw_once_a_connection_consumed_the_rejection()
+    {
+        await using var fake = new FakeRealtimeUpstreamServer();
+        await fake.StartAsync(TestContext.Current.CancellationToken);
+
+        fake.RejectNextConnectionWith(401);
+        var wsUri = new Uri($"ws://{fake.BaseUri.Host}:{fake.BaseUri.Port}/openai/v1/realtime?model=gpt-realtime-test");
+        using (var rejected = new ClientWebSocket())
+        {
+            await Assert.ThrowsAsync<WebSocketException>(
+                () => rejected.ConnectAsync(wsUri, TestContext.Current.CancellationToken));
+        }
+
+        fake.AssertNoPendingOneShotSwitches();
+    }
+
+    [Fact]
+    public async Task AssertNoPendingOneShotSwitches_does_not_throw_once_a_connection_consumed_the_suppression()
+    {
+        await using var fake = new FakeRealtimeUpstreamServer();
+        await fake.StartAsync(TestContext.Current.CancellationToken);
+
+        fake.SuppressSessionUpdatedOnNextConnection();
+        using var socket = new ClientWebSocket();
+        var wsUri = new Uri($"ws://{fake.BaseUri.Host}:{fake.BaseUri.Port}/openai/v1/realtime?model=gpt-realtime-test");
+        await socket.ConnectAsync(wsUri, TestContext.Current.CancellationToken);
+        Assert.NotNull(await ReceiveJsonWithTimeoutAsync(socket, TestContext.Current.CancellationToken)); // session.created
+
+        fake.AssertNoPendingOneShotSwitches();
+
+        await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
+    }
+
     [Fact]
     public async Task Input_audio_buffer_append_triggers_the_default_vad_like_acknowledgement_sequence()
     {

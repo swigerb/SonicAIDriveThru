@@ -108,6 +108,13 @@ public class ConformanceFixture : IAsyncLifetime
             return;
         }
 
+        // Asserted BEFORE the scenario runs, not after: a leaked RejectNextConnectionWith or
+        // SuppressSessionUpdatedOnNextConnection from a *previous* scenario would otherwise
+        // misfire against *this* scenario's own connection attempt, and the resulting failure
+        // would point at this scenario's assertions instead of the real, earlier cause (PR #22
+        // review item N9). See FakeRealtimeUpstreamServer.AssertNoPendingOneShotSwitches.
+        Realtime.AssertNoPendingOneShotSwitches();
+
         // Baseline captured BEFORE the scenario runs, not compared against zero: the backend
         // process is shared across every test in this collection (starting a fresh Python
         // process per test would make the suite too slow), so an earlier scenario's own

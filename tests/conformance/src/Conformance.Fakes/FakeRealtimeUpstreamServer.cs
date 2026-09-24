@@ -76,6 +76,56 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Asserts neither one-shot switch (<see cref="RejectNextConnectionWith"/>,
+    /// <see cref="SuppressSessionUpdatedOnNextConnection"/>) is still armed. Both switches are
+    /// consumed by the *next* connection accepted, whichever test happens to trigger it — so a
+    /// scenario that arms one and then never actually opens a new connection (an assertion
+    /// failing before the connect, a copy-paste mistake, an early return) would otherwise leave
+    /// it armed to silently misfire against a completely unrelated later scenario's connection,
+    /// which is a confusing, hard-to-diagnose failure far from its real cause (PR #22 review item
+    /// N9). Tests call this once at the very start of a scenario (via
+    /// <see cref="Conformance.Tests.ConformanceFixture.RunAsync"/>, before the scenario body
+    /// runs) rather than making the switches individually <see cref="IDisposable"/>: both switches
+    /// are consumed automatically by ordinary connection traffic in the overwhelming majority of
+    /// scenarios that use them, so a disposable wrapper would mostly just be extra ceremony around
+    /// a case (a switch surviving to the very next scenario) that should never legitimately happen
+    /// -- catching it here, loudly, as a leaked-precondition failure, is simpler and enough.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">A previous scenario armed a one-shot switch
+    /// that was never consumed by a subsequent connection attempt.</exception>
+    public void AssertNoPendingOneShotSwitches()
+    {
+        int pendingRejections;
+        lock (_rejectionGate)
+        {
+            pendingRejections = _pendingHandshakeRejections.Count;
+        }
+        if (pendingRejections > 0)
+        {
+            throw new InvalidOperationException(
+                $"{pendingRejections} pending RejectNextConnectionWith(...) call(s) were never " +
+                "consumed by a connection attempt in the scenario that armed them -- a previous " +
+                "scenario likely called RejectNextConnectionWith but never actually attempted a " +
+                "new connection afterwards, leaving it armed to silently reject an unrelated " +
+                "later scenario's handshake instead.");
+        }
+
+        bool suppressionArmed;
+        lock (_suppressionGate)
+        {
+            suppressionArmed = _suppressSessionUpdatedOnNextConnection;
+        }
+        if (suppressionArmed)
+        {
+            throw new InvalidOperationException(
+                "A pending SuppressSessionUpdatedOnNextConnection() call was never consumed by a " +
+                "connection attempt in the scenario that armed it -- a previous scenario likely " +
+                "called it but never actually opened a new connection afterwards, leaving it " +
+                "armed to silently suppress an unrelated later scenario's session.updated frames.");
+        }
+    }
+
     /// <summary>Number of accepted upstream connections whose socket loop hasn't exited yet.</summary>
     public int OpenConnectionCount => _connections.OpenCount;
 
