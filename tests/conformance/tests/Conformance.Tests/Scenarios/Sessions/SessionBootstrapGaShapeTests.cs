@@ -39,13 +39,10 @@ public sealed class SessionBootstrapGaShapeTests(ConformanceFixture fixture)
         Assert.False(string.IsNullOrWhiteSpace(session.GetProperty("instructions").GetString()));
 
         var audio = session.GetProperty("audio");
-        // Presence, not a pinned value -- self.voice_choice on rtmt.py's RTMiddleTier is a single
-        // process-wide attribute shared by every connection in this test run (see
-        // extension.set_voice handling at rtmt.py ~1252, which updates it unconditionally even
-        // when the update itself is deferred), so comparing against BackendContract.DefaultVoice
-        // here would be order-dependent on whichever test last picked a voice.
-        Assert.False(string.IsNullOrWhiteSpace(audio.GetProperty("output").GetProperty("voice").GetString()),
-            "Expected session.audio.output.voice to be present on the bootstrap.");
+        // Pinned to the exact default -- this collection's backend process never runs
+        // extension.set_voice (see VoicePickerConformanceFixture's docs: that scenario now runs
+        // on its own dedicated collection/backend process specifically so this pin stays valid).
+        Assert.Equal(BackendContract.DefaultVoice, audio.GetProperty("output").GetProperty("voice").GetString());
 
         var input = audio.GetProperty("input");
         Assert.True(input.TryGetProperty("turn_detection", out _), "Expected session.audio.input.turn_detection on the bootstrap.");
