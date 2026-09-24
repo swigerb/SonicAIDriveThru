@@ -33,12 +33,18 @@ are **not** -- a scripted rate-limit hint still clamps into the *production*
 bounds even when hooks are enabled. See ``rate_limit.py``'s module docstring.
 
 Startup validation: if hooks are enabled and ``CONFORMANCE_FIXED_NOW`` is set
-but malformed (missing a UTC offset/zone, or not a parseable ISO-8601/RFC 3339
-timestamp), this module raises **immediately at import time** -- not lazily
-the first time some downstream code happens to call ``now()`` -- so a bad
-harness configuration fails the backend's startup with a clear message
-instead of surfacing as a confusing failure deep inside unrelated
-business-logic code much later in a test run.
+but malformed (missing an explicit numeric UTC offset, or not a parseable
+ISO-8601/RFC 3339 timestamp), this module raises **immediately at import
+time** -- not lazily the first time some downstream code happens to call
+``now()`` -- so a bad harness configuration fails the backend's startup with
+a clear message instead of surfacing as a confusing failure deep inside
+unrelated business-logic code much later in a test run. ``seconds()`` is
+equally fail-fast for its own override: an enabled, non-empty override that
+isn't a positive finite number raises ``ValueError`` at the call site, which
+every consumer evaluates at its own module import time (see
+``session_manager.py``, ``rate_limit.py``, ``rtmt.py``), so a bad
+``CONFORMANCE_*_SECONDS`` value also fails backend startup rather than
+silently falling back to the production default for an entire test run.
 
 NEVER set CONFORMANCE_TEST_HOOKS in infra/ (bicep), the Dockerfile, or
 azure.yaml. It must only ever be set by the conformance harness's own
@@ -50,6 +56,7 @@ those files for the literal string and fails the build if it ever appears.
 from __future__ import annotations
 
 import logging
+import math
 import os
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -72,15 +79,20 @@ HOOKS_ENABLED = os.environ.get(_ENABLED_ENV, "").strip() == "1"
 def _parse_fixed_now(raw: str) -> datetime:
     """Parse ``CONFORMANCE_FIXED_NOW``, raising a clear error if it's naive.
 
-    RFC 3339 with an explicit UTC offset or IANA zone (e.g.
-    ``"2026-07-04T15:30:00-05:00"``) is required so the fixed instant is
-    unambiguous regardless of the store timezone under test.
+    RFC 3339 with an explicit numeric UTC offset (e.g.
+    ``"2026-07-04T15:30:00-05:00"``, or a trailing ``Z`` for UTC) is required
+    so the fixed instant is unambiguous regardless of the store timezone
+    under test. Note this is a numeric offset only -- ``datetime.fromisoformat``
+    does **not** accept a trailing IANA zone name (e.g. ``"... America/Chicago"``
+    raises ``ValueError``), so despite this module and issue #7 sometimes
+    describing the format loosely as "ISO-8601 plus IANA zone", an IANA zone
+    *name* is never a valid value for this env var -- only a numeric offset is.
     """
     fixed = datetime.fromisoformat(raw)
     if fixed.tzinfo is None:
         raise ValueError(
-            f"{_FIXED_NOW_ENV} must be an RFC 3339 timestamp with an explicit UTC offset or "
-            f"zone (e.g. '2026-07-04T15:30:00-05:00'), got: {raw!r}"
+            f"{_FIXED_NOW_ENV} must be an RFC 3339 timestamp with an explicit numeric UTC "
+            f"offset (e.g. '2026-07-04T15:30:00-05:00' or '...Z'), got: {raw!r}"
         )
     return fixed
 
@@ -128,16 +140,32 @@ def seconds(env_var: str, default: float) -> float:
     """Return a timer override read from ``env_var``, or ``default`` unchanged.
 
     The override only applies when test hooks are enabled AND ``env_var`` is
-    set to a value that parses as a float; any other case (hooks disabled,
-    the var unset, or an unparseable value) returns ``default`` untouched.
-    See the module docstring: this affects timer durations only, never what
-    ``now()`` returns.
+    set to a non-empty value; in that case the value must parse as a finite,
+    strictly-positive float or this raises ``ValueError`` immediately -- it
+    does **not** silently fall back to ``default``. Since every call site
+    assigns the result to a module-level constant at its own import time
+    (see ``session_manager.py``, ``rate_limit.py``, ``rtmt.py``), an invalid
+    override fails the backend's startup with a clear, non-zero-exit error
+    instead of quietly using a wrong-but-plausible timer value for an entire
+    test run. Hooks disabled, or the var unset/empty, returns ``default``
+    untouched -- neither of those is a misconfiguration. See the module
+    docstring: this affects timer durations only, never what ``now()``
+    returns.
     """
     if HOOKS_ENABLED:
         raw = os.environ.get(env_var)
         if raw:
             try:
-                return float(raw)
-            except ValueError:
-                pass
+                value = float(raw)
+            except ValueError as exc:
+                raise ValueError(
+                    f"{env_var} must be a positive, finite number of seconds "
+                    f"(test hooks are enabled), got unparseable value: {raw!r}"
+                ) from exc
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(
+                    f"{env_var} must be a positive, finite number of seconds "
+                    f"(test hooks are enabled), got: {raw!r}"
+                )
+            return value
     return default

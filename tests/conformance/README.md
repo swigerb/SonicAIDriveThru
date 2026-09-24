@@ -73,13 +73,20 @@ developer's local `.env`; every value below is authoritative for the launched pr
 | `AZURE_SEARCH_USE_VECTOR_QUERY` | `true` | Backend includes a `vectorQueries[]` array in the search request body when set. |
 | `AZURE_SEARCH_SEMANTIC_RANKER` | `standard` | Backend includes `queryType: "semantic"` plus the semantic configuration when set. |
 | `STORE_TIMEZONE` | `America/Chicago` (default; overridable per contract) | Drives happy-hour and time-based pricing logic together with a fixed clock (`BackendProfiles.FixedClock`). |
-| `RUNNING_IN_PRODUCTION` | `true` | Prevents `load_dotenv()` from loading a developer's local `.env` over these values. |
-| `LOG_LEVEL` | `INFO` | Consistent backend log verbosity across every launch. |
-| `PYTHONUNBUFFERED` | `1` | Ensures `CapturedProcessOutput` sees stdout/stderr promptly instead of buffered, so failure diagnostics are complete. |
-| `PYTHONUTF8` | `1` | Deterministic encoding regardless of the launching machine's default. |
-| `APP_SESSION_SECRET` | random 256-bit hex, generated fresh per launch | Only this one process ever needs to validate tokens it issued itself. |
-| `RATE_LIMIT_RECOVERY_ENABLED` | `true` | Matches production behaviour for the rate-limit-with-hints scenarios. |
+| `RUNNING_IN_PRODUCTION` | `true` | Prevents `load_dotenv()` from loading a developer's local `.env` over these values. Named after a Python-specific mechanism (`load_dotenv()`), but the *need* — never silently pick up ambient local config — is neutral: any backend under test would need an equivalent "run exactly as configured, nothing ambient" switch. |
+| `LOG_LEVEL` | `INFO` | Consistent backend log verbosity across every launch; a neutral need, not Python-specific. |
+| `APP_SESSION_SECRET` | random 256-bit hex, generated fresh per launch | Only this one process ever needs to validate tokens it issued itself; a neutral need (any backend issuing its own session tokens needs a secret), even though the concrete var name here is this backend's own. |
+| `RATE_LIMIT_RECOVERY_ENABLED` | `true` | Matches production behaviour for the rate-limit-with-hints scenarios; a neutral need, not Python-specific. |
+| `PYTHONUNBUFFERED` | `1` | Ensures `CapturedProcessOutput` sees stdout/stderr promptly instead of buffered, so failure diagnostics are complete. **Python-specific** (a CPython interpreter env var). |
+| `PYTHONUTF8` | `1` | Deterministic encoding regardless of the launching machine's default. **Python-specific** (a CPython interpreter env var). |
 | `CONFORMANCE_TEST_HOOKS` and its overrides (`CONFORMANCE_FIXED_NOW`, timer overrides, etc) | set only by `BackendProfiles.ShortTimers` / `.FixedClock(instant)` | See "Test hooks" below — **never** set for the default profile, so most scenarios exercise real production timing. |
+
+PR #22 review item N8: as of this pass, only `PYTHONUNBUFFERED`/`PYTHONUTF8` are genuinely
+Python-specific (CPython's own interpreter env vars) — `RUNNING_IN_PRODUCTION`, `LOG_LEVEL`,
+`APP_SESSION_SECRET`, and `RATE_LIMIT_RECOVERY_ENABLED` were reclassified into the neutral group in
+`BackendEnvironment.Build` (their *names* happen to come from this backend's own config surface,
+but the underlying *need* — production-like startup, an explicit log level, a session secret, and
+rate-limit recovery enabled — applies to any backend under test, not just this one).
 
 ### Environment stripping (PR #22 review item 13)
 
@@ -168,6 +175,51 @@ as a hard requirement, not just the graceful `IAsyncDisposable.DisposeAsync` pat
   --blame-crash-dump-type mini` so a hang or crash produces a diagnostic dump in `TestResults`
   (already uploaded as an artifact on failure) well before the job-level timeout would otherwise
   kill it with no diagnostics at all.
+
+## Test hooks (`app/backend/conformance_hooks.py`)
+
+Everything in this section is gated behind `CONFORMANCE_TEST_HOOKS=1` and is a complete no-op
+without it — the inertness itself is proven by `test_conformance_hooks.py::TestInertWhenUnset`,
+mutation-checked (see that file's module docstring). **Never** set `CONFORMANCE_TEST_HOOKS` in
+`infra/` (bicep), the `Dockerfile`, or `azure.yaml` — guarded by
+`test_conformance_hooks.py::TestNeverInInfraOrDockerfile`, which fails the build if the literal
+string `CONFORMANCE_` ever appears in any of those files. It is only ever set by the conformance
+harness's own child-process environment (`BackendProfiles.ShortTimers` / `.FixedClock(instant)` →
+`PythonBackendOptions.ExtraEnvironment` → `BackendEnvironment.Build`).
+
+Two independent mechanisms:
+
+- **The frozen clock** (`CONFORMANCE_FIXED_NOW`) freezes *business wall-clock logic only* — today
+  the sole consumer is `order_state.py`'s happy-hour / time-based pricing lookup. It has no effect
+  on any timer duration (idle timeout, resume grace, etc). The frozen instant **does not advance**
+  — every call to `now(tz)` while hooks are enabled and the var is set returns the exact same
+  instant, converted into whichever `tz` the caller asked for.
+- **Timer overrides** (`seconds(env_var, default)`) replace the *duration* fed into
+  `asyncio.sleep`/deadline arithmetic for a specific timer. They have no effect on what `now()`
+  returns.
+
+| Variable | Units / format | Allowed range | Consumer | Failure behaviour |
+|---|---|---|---|---|
+| `CONFORMANCE_TEST_HOOKS` | literal string `"1"` to enable | only the exact string `"1"` counts as enabled — `"true"`/`"yes"`/`"TRUE"`/anything else leaves hooks **disabled** | `conformance_hooks.HOOKS_ENABLED`, read once at process import time | N/A — any other value is silently treated as disabled, never an error. |
+| `CONFORMANCE_FIXED_NOW` | RFC 3339 timestamp with an explicit **numeric** UTC offset (e.g. `2026-07-04T15:30:00-05:00`, or a trailing `Z` for UTC) | any parseable, offset-aware instant; optional (timer-only profiles like `ShortTimers` leave it unset) | `order_state.py`'s happy-hour / time-based pricing via `conformance_hooks.now(tz)` | **Fails fast at import time** (raises `ValueError`, non-zero backend startup) if hooks are enabled and the value is missing its offset or isn't parseable at all — never silently ignored. This module (and issue #7's original task description) sometimes describes the format loosely as "ISO-8601 plus IANA zone" — that phrasing is imprecise: `datetime.fromisoformat` does **not** accept a trailing IANA zone *name* (e.g. `... America/Chicago`), only a numeric offset. Use a numeric offset always. |
+| `CONFORMANCE_IDLE_TIMEOUT_SECONDS` | seconds, float | positive, finite | `session_manager.py`'s idle-disconnect timer | **Fails fast** (raises `ValueError` at the module's own import time, non-zero backend startup) if hooks are enabled and the value is present but unparseable, NaN, +/-infinity, zero, or negative. Absent/empty falls back to the production default (300s) without error. |
+| `CONFORMANCE_GRACE_SECONDS` | seconds, float | positive, finite | `session_manager.py`'s resume grace-hold window | Same fail-fast rule as above (production default 120s). |
+| `CONFORMANCE_NUDGE_AFTER_SECONDS` | seconds, float | positive, finite | `session_manager.py`'s resume "nudge" timer | Same fail-fast rule as above (production default 30s). |
+| `CONFORMANCE_FIRST_FRAME_TIMEOUT_SECONDS` | seconds, float | positive, finite | `session_manager.py`'s post-resume first-frame timeout | Same fail-fast rule as above (production default 2.0s). |
+| `CONFORMANCE_SWEEP_INTERVAL_SECONDS` | seconds, float | positive, finite | `session_manager.py`'s idle/grace sweep loop interval | Same fail-fast rule as above (production default 15s). Added for `BackendProfiles.ShortTimers` (PR #22 review item N4) — without it, a resume-sweep scenario would still wait up to 15s per sweep even under `ShortTimers`. |
+| `CONFORMANCE_GREETING_TIMEOUT_SECONDS` | seconds, float | positive, finite | `rtmt.py`'s greeting-fallback timeout | Same fail-fast rule as above (production default 5.0s). |
+| `CONFORMANCE_RATE_LIMIT_RETRY_DELAY_SECONDS` | seconds, float | positive, finite | `rate_limit.py`'s first retry delay default | Same fail-fast rule as above (production default 1.5s). See the caveat below: only the *default* is overridable, not the clamp bounds. |
+| `CONFORMANCE_RATE_LIMIT_SECOND_RETRY_DELAY_SECONDS` | seconds, float | positive, finite | `rate_limit.py`'s second retry delay default | Same fail-fast rule as above. Same clamp-bound caveat. |
+
+**Hint clamping caveat** (documented in `rate_limit.py`'s own module docstring, cross-referenced
+here per PR #22 review item N8): the *default* delay fed into `retry_delay()` is overridable via
+`seconds()` as above, but the clamp bounds (`FIRST_RETRY_BOUNDS` / `SECOND_RETRY_BOUNDS`) applied to
+a scripted rate-limit hint are **not** overridable — a scripted hint still clamps into the
+*production* bounds even when hooks are enabled and the retry-delay defaults are shortened.
+
+**Startup warning**: whenever hooks are enabled, the backend logs one `WARNING`-level line
+containing `CONFORMANCE_TEST_HOOKS` at process startup (`conformance_hooks._validate_at_startup`),
+so a stray enabled-hooks backend is loud in its own logs rather than silently behaving oddly.
 
 ## GA validation fidelity — live-probe evidence
 

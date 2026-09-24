@@ -120,8 +120,12 @@ jobs:
   # Part of issue #7 (S1.1) / #11 (S1.5): the shared black-box conformance
   # suite, against every backend it can currently run. S2 adds "dotnet" to the
   # matrix once the .NET backend (tracked separately from this test suite)
-  # exists -- CONFORMANCE_BACKEND=dotnet already skips cleanly today so
-  # adding it early is harmless, but there is nothing to conform against yet.
+  # exists. Adding it to this matrix early would NOT be harmless today:
+  # CONFORMANCE_BACKEND=dotnet FAILS the suite by default in CI (PR #22 review
+  # item 15 -- DotnetPlaceholderPolicy/CiEnvironment.IsCi always ignore the
+  # CONFORMANCE_ALLOW_SKIP=1 opt-in when GITHUB_ACTIONS=true), precisely so CI
+  # can never silently report green with zero real backend coverage. Only add
+  # "dotnet" here once S2 lands.
   conformance:
     name: Conformance suite (backend=${{ matrix.backend }})
     runs-on: ubuntu-latest

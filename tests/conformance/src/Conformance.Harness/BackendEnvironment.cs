@@ -32,7 +32,14 @@ public static class BackendEnvironment
     {
         var env = new Dictionary<string, string>(StringComparer.Ordinal)
         {
-            // ── Neutral BackendContract: any backend implementation needs these. ──
+            // ── Neutral BackendContract: any backend implementation needs these. PR #22 review
+            // item N8 moved RUNNING_IN_PRODUCTION / LOG_LEVEL / APP_SESSION_SECRET /
+            // RATE_LIMIT_RECOVERY_ENABLED into this group — none of their *names* are
+            // Python-specific (unlike PYTHONUNBUFFERED/PYTHONUTF8 below), and a future .NET
+            // backend under test would equally need "run as if production" behaviour, an
+            // explicit log level, its own session-token secret, and rate-limit recovery enabled
+            // to match the scenarios this suite drives; only the concrete launcher wiring for a
+            // different language would differ, not whether these are needed at all. ──
             ["HOST"] = BackendContract.Host,
             ["PORT"] = contract.Port.ToString(),
 
@@ -54,17 +61,18 @@ public static class BackendEnvironment
             ["AZURE_SEARCH_USE_VECTOR_QUERY"] = BackendContract.SearchUseVectorQuery ? "true" : "false",
             ["AZURE_SEARCH_SEMANTIC_RANKER"] = BackendContract.SearchSemanticRanker,
             ["STORE_TIMEZONE"] = contract.StoreTimeZone,
-
-            // ── Python-launcher-specific extras: quirks of this particular process, not part
-            // of the neutral contract a future .NET launcher would also need to satisfy. ──
             ["RUNNING_IN_PRODUCTION"] = "true",
             ["LOG_LEVEL"] = "INFO",
-            ["PYTHONUNBUFFERED"] = "1",
-            ["PYTHONUTF8"] = "1",
             // Single-process HMAC secret; random per launch is fine since only this process
             // ever needs to validate tokens it issued itself.
             ["APP_SESSION_SECRET"] = RandomSecret(),
             ["RATE_LIMIT_RECOVERY_ENABLED"] = "true",
+
+            // ── Python-launcher-specific extras: quirks of this particular process (the
+            // CPython interpreter's own env vars), not part of the neutral contract a future
+            // .NET launcher would also need to satisfy. ──
+            ["PYTHONUNBUFFERED"] = "1",
+            ["PYTHONUTF8"] = "1",
         };
 
         foreach (var (key, value) in options.ExtraEnvironment)

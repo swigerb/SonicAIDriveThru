@@ -153,10 +153,6 @@ class TestActiveWhenSet:
         _enable(monkeypatch, CONFORMANCE_IDLE_TIMEOUT_SECONDS="3")
         assert conformance_hooks.seconds("CONFORMANCE_IDLE_TIMEOUT_SECONDS", 300) == 3.0
 
-    def test_seconds_falls_back_on_unparseable_override(self, monkeypatch):
-        _enable(monkeypatch, CONFORMANCE_IDLE_TIMEOUT_SECONDS="not-a-number")
-        assert conformance_hooks.seconds("CONFORMANCE_IDLE_TIMEOUT_SECONDS", 300) == 300
-
     def test_seconds_falls_back_when_override_unset(self, monkeypatch):
         _enable(monkeypatch)
         assert conformance_hooks.seconds("CONFORMANCE_IDLE_TIMEOUT_SECONDS", 300) == 300
@@ -199,6 +195,56 @@ class TestStartupValidationFailsFast:
         with caplog.at_level(logging.WARNING, logger="sonic-drive-in"):
             _enable(monkeypatch)
         assert any("CONFORMANCE_TEST_HOOKS" in record.getMessage() for record in caplog.records)
+
+
+class TestSecondsFailsFastOnInvalidOverride:
+    """PR #22 review item N8: seconds() must reject an enabled, non-empty,
+    but invalid override (unparseable, NaN, +/-inf, zero, or negative) by
+    raising ValueError at the call site, rather than silently falling back
+    to `default` -- every call site assigns the result to a module-level
+    constant at its own import time, so this raise becomes a fail-fast,
+    non-zero-exit backend startup failure instead of a silently-wrong timer
+    value for an entire test run.
+
+    Mutation-checked: revert `seconds()` to swallow ValueError / skip the
+    isfinite/positivity check (i.e. restore the old catch-and-fall-back
+    behaviour) and every test in this class must fail.
+    """
+
+    def test_unparseable_override_raises(self, monkeypatch):
+        _enable(monkeypatch, CONFORMANCE_IDLE_TIMEOUT_SECONDS="not-a-number")
+        with pytest.raises(ValueError, match="CONFORMANCE_IDLE_TIMEOUT_SECONDS"):
+            conformance_hooks.seconds("CONFORMANCE_IDLE_TIMEOUT_SECONDS", 300)
+
+    @pytest.mark.parametrize("raw", ["nan", "NaN", "inf", "-inf", "Infinity"])
+    def test_non_finite_override_raises(self, monkeypatch, raw):
+        _enable(monkeypatch, CONFORMANCE_IDLE_TIMEOUT_SECONDS=raw)
+        with pytest.raises(ValueError, match="CONFORMANCE_IDLE_TIMEOUT_SECONDS"):
+            conformance_hooks.seconds("CONFORMANCE_IDLE_TIMEOUT_SECONDS", 300)
+
+    @pytest.mark.parametrize("raw", ["0", "0.0", "-1", "-0.5"])
+    def test_non_positive_override_raises(self, monkeypatch, raw):
+        _enable(monkeypatch, CONFORMANCE_IDLE_TIMEOUT_SECONDS=raw)
+        with pytest.raises(ValueError, match="CONFORMANCE_IDLE_TIMEOUT_SECONDS"):
+            conformance_hooks.seconds("CONFORMANCE_IDLE_TIMEOUT_SECONDS", 300)
+
+    def test_valid_positive_override_does_not_raise(self, monkeypatch):
+        _enable(monkeypatch, CONFORMANCE_IDLE_TIMEOUT_SECONDS="0.001")
+        assert conformance_hooks.seconds("CONFORMANCE_IDLE_TIMEOUT_SECONDS", 300) == 0.001
+
+    def test_unset_override_does_not_raise(self, monkeypatch):
+        # Absence is not a misconfiguration -- only a present-but-invalid
+        # value should raise.
+        _enable(monkeypatch)
+        assert conformance_hooks.seconds("CONFORMANCE_IDLE_TIMEOUT_SECONDS", 300) == 300
+
+    def test_invalid_override_does_not_raise_when_hooks_disabled(self, monkeypatch):
+        # Symmetric with test_seconds_ignores_override_when_disabled above:
+        # an invalid value in an unused env var is never a startup concern
+        # when hooks are off in the first place.
+        monkeypatch.setenv("CONFORMANCE_IDLE_TIMEOUT_SECONDS", "not-a-number")
+        importlib.reload(conformance_hooks)  # must not raise
+        assert conformance_hooks.seconds("CONFORMANCE_IDLE_TIMEOUT_SECONDS", 300) == 300
 
 
 class TestHappyHourIntegration:
