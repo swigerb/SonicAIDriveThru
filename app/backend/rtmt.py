@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import time
+import urllib.parse
 import uuid
 from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable
@@ -55,11 +56,13 @@ from config_loader import get_config
 from order_state import order_state_singleton
 from rate_limit import RateLimitRecovery, RateLimitSettings, is_rate_limit_error
 from session_manager import (
+    MIDDLE_TIER_ITEM_ID_PREFIX,
     SESSION_ENDED_CLOSE_CODE,
     SESSION_ENDED_CLOSE_REASON,
     SUPERSEDED_CLOSE_CODE,
     SUPERSEDED_CLOSE_REASON,
     SessionManager,
+    new_middle_tier_item_id,
     resume_id_fingerprint,
 )
 
@@ -107,6 +110,65 @@ def validate_hmac_token(token: str, secret: bytes) -> bool:
         return payload.get("exp", 0) > time.time()
     except Exception:
         return False
+
+
+# ── Origin validation utilities ──
+
+def _origin_matches_host(origin: str, host: str) -> bool:
+    """True iff the `Origin` header's host (and port, if non-default) is an
+    *exact* match for the request's `Host` header.
+
+    Replaces a previous `origin.endswith(host)` check (#25), which accepted
+    any origin whose netloc merely ended with `host` as a *string suffix* --
+    e.g. `https://evil-legituser.example.com` passes
+    `"evil-legituser.example.com".endswith("legituser.example.com")`, letting
+    a lookalike domain the attacker actually controls pass origin validation
+    for a site named `legituser.example.com`. `urllib.parse.urlsplit` gives
+    us the real `scheme://host[:port]` authority component of the Origin
+    header (never a suffix match), which we compare case-insensitively
+    against the literal `Host` header value -- the same shape browsers send
+    for same-origin requests (no path, and no port for the scheme's default
+    port), so a genuine same-origin request is unaffected.
+
+    An empty `host` (a missing/blank `Host` header) can never be a legitimate
+    match -- without it #25's fix degenerates to `urlsplit(origin).netloc ==
+    ""`, which a bare/schemeless Origin value like the literal string "null"
+    satisfies (PR #30 review, "S4"). Reject outright instead.
+    """
+    if not host:
+        return False
+    return urllib.parse.urlsplit(origin).netloc.lower() == host.lower()
+
+
+# ── Conversation item authorship/wire-format filtering ──
+
+def _drop_from_client(item: dict) -> bool:
+    """True if a `conversation.item.*` event's item must never reach the
+    browser, across every subtype GA can send it on (`.created`, `.added`,
+    `.done`, `.retrieved`):
+
+    - `function_call` / `function_call_output` -- the model's raw tool
+      invocation and its result. The browser gets `extension.middle_tier_tool_response`
+      instead (see `response.output_item.done`); it must never see the raw item.
+    - Anything the middle tier itself authored (the greeting, resume
+      rehydration, silence nudge, or a tool's `function_call_output`) --
+      identified primarily by its `sonic_mt_`-prefixed item id (authorship;
+      swigerb/SonicAIDriveThru#29, PR #30 review "S1"), with the legacy
+      `role == "system"` check kept as a second guard for any middle-tier
+      item that predates the id convention.
+
+    GA emits `.done` "when the item is finalized" with the *full* item
+    (swigerb/SonicAIDriveThru#29 follow-up, PR #30 review "M1") -- carrying
+    exactly the same leak surface as `.created`/`.added` if left unfiltered,
+    so this same check must run for every subtype, not just the first two.
+    """
+    item_type = item.get("type")
+    if item_type in ("function_call", "function_call_output"):
+        return True
+    item_id = item.get("id")
+    if isinstance(item_id, str) and item_id.startswith(MIDDLE_TIER_ITEM_ID_PREFIX):
+        return True
+    return item.get("role") == "system"
 
 
 class ToolResultDirection(Enum):
@@ -665,6 +727,46 @@ class RTMiddleTier:
             self._token_refresh_task.cancel()
         self._sessions.stop_idle_checker()
 
+    def _scrub_session_for_client(self, session: dict) -> None:
+        """Strip the system prompt, tool schemas and other server-internal
+        fields from a `session` object before it is relayed to the browser.
+
+        Every GA server event that echoes the full session object -- currently
+        `session.created` (on connect) and `session.updated` (after every
+        accepted session.update: our own bootstrap one, the voice picker, the
+        browser's own handshake, a rejection fallback...) -- must route
+        through this one helper so both events are scrubbed identically. If
+        we ever allow client-side tools, this will need updating.
+        """
+        session["instructions"] = ""
+        session["tools"] = []
+        # Set voice in both legacy and GA locations for client compatibility
+        session["voice"] = self.voice_choice
+        audio = session.setdefault("audio", {})
+        audio.setdefault("output", {})["voice"] = self.voice_choice
+        session["tool_choice"] = "none"
+        session["max_response_output_tokens"] = None
+        # `max_response_output_tokens` above is the legacy field name; GA
+        # echoes the same cap back under `max_output_tokens`, which the line
+        # above never touches. Drop it rather than null it out, since the
+        # browser has no case for either session event and reads neither key.
+        session.pop("max_output_tokens", None)
+        # `model` is our Azure deployment name (internal infra detail, not a
+        # secret the browser has any use for); `reasoning`/`parallel_tool_calls`
+        # are server-owned tuning knobs for reasoning-capable deployments
+        # (see `_build_session`) that reveal which model family is deployed.
+        session.pop("model", None)
+        session.pop("reasoning", None)
+        session.pop("parallel_tool_calls", None)
+        # `audio.input.transcription.model` names the transcription deployment
+        # (see `transcription_model` / `_build_session`) -- same class of leak
+        # as `model` above, just nested under the GA audio shape.
+        audio_input = audio.get("input")
+        if isinstance(audio_input, dict):
+            transcription = audio_input.get("transcription")
+            if isinstance(transcription, dict):
+                transcription.pop("model", None)
+
     async def _process_message_to_client(self, msg: str, client_ws: web.WebSocketResponse, server_ws: web.WebSocketResponse, tools_pending: dict[str, RTToolCall], verbose: bool = False, guard: "_SessionUpdateGuard | None" = None, on_session_created: Callable[[], Awaitable[None]] | None = None, recovery: RateLimitRecovery | None = None) -> str | None:
         data = msg.data
 
@@ -732,16 +834,7 @@ class RTMiddleTier:
                 case "session.created":
                     session = message["session"]
                     _vlog(verbose, "  Session ID: %s", session.get("id", "?"))
-                    # Hide the instructions, tools and max tokens from clients, if we ever allow client-side 
-                    # tools, this will need updating
-                    session["instructions"] = ""
-                    session["tools"] = []
-                    # Set voice in both legacy and GA locations for client compatibility
-                    session["voice"] = self.voice_choice
-                    audio = session.setdefault("audio", {})
-                    audio.setdefault("output", {})["voice"] = self.voice_choice
-                    session["tool_choice"] = "none"
-                    session["max_response_output_tokens"] = None
+                    self._scrub_session_for_client(session)
                     updated_message = json.dumps(message)
                     if on_session_created is not None:
                         # The forwarder announces the session (metadata or resume)
@@ -757,6 +850,16 @@ class RTMiddleTier:
                               identifiers.session_token,
                               identifiers.round_trip_index,
                               identifiers.round_trip_token)
+
+                case "session.updated":
+                    # Same leak surface as session.created: this event fires
+                    # after every accepted session.update (ours or the
+                    # browser's) and echoes the full session object right
+                    # back -- instructions/tools/max-tokens included.
+                    session = message.get("session")
+                    if session is not None:
+                        self._scrub_session_for_client(session)
+                        updated_message = json.dumps(message)
 
                 case "response.created":
                     if recovery is not None:
@@ -784,11 +887,31 @@ class RTMiddleTier:
                         tools_pending[item["call_id"]] = RTToolCall(item["call_id"], message.get("previous_item_id", ""))
                         _vlog(verbose, "  Tool pending confirmed: call_id=%s, prev=%s", item["call_id"], message.get("previous_item_id", ""))
                         updated_message = None
-                    elif "item" in message and message["item"]["type"] == "function_call_output":
+                    elif "item" in message and _drop_from_client(message["item"]):
+                        # Covers function_call_output (tool result) and any
+                        # middle-tier-authored item (rehydration/nudge/tool
+                        # echo, by id prefix; role="system" as a backstop) --
+                        # see _drop_from_client.
+                        _vlog(verbose, "  Server-authored/tool item suppressed from client (id=%s)", message["item"].get("id", "?"))
                         updated_message = None
                     elif "item" in message and message["item"].get("role") == "assistant":
                         # Log AI conversation items (non-tool)
                         _vlog(verbose, "  AI conversation item created")
+
+                case "conversation.item.done" | "conversation.item.retrieved":
+                    # GA emits `.done` "when the item is finalized" (and
+                    # `.retrieved` in reply to a conversation.item.retrieve)
+                    # with the *full* item -- the same leak surface as
+                    # `.created`/`.added` above, so the same filter must run
+                    # here too (swigerb/SonicAIDriveThru#29 follow-up, PR #30
+                    # review "M1"). Unlike `.created`/`.added`, function_call
+                    # items don't need tools_pending registered again here --
+                    # that already happened on the earlier `.created`/`.added`
+                    # (or the response.output_item.added fallback).
+                    if "item" in message and _drop_from_client(message["item"]):
+                        _vlog(verbose, "  Server-authored/tool item suppressed from client (%s, id=%s)",
+                              msg_type, message["item"].get("id", "?"))
+                        updated_message = None
 
                 case "response.function_call_arguments.delta":
                     updated_message = None
@@ -844,6 +967,7 @@ class RTMiddleTier:
                                 await server_ws.send_json({
                                     "type": "conversation.item.create",
                                     "item": {
+                                        "id": new_middle_tier_item_id(),
                                         "type": "function_call_output",
                                         "call_id": item["call_id"],
                                         "output": result.to_text() if result.destination in (ToolResultDirection.TO_SERVER, ToolResultDirection.TO_BOTH) else ""
@@ -1042,14 +1166,15 @@ class RTMiddleTier:
                     echo.start_greeting_suppression(verbose)
                     # Flush any stale audio that arrived before session was configured
                     await target_ws.send_str(_INPUT_AUDIO_CLEAR_MSG)
-                    await target_ws.send_str(self._sessions.greeting_msg)
+                    greeting_msg = self._sessions.build_greeting_msg()
+                    await target_ws.send_str(greeting_msg)
                     await target_ws.send_str(_RESPONSE_CREATE_MSG)
                     if session_id is not None:
                         self._sessions.mark_greeting_sent(session_id)
                     # Track greeting in context window
                     ctx_monitor = self._sessions.get_context_monitor(session_id)
                     if ctx_monitor:
-                        ctx_monitor.add_content(self._sessions.greeting_msg)
+                        ctx_monitor.add_content(greeting_msg)
 
                 async def announce_fresh():
                     """Send extension.session_metadata (with a resume id) once the resume
@@ -1373,11 +1498,14 @@ class RTMiddleTier:
 
     async def _websocket_handler(self, request: web.Request):
         # ── Origin validation (Task 3) ──
+        # Missing/empty Origin is accepted unchanged (non-browser and same-
+        # process callers legitimately omit it) -- #25 only hardens the case
+        # where an Origin *is* present.
         origin = request.headers.get("Origin", "")
         allowed_origins = _security_cfg.get("allowed_origins", [])
         host = request.headers.get("Host", "")
-        if origin and not origin.endswith(host) and origin not in allowed_origins:
-            logger.warning("Rejected WebSocket from disallowed origin: %s", origin)
+        if origin and not _origin_matches_host(origin, host) and origin not in allowed_origins:
+            logger.warning("Rejected WebSocket from disallowed origin: host=%s origin=%s", host, origin)
             return web.Response(status=403, text="Origin not allowed")
 
         # ── HMAC session token validation (Task 4) ──

@@ -217,3 +217,43 @@ Since `app/frontend/` is off-limits, the middleware (`rtmt.py` + `audio_pipeline
   - Live probe: user-turn synthesis was verbatim 1/6 (the model answered the order); `response.instructions` 6/6.
   - Live smoke passed on `gpt-realtime-2.1` (0.98) and `gpt-realtime-2.1-dz` (1.00).
 - **dz:** `gpt-realtime-2.1-dz` pinned as a reasoning deployment (test + docs note).
+
+  ## 2026-09-24 — fix/session-scrub (S1 fan-out: #27, #29, #25)
+
+  Sole stream allowed to touch `app/backend/`. Worktree `SonicAIDriveThru-wt-leak`.
+  Three commits (`507ec94`, `00e2646`+`cd2dca3`, `edd60ba`), each with a Python fix,
+  mutation-checked Python unit tests, and a mutation-checked black-box conformance
+  scenario under `tests/conformance/tests/Conformance.Tests/Scenarios/Security/`:
+
+  - **#27** — `session.updated` relayed unscrubbed (instructions/tools leaked to the
+    browser). One `_scrub_session_for_client` helper now covers both
+    `session.created` and `session.updated`. Un-skipped
+    `SessionUpdatedClientVisibilityTests.Browser_never_receives_instructions_or_tools_in_session_updated`.
+  - **#29** — scrub hardening: (a) GA echo carries `max_output_tokens` alongside the
+    legacy `max_response_output_tokens` we already hid — now pop both, plus drop
+    `model`, `audio.input.transcription.model`, `reasoning`, `parallel_tool_calls`.
+    (b) Server-authored `role: "system"` items (resume rehydration, the nudge) were
+    echoing back to the browser via `conversation.item.created`/`.added` — now
+    dropped (role=system only; user/assistant items the transcript UI needs are
+    untouched). New scenarios: `ScrubHardeningTests.cs`,
+    `ResumeRehydrationClientVisibilityTests.cs`.
+  - **#25** — Origin check was `origin.endswith(host)`, accepting lookalike domains
+    (`https://evil-<host>`). Replaced with `_origin_matches_host`: exact,
+    case-insensitive match of the parsed Origin's netloc against `Host`. Missing
+    Origin is unchanged (still accepted) — documented, not a regression. New
+    scenario file `OriginValidationTests.cs` (exact accepted, lookalike-suffix
+    403, missing-origin unchanged).
+  - Also added the **N14** backend-contract note (#28) to
+    `tests/conformance/README.md`: a backend must close its upstream socket when
+    the browser disconnects; `ConformanceFixture` already waits for this.
+  - Found (not a bug): `app/backend/tests/test_security.py`'s `_validate_origin`
+    is a standalone reimplementation that never called into `rtmt.py` — already
+    doing correct exact-match logic, so it never would have caught the real
+    `.endswith` bug. New #25 coverage exercises the real function instead
+    (`test_rtmt.py`), left `test_security.py` untouched.
+  - Final validation: pytest 624 passed (was 604 baseline, +20 across the three
+    issues); `dotnet test tests\conformance` 96 passed, green ×3; ruff clean;
+    `git status` clean; frontend `npm test` unaffected, still 116 passed.
+  - Not covered black-box: `reasoning`/`parallel_tool_calls` scrub (#29b) — only
+    sent by a reasoning-model deployment, not worth a dedicated `BackendProfile`;
+    covered at the Python unit level only.

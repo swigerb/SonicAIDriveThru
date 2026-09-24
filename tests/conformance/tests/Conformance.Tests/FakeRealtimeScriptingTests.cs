@@ -160,4 +160,96 @@ public sealed class FakeRealtimeScriptingTests
 
         await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
     }
+
+    /// <summary>
+    /// Self-test for the fake's own GA fidelity (PR #30 review "G1"/item 2): a repeated
+    /// client-created item id within one connection must be rejected with exactly the error GA
+    /// returns (live-verified against gpt-realtime-2.1 / gpt-realtime-2.1-dz), not silently
+    /// re-acknowledged. This is what makes the backend's item-id-uniqueness guarantee provable
+    /// black-box instead of only by Python unit test.
+    /// </summary>
+    [Fact]
+    public async Task Conversation_item_create_with_a_repeated_id_is_rejected_with_the_ga_duplicate_error()
+    {
+        await using var fake = new FakeRealtimeUpstreamServer();
+        await fake.StartAsync(TestContext.Current.CancellationToken);
+
+        using var socket = new ClientWebSocket();
+        var wsUri = new Uri($"ws://{fake.BaseUri.Host}:{fake.BaseUri.Port}/openai/v1/realtime?model=gpt-realtime-test");
+        await socket.ConnectAsync(wsUri, TestContext.Current.CancellationToken);
+        Assert.NotNull(await WebSocketJson.ReceiveJsonAsync(socket, TestContext.Current.CancellationToken)); // session.created
+
+        static JsonObject DupItem() => new()
+        {
+            ["id"] = "sonic_mt_dup0001test",
+            ["type"] = "message",
+            ["role"] = "user",
+            ["content"] = new JsonArray { new JsonObject { ["type"] = "input_text", ["text"] = "hi" } },
+        };
+
+        await WebSocketJson.SendAsync(socket, new JsonObject { ["type"] = "conversation.item.create", ["item"] = DupItem() }, TestContext.Current.CancellationToken);
+        var added = await WebSocketJson.ReceiveJsonAsync(socket, TestContext.Current.CancellationToken);
+        Assert.NotNull(added);
+        Assert.Equal("conversation.item.added", added!.Value.GetProperty("type").GetString());
+        var done = await WebSocketJson.ReceiveJsonAsync(socket, TestContext.Current.CancellationToken);
+        Assert.NotNull(done);
+        Assert.Equal("conversation.item.done", done!.Value.GetProperty("type").GetString());
+
+        // Re-sending the exact same id must be rejected instead of acknowledged again.
+        await WebSocketJson.SendAsync(socket, new JsonObject { ["type"] = "conversation.item.create", ["item"] = DupItem() }, TestContext.Current.CancellationToken);
+        var rejected = await WebSocketJson.ReceiveJsonAsync(socket, TestContext.Current.CancellationToken);
+        Assert.NotNull(rejected);
+        Assert.Equal("invalid_request_error", rejected!.Value.GetProperty("type").GetString());
+        Assert.Equal("item_create_duplicate_item_id", rejected.Value.GetProperty("code").GetString());
+        Assert.Equal(
+            "Error adding item: an item with id 'sonic_mt_dup0001test' already exists.",
+            rejected.Value.GetProperty("message").GetString());
+        Assert.Equal(System.Text.Json.JsonValueKind.Null, rejected.Value.GetProperty("param").ValueKind);
+        Assert.Equal(System.Text.Json.JsonValueKind.Null, rejected.Value.GetProperty("event_id").ValueKind);
+
+        await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
+    }
+
+    /// <summary>
+    /// Self-test for PR #30 review "G1" item 2's other half: GA sets `previous_item_id` on the
+    /// *next* item's `.added` to the id of the item that came before it, client-created ids
+    /// included. Before this fix the fake read <c>LastConversationItemId</c> for a client item's
+    /// own acknowledgement but never advanced it, so a second client item always saw a stale (or
+    /// null) predecessor instead of the first item's real id.
+    /// </summary>
+    [Fact]
+    public async Task Conversation_item_create_chains_previous_item_id_across_client_created_items()
+    {
+        await using var fake = new FakeRealtimeUpstreamServer();
+        await fake.StartAsync(TestContext.Current.CancellationToken);
+
+        using var socket = new ClientWebSocket();
+        var wsUri = new Uri($"ws://{fake.BaseUri.Host}:{fake.BaseUri.Port}/openai/v1/realtime?model=gpt-realtime-test");
+        await socket.ConnectAsync(wsUri, TestContext.Current.CancellationToken);
+        Assert.NotNull(await WebSocketJson.ReceiveJsonAsync(socket, TestContext.Current.CancellationToken)); // session.created
+
+        static JsonObject Item(string id) => new()
+        {
+            ["id"] = id,
+            ["type"] = "message",
+            ["role"] = "user",
+            ["content"] = new JsonArray { new JsonObject { ["type"] = "input_text", ["text"] = "hi" } },
+        };
+
+        await WebSocketJson.SendAsync(socket, new JsonObject { ["type"] = "conversation.item.create", ["item"] = Item("sonic_mt_first0001") }, TestContext.Current.CancellationToken);
+        var firstAdded = await WebSocketJson.ReceiveJsonAsync(socket, TestContext.Current.CancellationToken);
+        Assert.NotNull(firstAdded);
+        Assert.Equal(System.Text.Json.JsonValueKind.Null, firstAdded!.Value.GetProperty("previous_item_id").ValueKind);
+        Assert.NotNull(await WebSocketJson.ReceiveJsonAsync(socket, TestContext.Current.CancellationToken)); // .done
+
+        await WebSocketJson.SendAsync(socket, new JsonObject { ["type"] = "conversation.item.create", ["item"] = Item("sonic_mt_second0001") }, TestContext.Current.CancellationToken);
+        var secondAdded = await WebSocketJson.ReceiveJsonAsync(socket, TestContext.Current.CancellationToken);
+        Assert.NotNull(secondAdded);
+        Assert.Equal("sonic_mt_first0001", secondAdded!.Value.GetProperty("previous_item_id").GetString());
+        var secondDone = await WebSocketJson.ReceiveJsonAsync(socket, TestContext.Current.CancellationToken);
+        Assert.NotNull(secondDone);
+        Assert.Equal("sonic_mt_first0001", secondDone!.Value.GetProperty("previous_item_id").GetString());
+
+        await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
+    }
 }
