@@ -174,5 +174,15 @@
 - Full suite: 72 passed / 1 skipped / 73 total. No regressions.
 - Commit: `3e8d10f`.
 
+## 2026-09-24 — feat/conformance-harness Stage C item N2 (#7)
+
+- Rick's N2: `ConnectionRegistry.Add` used to construct **and** publish (signal `WaitForNextAsync` waiters) a connection in one step, called *before* `AcceptWebSocketAsync()` even started — a waiter could see a connection whose socket wasn't attached yet. `FakeRealtimeConnection.SendAsync` silently no-op'd on a null/non-open socket instead of throwing, so this raced quietly (the frame just vanished).
+- Split `ConnectionRegistry.Add` into `Create` (construct only) and `Publish` (register + signal). `HandleConnectionAsync` now runs `Create → AcceptWebSocketAsync → AttachSocket → Publish` — by the time any waiter can observe a connection, its socket is guaranteed attached and open. Fixed the stale `ConnectionRegistry.cs:44` doc comment that claimed the old (untrue) ordering.
+- `SendAsync` now throws `InvalidOperationException` with a clear message (naming the exact state) instead of silently returning, for both "never attached" and "no longer Open".
+- New tests: `Awaited_connection_can_be_sent_on_immediately_with_no_race_100_times` (deliberately doesn't await the client's own `ConnectAsync` before awaiting the connection, to genuinely exercise the race, 100×) and `SendAsync_throws_a_clear_message_once_the_socket_is_no_longer_open`.
+- Mutation-checked both halves independently: (1) reverted to the old publish-before-attach order → the 100× test failed at iteration 1 within 30s with "cannot send — the socket has not been attached yet"; restored → green in 2s; (2) reverted `SendAsync` to the old silent no-op → the closed-socket test failed with "No exception was thrown"; restored → green.
+- Full suite: 74 passed / 1 skipped / 75 total. No regressions.
+- Commit: `4ce9195`.
+
 
 
