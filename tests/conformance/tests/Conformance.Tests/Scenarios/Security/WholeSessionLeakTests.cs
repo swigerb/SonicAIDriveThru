@@ -165,6 +165,37 @@ public sealed class WholeSessionLeakTests(ShortTimersConformanceFixture fixture)
             FrameTimeout, ct);
         Assert.True(toolResponse is not null, "Expected extension.middle_tier_tool_response for update_order on the browser.");
 
+        // ── Search tool round trip (PR #30 review round 3, item 4, "S2b"): unlike
+        // update_order's, `search`'s result is model-only -- `tools.py`'s `search()` always
+        // returns `ToolResultDirection.TO_SERVER` (never `TO_BOTH`), so it has no legitimate
+        // browser-visible echo and its `function_call_output.output` belongs in the secret set.
+        // Uses the S2c generic helper (not a hand-picked substring) so any future legitimate
+        // overlap -- e.g. the model reading a matched item's name back to the guest in a
+        // transcript -- is excluded by proof against this run's real frames, not assumed away. ──
+        const string searchCallId = "call_whole_session_leak_search";
+        firstConnection.Script.Enqueue(new ResponseScript([
+            new FunctionCallEvent(
+                Name: "search",
+                ArgumentsJson: """{"query":"Angus"}""",
+                CallId: searchCallId),
+            new DoneEvent(),
+        ]));
+        await first.SendResponseCreateAsync(ct);
+
+        var searchFunctionCallOutput = await firstConnection.ReceivedFrames.WaitForAsync(
+            f => f.Type == "conversation.item.create" &&
+                 f.Json.TryGetProperty("item", out var item) &&
+                 item.TryGetProperty("type", out var itemType) &&
+                 itemType.GetString() == "function_call_output" &&
+                 item.TryGetProperty("call_id", out var respondedCallId) &&
+                 respondedCallId.GetString() == searchCallId,
+            FrameTimeout, ct);
+        Assert.True(searchFunctionCallOutput is not null,
+            $"Expected a conversation.item.create(function_call_output) for call_id={searchCallId} upstream.");
+        var searchOutput = searchFunctionCallOutput!.Json.GetProperty("item").GetProperty("output").GetString();
+        Assert.False(string.IsNullOrEmpty(searchOutput), "Expected FakeSearchServer to return non-empty search results.");
+        AddSecretWindowsExcludingLegitimateOverlap(searchOutput, first.ReceivedFrames.Snapshot(), secretWindows);
+
         // ── Disconnect; the session detaches and is held for the (shortened) grace period. ──
         await first.CloseAsync(cancellationToken: ct);
         await first.WaitForCloseAsync(FrameTimeout, ct);
@@ -317,16 +348,42 @@ public sealed class WholeSessionLeakTests(ShortTimersConformanceFixture fixture)
     /// guest's own order, its own earlier transcript), not a leak. Used by
     /// <see cref="AddSecretWindowsExcludingLegitimateOverlap"/> to decide what to subtract from a
     /// candidate secret's windows, rather than hand-splitting the secret's own text by a
-    /// backend-specific marker string.</summary>
+    /// backend-specific marker string. Does *not* include `extension.middle_tier_tool_response`
+    /// -- see <see cref="IsLegitimateBrowserFrame"/>, which needs the tool name too.</summary>
     private static bool IsLegitimateBrowserFrameType(string type) =>
-        type is "extension.session_resumed" or "extension.middle_tier_tool_response"
-            or "conversation.item.input_audio_transcription.completed" ||
+        type is "extension.session_resumed" or "conversation.item.input_audio_transcription.completed" ||
         type.StartsWith("response.audio_transcript.", StringComparison.Ordinal);
+
+    /// <summary>Tools whose result is genuinely meant to reach the browser today (`tools.py`'s
+    /// `ToolResultDirection.TO_BOTH`), so their `extension.middle_tier_tool_response` frame is
+    /// legitimate duplicate data for overlap purposes -- e.g. `update_order`'s JSON order
+    /// summary duplicating the rehydration item's embedded order snapshot. `search` is
+    /// deliberately absent: its result is model-only (`TO_SERVER`), so it must never legitimize
+    /// overlap through this frame type -- if it ever appeared here, that *is* the leak "S2b"
+    /// exists to catch, not something to explain away.</summary>
+    private static readonly HashSet<string> ToolsWithLegitimateBrowserEcho = new(StringComparer.Ordinal)
+    {
+        "update_order", "get_order", "reset_order",
+    };
+
+    /// <summary>Frame-aware companion to <see cref="IsLegitimateBrowserFrameType"/>: an
+    /// `extension.middle_tier_tool_response` frame only counts as legitimate overlap when its
+    /// `tool_name` is one the middle tier genuinely echoes to the browser
+    /// (<see cref="ToolsWithLegitimateBrowserEcho"/>) -- scoping by *frame type alone* would let
+    /// a leaked `search` result (routed onto the same frame type by a hypothetical regression)
+    /// silently launder itself as "legitimate" just because *some* tool's response uses that
+    /// type this run.</summary>
+    private static bool IsLegitimateBrowserFrame(RecordedFrame frame) =>
+        IsLegitimateBrowserFrameType(frame.Type) ||
+        (frame.Type == "extension.middle_tier_tool_response" &&
+         frame.Json.TryGetProperty("tool_name", out var toolName) &&
+         toolName.GetString() is string name &&
+         ToolsWithLegitimateBrowserEcho.Contains(name));
 
     /// <summary>Generic replacement for hand-narrowing a secret's text to only its "safe" prose
     /// (PR #30 review round 3, item 5, "S2c"): takes every 32-char window of the *full* secret
     /// text, then removes any window that also appears in a real captured frame of a frame type
-    /// the browser is genuinely meant to receive (<see cref="IsLegitimateBrowserFrameType"/>) --
+    /// the browser is genuinely meant to receive (<see cref="IsLegitimateBrowserFrame"/>) --
     /// i.e. legitimate overlap is proven from what the browser actually got this run, not assumed
     /// from where a marker string happens to sit in the backend's wording. What's left after
     /// subtraction is added to <paramref name="windows"/> as usual.</summary>
@@ -343,7 +400,7 @@ public sealed class WholeSessionLeakTests(ShortTimersConformanceFixture fixture)
         var legitimateWindows = new HashSet<string>(StringComparer.Ordinal);
         foreach (var frame in browserFrames)
         {
-            if (IsLegitimateBrowserFrameType(frame.Type))
+            if (IsLegitimateBrowserFrame(frame))
             {
                 CollectStringWindows(frame.Json, legitimateWindows);
             }
@@ -352,6 +409,7 @@ public sealed class WholeSessionLeakTests(ShortTimersConformanceFixture fixture)
         candidateWindows.ExceptWith(legitimateWindows);
         windows.UnionWith(candidateWindows);
     }
+
 
     /// <summary>Recursively collects every 32-char window of every string leaf in a frame's JSON
     /// -- the same walk <see cref="ContainsAnySecretWindow"/> does for matching, reused here to
