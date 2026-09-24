@@ -215,5 +215,15 @@
 - Full suite: 77 passed / 1 skipped / 78 total, run 3× (plus 18 additional runs while chasing the baseline flake). No regressions.
 - Commit: `3a2d26f`.
 
+## 2026-09-24 — feat/conformance-harness Stage C item N6 (#7)
+
+- Rick's N6: `ShortTimersConformanceFixture`/`FixedClockConformanceFixture` had no special handling for external mode (`CONFORMANCE_BACKEND_URL`) — each would resolve the *same* `CONFORMANCE_FAKE_REALTIME_PORT`/`CONFORMANCE_FAKE_SEARCH_PORT` fixed ports as the Default collection and race to bind Kestrel to them concurrently, and even absent that race there's no way for the harness to know whether the one already-running external backend happens to be configured with a non-Default profile's `CONFORMANCE_TEST_HOOKS` overrides.
+- Added `ExternalModeProfilePolicy` (pure, unit-tested the same way as `ExternalModePortPolicy`/`DotnetPlaceholderPolicy`): `ShouldSkip(backendUrl, profileName, defaultProfileName)` returns a clear skip reason in external mode when the profile isn't Default, else null. `ConformanceFixture.InitializeAsync` checks this *first* — before resolving any port or starting either fake — and sets the existing `SkipReason` property (already honoured by `RunAsync`), so every test in a non-Default collection skips cleanly with an actionable message instead of racing ports.
+- New `ExternalModeProfilePolicyTests.cs` unit-tests the policy directly. Integration-level check: ran `GreetingTimeoutFallbackTests` (ShortTimers) and `HappyHourPricingTests` (FixedClock) with `CONFORMANCE_BACKEND_URL` set to a dummy URL and no fixed ports configured — both skip cleanly rather than erroring.
+- Mutation-checked: temporarily forced `SkipReason` to stay `null` (bypassing the policy check) → the same two tests now failed during `InitializeAsync` with `ExternalModePortPolicy`'s "port is not set" exception instead of skipping → restored → clean skip again.
+- Documented the policy in `README.md`'s backend-selection section.
+- Full suite: 81 passed / 1 skipped / 82 total, run 3×. No regressions.
+- Commit: `fb85e53`.
+
 
 
