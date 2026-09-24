@@ -36,13 +36,20 @@ from rtmt import (
     Tool,
     ToolResult,
     ToolResultDirection,
+    _drop_from_client,
+    _origin_matches_host,
     _to_ga_session,
     create_hmac_token,
     validate_hmac_token,
 )
 
 # ── Imports under test ──
-from session_manager import ContextMonitor, SessionManager
+from session_manager import (
+    MIDDLE_TIER_ITEM_ID_PREFIX,
+    ContextMonitor,
+    SessionManager,
+    new_middle_tier_item_id,
+)
 
 # ── Helpers ──
 
@@ -204,14 +211,61 @@ class SessionManagerGreetingTests(unittest.TestCase):
         self.assertFalse(self.sm.has_sent_greeting(sid2))
 
     def test_greeting_msg_default(self):
-        msg = json.loads(self.sm.greeting_msg)
+        msg = json.loads(self.sm.build_greeting_msg())
         self.assertEqual(msg["type"], "conversation.item.create")
+
+    def test_greeting_msg_default_carries_middle_tier_item_id(self):
+        """swigerb/SonicAIDriveThru#29 follow-up (PR #30 review "S1"): the
+        greeting is role="user", so a role-based drop in rtmt.py can never
+        catch it -- it must be identifiable by authorship (item id prefix)
+        instead."""
+        msg = json.loads(self.sm.build_greeting_msg())
+        self.assertEqual(msg["item"]["role"], "user")
+        self.assertTrue(msg["item"]["id"].startswith(MIDDLE_TIER_ITEM_ID_PREFIX))
+
+    def test_greeting_msg_gets_a_fresh_id_on_every_call(self):
+        """PR #30 review "G1"/item 1: GA live-verified that a repeated item id
+        within one conversation is rejected (item_create_duplicate_item_id).
+        A greeting id baked in once at construction and reused for every send
+        would collide with itself the first time a second greeting is needed
+        on the same upstream conversation history (e.g. resume-before-any-
+        conversation, which re-greets). build_greeting_msg must therefore
+        stamp a fresh id on every call, exactly like build_rehydration_item
+        and build_nudge_item already do."""
+        first = json.loads(self.sm.build_greeting_msg())
+        second = json.loads(self.sm.build_greeting_msg())
+        self.assertNotEqual(first["item"]["id"], second["item"]["id"])
+        self.assertTrue(second["item"]["id"].startswith(MIDDLE_TIER_ITEM_ID_PREFIX))
+        # Only the id differs -- the rest of the greeting is identical.
+        first["item"].pop("id")
+        second["item"].pop("id")
+        self.assertEqual(first, second)
 
     def test_greeting_msg_from_prompt_loader(self):
         loader = MagicMock()
         loader.get_greeting_json_str.return_value = '{"type":"custom_greeting"}'
         sm = SessionManager(prompt_loader=loader)
-        self.assertEqual(sm.greeting_msg, '{"type":"custom_greeting"}')
+        self.assertEqual(sm.build_greeting_msg(), '{"type":"custom_greeting"}')
+
+    def test_greeting_msg_from_prompt_loader_with_item_gets_id_injected(self):
+        loader = MagicMock()
+        loader.get_greeting_json_str.return_value = json.dumps({
+            "type": "conversation.item.create",
+            "item": {"type": "message", "role": "user", "content": []},
+        })
+        sm = SessionManager(prompt_loader=loader)
+        msg = json.loads(sm.build_greeting_msg())
+        self.assertTrue(msg["item"]["id"].startswith(MIDDLE_TIER_ITEM_ID_PREFIX))
+
+
+class MiddleTierItemIdTests(unittest.TestCase):
+    """swigerb/SonicAIDriveThru#29 follow-up (PR #30 review "S1"/"M1")."""
+
+    def test_new_middle_tier_item_id_carries_prefix(self):
+        self.assertTrue(new_middle_tier_item_id().startswith(MIDDLE_TIER_ITEM_ID_PREFIX))
+
+    def test_new_middle_tier_item_id_is_unique_per_call(self):
+        self.assertNotEqual(new_middle_tier_item_id(), new_middle_tier_item_id())
 
 
 class SessionManagerIdleTimeoutTests(unittest.TestCase):
@@ -780,6 +834,203 @@ class ProcessMessageToClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(parsed["session"]["voice"], "coral")
         self.assertEqual(parsed["session"]["audio"]["output"]["voice"], "coral")
 
+    async def test_session_updated_strips_instructions_and_tools(self):
+        """swigerb/SonicAIDriveThru#27: session.updated echoes the full session
+        object just like session.created, and must be scrubbed identically."""
+        rtmt = self._make_rtmt()
+        rtmt.voice_choice = "coral"
+        client_ws = _make_mock_ws()
+        server_ws = _make_mock_ws()
+        tools_pending = {}
+        order_state_singleton.sessions = {}
+        rtmt._sessions.create_session(client_ws)
+
+        msg = MagicMock()
+        msg.data = json.dumps({
+            "type": "session.updated",
+            "session": {
+                "id": "sess-123",
+                "instructions": "secret prompt",
+                "tools": [{"name": "search"}],
+                "voice": "alloy",
+                "tool_choice": "auto",
+                "max_response_output_tokens": 500,
+            }
+        })
+        result = await rtmt._process_message_to_client(msg, client_ws, server_ws, tools_pending)
+        parsed = json.loads(result)
+        self.assertEqual(parsed["session"]["instructions"], "")
+        self.assertEqual(parsed["session"]["tools"], [])
+        self.assertEqual(parsed["session"]["voice"], "coral")
+        self.assertEqual(parsed["session"]["audio"]["output"]["voice"], "coral")
+
+    async def test_session_updated_with_no_session_object_is_a_noop(self):
+        """A malformed/unexpected session.updated with no `session` key must
+        not crash -- it's forwarded unchanged rather than scrubbed."""
+        rtmt = self._make_rtmt()
+        client_ws = _make_mock_ws()
+        server_ws = _make_mock_ws()
+        tools_pending = {}
+        msg = MagicMock()
+        msg.data = json.dumps({"type": "session.updated"})
+        result = await rtmt._process_message_to_client(msg, client_ws, server_ws, tools_pending)
+        self.assertEqual(result, msg.data)
+
+    async def test_session_created_and_updated_strip_ga_only_secret_fields(self):
+        """swigerb/SonicAIDriveThru#29: the GA echo carries a duplicate token
+        cap under `max_output_tokens` (the original scrub only nulled the
+        legacy `max_response_output_tokens`), plus `model` (the internal
+        Azure deployment name), `audio.input.transcription.model` (the
+        transcription deployment name), `reasoning` and `parallel_tool_calls`
+        (reasoning-model tuning knobs) -- none of which the browser needs or
+        useRealtime.tsx reads off session.created/session.updated."""
+        rtmt = self._make_rtmt()
+        client_ws = _make_mock_ws()
+        server_ws = _make_mock_ws()
+        tools_pending = {}
+        order_state_singleton.sessions = {}
+        rtmt._sessions.create_session(client_ws)
+
+        raw_session = {
+            "id": "sess-123",
+            "instructions": "secret prompt",
+            "tools": [{"name": "search"}],
+            "voice": "alloy",
+            "tool_choice": "auto",
+            "max_response_output_tokens": 500,
+            "max_output_tokens": 500,
+            "model": "gpt-realtime-2.1-super-secret-deployment",
+            "reasoning": {"effort": "low"},
+            "parallel_tool_calls": True,
+            "audio": {
+                "input": {"transcription": {"model": "gpt-4o-transcribe-secret-deployment"}},
+                "output": {"voice": "alloy"},
+            },
+        }
+        for event_type in ("session.created", "session.updated"):
+            msg = MagicMock()
+            msg.data = json.dumps({"type": event_type, "session": dict(raw_session)})
+            result = await rtmt._process_message_to_client(msg, client_ws, server_ws, tools_pending)
+            session = json.loads(result)["session"]
+            self.assertNotIn("max_output_tokens", session, f"{event_type} leaked the GA max-token cap")
+            self.assertNotIn("model", session, f"{event_type} leaked the internal deployment name")
+            self.assertNotIn("reasoning", session, f"{event_type} leaked the reasoning tuning knob")
+            self.assertNotIn("parallel_tool_calls", session, f"{event_type} leaked parallel_tool_calls")
+            self.assertNotIn("model", session["audio"]["input"]["transcription"],
+                              f"{event_type} leaked the transcription deployment name")
+
+    async def test_conversation_item_created_drops_server_authored_system_item(self):
+        """swigerb/SonicAIDriveThru#29: role="system" conversation items are
+        only ever ones the middle tier itself created (session_manager's
+        build_rehydration_item / build_nudge_item) and sent straight upstream
+        -- the model never originates one. Upstream echoes the item back via
+        conversation.item.created/added, which must not reach the browser:
+        it carries the resume rehydration text (recent transcript + order
+        JSON) or the silent-guest nudge prompt, neither meant for the guest."""
+        rtmt = self._make_rtmt()
+        client_ws = _make_mock_ws()
+        server_ws = _make_mock_ws()
+        tools_pending = {}
+        for event_type in ("conversation.item.created", "conversation.item.added"):
+            msg = MagicMock()
+            msg.data = json.dumps({
+                "type": event_type,
+                "previous_item_id": "prev-1",
+                "item": {
+                    "type": "message",
+                    "role": "system",
+                    "content": [{"type": "input_text", "text": "Current order (JSON): {...}"}],
+                },
+            })
+            result = await rtmt._process_message_to_client(msg, client_ws, server_ws, tools_pending)
+            self.assertIsNone(result, f"{event_type} with role=system must be dropped from the client relay")
+
+    async def test_conversation_item_created_still_forwards_user_and_assistant_items(self):
+        """Only role="system" items (or items with a middle-tier item id) are
+        dropped -- role="user"/"assistant" items (real conversation turns)
+        must keep reaching the browser unchanged; the frontend's transcript
+        UI depends on them."""
+        rtmt = self._make_rtmt()
+        client_ws = _make_mock_ws()
+        server_ws = _make_mock_ws()
+        tools_pending = {}
+        for role in ("user", "assistant"):
+            msg = MagicMock()
+            msg.data = json.dumps({
+                "type": "conversation.item.created",
+                "item": {"type": "message", "role": role, "content": [{"type": "input_text", "text": "hi"}]},
+            })
+            result = await rtmt._process_message_to_client(msg, client_ws, server_ws, tools_pending)
+            self.assertEqual(result, msg.data, f"role={role} conversation item must still be forwarded")
+
+    async def test_conversation_item_created_drops_middle_tier_item_by_id_not_role(self):
+        """swigerb/SonicAIDriveThru#29 follow-up (PR #30 review "S1"): the
+        greeting is role="user" (not "system") and is middle-tier-authored --
+        a role-based drop alone can never catch it, since the model also
+        sends real role="user" items. Authorship must be keyed off the
+        item id prefix instead."""
+        rtmt = self._make_rtmt()
+        client_ws = _make_mock_ws()
+        server_ws = _make_mock_ws()
+        tools_pending = {}
+        for event_type in ("conversation.item.created", "conversation.item.added"):
+            msg = MagicMock()
+            msg.data = json.dumps({
+                "type": event_type,
+                "item": {
+                    "id": f"{MIDDLE_TIER_ITEM_ID_PREFIX}deadbeef0000",
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "Say EXACTLY this greeting and NOTHING else: ..."}],
+                },
+            })
+            result = await rtmt._process_message_to_client(msg, client_ws, server_ws, tools_pending)
+            self.assertIsNone(result, f"{event_type} with a middle-tier item id must be dropped regardless of role")
+
+    async def test_conversation_item_done_and_retrieved_drop_server_authored_items(self):
+        """swigerb/SonicAIDriveThru#29 follow-up (PR #30 review "M1"): GA
+        emits conversation.item.done "when the item is finalized" with the
+        *full* item -- carrying the exact same leak surface (rehydration
+        text, nudge, function_call args, function_call_output/tool results)
+        as .created/.added if left unfiltered. conversation.item.retrieved
+        (sent in reply to an explicit conversation.item.retrieve) must be
+        handled defensively the same way even though nothing in this
+        codebase currently issues that request."""
+        rtmt = self._make_rtmt()
+        client_ws = _make_mock_ws()
+        server_ws = _make_mock_ws()
+        tools_pending = {}
+        items = [
+            {"type": "message", "role": "system", "content": [{"type": "input_text", "text": "Current order (JSON): {...}"}]},
+            {"id": f"{MIDDLE_TIER_ITEM_ID_PREFIX}abc123", "type": "message", "role": "user", "content": [{"type": "input_text", "text": "Say EXACTLY this greeting..."}]},
+            {"type": "function_call", "call_id": "call-done-1", "name": "search", "arguments": '{"q":"combo"}'},
+            {"type": "function_call_output", "call_id": "call-done-1", "output": "search hit: secret result"},
+        ]
+        for event_type in ("conversation.item.done", "conversation.item.retrieved"):
+            for item in items:
+                msg = MagicMock()
+                msg.data = json.dumps({"type": event_type, "item": item})
+                result = await rtmt._process_message_to_client(msg, client_ws, server_ws, tools_pending)
+                self.assertIsNone(result, f"{event_type} leaked item={item!r}")
+
+    async def test_conversation_item_done_still_forwards_user_and_assistant_items(self):
+        """A genuine, model-authored message item (no middle-tier id, no
+        system role, not a function_call/function_call_output) must still
+        reach the browser on .done -- the transcript UI needs the finalized
+        text."""
+        rtmt = self._make_rtmt()
+        client_ws = _make_mock_ws()
+        server_ws = _make_mock_ws()
+        tools_pending = {}
+        for role in ("user", "assistant"):
+            msg = MagicMock()
+            msg.data = json.dumps({
+                "type": "conversation.item.done",
+                "item": {"type": "message", "role": role, "content": [{"type": "input_text", "text": "finalized turn"}]},
+            })
+            result = await rtmt._process_message_to_client(msg, client_ws, server_ws, tools_pending)
+            self.assertEqual(result, msg.data, f"role={role} conversation item must still be forwarded on .done")
+
     async def test_unknown_message_type_returned_as_data(self):
         """Unknown message types should pass through without crashing."""
         rtmt = self._make_rtmt()
@@ -881,6 +1132,94 @@ class ProcessMessageToClientTests(unittest.IsolatedAsyncioTestCase):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# ORIGIN MATCHING TESTS (#25)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class OriginMatchesHostTests(unittest.TestCase):
+    """Direct unit tests of `_origin_matches_host`, which replaced the buggy
+    `origin.endswith(host)` check (#25): a suffix match let
+    `https://evil-<host>` through since a lookalike domain the attacker
+    controls can still legitimately end with the real host's characters.
+    """
+
+    def test_exact_scheme_and_host_matches(self):
+        self.assertTrue(_origin_matches_host("https://example.com", "example.com"))
+
+    def test_exact_host_and_non_default_port_matches(self):
+        self.assertTrue(_origin_matches_host("https://localhost:8080", "localhost:8080"))
+
+    def test_case_insensitive_match(self):
+        self.assertTrue(_origin_matches_host("https://Example.COM", "example.com"))
+
+    def test_lookalike_prefix_suffix_is_rejected(self):
+        """The exact bug: a suffix match let a domain the attacker actually
+        owns (evil-example.com) through, because it merely ends with the
+        legitimate host's characters."""
+        self.assertFalse(_origin_matches_host("https://evil-example.com", "example.com"))
+
+    def test_lookalike_prefix_suffix_with_port_is_rejected(self):
+        self.assertFalse(_origin_matches_host("https://evil-localhost:8080", "localhost:8080"))
+
+    def test_subdomain_is_rejected(self):
+        """A subdomain is a different origin -- must not be silently trusted
+        just because it ends with the real host."""
+        self.assertFalse(_origin_matches_host("https://attacker.example.com", "example.com"))
+
+    def test_mismatched_port_is_rejected(self):
+        self.assertFalse(_origin_matches_host("https://example.com:9999", "example.com:8080"))
+
+    def test_missing_scheme_still_compares_correctly(self):
+        # urlsplit treats a schemeless "host:port"-shaped string as
+        # scheme=host, path=port unless it starts with "//" -- exercised here
+        # to document that a malformed Origin (no browser ever sends one
+        # without a scheme) simply fails to match rather than being
+        # mis-parsed into an accidental pass.
+        self.assertFalse(_origin_matches_host("example.com", "example.com"))
+
+    def test_completely_different_host_is_rejected(self):
+        self.assertFalse(_origin_matches_host("https://evil.com", "example.com"))
+
+    def test_empty_host_never_matches(self):
+        """swigerb/SonicAIDriveThru#25 follow-up (PR #30 review "S4"): a
+        missing/blank Host header must never accidentally validate an
+        origin. Without this guard, urlsplit("null").netloc == "" would
+        make a bare Origin: null match an empty host."""
+        self.assertFalse(_origin_matches_host("https://example.com", ""))
+        self.assertFalse(_origin_matches_host("null", ""))
+        self.assertFalse(_origin_matches_host("", ""))
+
+
+class DropFromClientTests(unittest.TestCase):
+    """Direct unit tests of `_drop_from_client`, the shared authorship/type
+    filter used by every conversation.item.* case in
+    `_process_message_to_client` (swigerb/SonicAIDriveThru#29 follow-up,
+    PR #30 review "M1"/"S1")."""
+
+    def test_function_call_is_dropped(self):
+        self.assertTrue(_drop_from_client({"type": "function_call", "call_id": "c1"}))
+
+    def test_function_call_output_is_dropped(self):
+        self.assertTrue(_drop_from_client({"type": "function_call_output", "call_id": "c1"}))
+
+    def test_middle_tier_item_id_is_dropped_regardless_of_role(self):
+        self.assertTrue(_drop_from_client({
+            "id": f"{MIDDLE_TIER_ITEM_ID_PREFIX}xyz",
+            "type": "message",
+            "role": "user",
+        }))
+
+    def test_role_system_is_dropped_as_legacy_backstop(self):
+        self.assertTrue(_drop_from_client({"type": "message", "role": "system"}))
+
+    def test_normal_user_and_assistant_items_are_kept(self):
+        self.assertFalse(_drop_from_client({"type": "message", "role": "user", "id": "item-abc"}))
+        self.assertFalse(_drop_from_client({"type": "message", "role": "assistant", "id": "item-def"}))
+
+    def test_non_string_id_does_not_crash(self):
+        self.assertFalse(_drop_from_client({"type": "message", "role": "user", "id": 12345}))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # WEBSOCKET HANDLER INTEGRATION TESTS
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -900,6 +1239,66 @@ class WebSocketHandlerTests(unittest.IsolatedAsyncioTestCase):
         request.query = {}
         result = await rtmt._websocket_handler(request)
         self.assertEqual(result.status, 403)
+
+    async def test_origin_validation_rejects_lookalike_suffix_origin(self):
+        """#25: `origin.endswith(host)` used to accept any origin whose
+        netloc merely ended with the Host header as a string suffix --
+        `https://evil-localhost:8080` passes
+        `"evil-localhost:8080".endswith("localhost:8080")` even though it's
+        an attacker-controlled domain, not the real host. Must be rejected.
+        """
+        rtmt = self._make_rtmt()
+        request = MagicMock(spec=web.Request)
+        request.headers = {"Origin": "https://evil-localhost:8080", "Host": "localhost:8080"}
+        request.query = {}
+        result = await rtmt._websocket_handler(request)
+        self.assertEqual(result.status, 403)
+
+    async def test_origin_validation_accepts_exact_host_match(self):
+        """Positive-path companion to the rejection tests above: an Origin
+        that exactly matches Host must NOT be rejected by the origin check.
+        Forces can_accept_session() to False so the handler takes its next,
+        already-covered early-return branch (session limit reached) instead
+        of attempting a full WebSocket upgrade against a MagicMock request;
+        that branch's own WebSocketResponse is replaced with a stub so it
+        doesn't need a real transport either.
+        """
+        rtmt = self._make_rtmt()
+        request = MagicMock(spec=web.Request)
+        request.headers = {"Origin": "https://localhost:8080", "Host": "localhost:8080"}
+        request.query = {}
+        stub_ws = MagicMock()
+        stub_ws.prepare = AsyncMock()
+        stub_ws.send_json = AsyncMock()
+        stub_ws.close = AsyncMock()
+        with patch.dict("rtmt._security_cfg", {"allowed_origins": []}), \
+             patch.object(rtmt._sessions, "can_accept_session", return_value=False), \
+             patch("rtmt.web.WebSocketResponse", return_value=stub_ws):
+            result = await rtmt._websocket_handler(request)
+        # Session-limit branch returns the prepared WebSocketResponse rather
+        # than the plain 403 web.Response the origin check returns -- proves
+        # we got past origin validation.
+        self.assertIs(result, stub_ws)
+
+    async def test_origin_validation_missing_origin_is_unchanged(self):
+        """Documents existing (unchanged by #25) behaviour: a request with no
+        Origin header at all is still accepted -- non-browser callers (curl,
+        server-to-server, the conformance harness's own health checks)
+        legitimately omit it, and #25 only hardens the case where an Origin
+        *is* present but doesn't match."""
+        rtmt = self._make_rtmt()
+        request = MagicMock(spec=web.Request)
+        request.headers = {"Host": "localhost:8080"}
+        request.query = {}
+        stub_ws = MagicMock()
+        stub_ws.prepare = AsyncMock()
+        stub_ws.send_json = AsyncMock()
+        stub_ws.close = AsyncMock()
+        with patch.dict("rtmt._security_cfg", {"allowed_origins": []}), \
+             patch.object(rtmt._sessions, "can_accept_session", return_value=False), \
+             patch("rtmt.web.WebSocketResponse", return_value=stub_ws):
+            result = await rtmt._websocket_handler(request)
+        self.assertIs(result, stub_ws)
 
     async def test_token_validation_rejects_bad_token(self):
         rtmt = self._make_rtmt()

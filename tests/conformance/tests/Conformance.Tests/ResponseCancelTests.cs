@@ -132,6 +132,14 @@ public sealed class ResponseCancelTests
         // status distinction extended to the cancel path).
         Assert.Equal("incomplete", itemDone.Value.GetProperty("item").GetProperty("status").GetString());
 
+        // GA also emits conversation.item.done "when the item is finalized" -- a second, separate
+        // event on the conversation.item.* family carrying the same (now-incomplete) item again,
+        // right after response.output_item.done (PR #30 review "M1"/"M2").
+        var conversationItemDone = await ReceiveJsonWithTimeoutAsync(socket, TestContext.Current.CancellationToken);
+        Assert.NotNull(conversationItemDone);
+        Assert.Equal("conversation.item.done", conversationItemDone!.Value.GetProperty("type").GetString());
+        Assert.Equal("incomplete", conversationItemDone.Value.GetProperty("item").GetProperty("status").GetString());
+
         var done = await ReceiveJsonWithTimeoutAsync(socket, TestContext.Current.CancellationToken);
         Assert.NotNull(done);
         Assert.Equal("response.done", done!.Value.GetProperty("type").GetString());
