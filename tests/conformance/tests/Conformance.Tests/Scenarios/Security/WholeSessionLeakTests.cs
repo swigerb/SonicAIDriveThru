@@ -211,6 +211,16 @@ public sealed class WholeSessionLeakTests(ShortTimersConformanceFixture fixture)
         Assert.True(secretWindows.Count > 0,
             "Test bug: no operator-only secret text was captured, so the leak check below would prove nothing.");
 
+        // ── PR #30 review "G1"/item 2: GA rejects a conversation.item.create that reuses an id
+        // already used in the conversation (live-verified against gpt-realtime-2.1 /
+        // gpt-realtime-2.1-dz) with item_create_duplicate_item_id, so the backend must never
+        // send one twice. Checked per connection, not across both, since a resume opens a brand
+        // new upstream conversation with its own id namespace -- the greeting (connection 1) and
+        // the rehydration/nudge items (connection 2) are never at risk of colliding with each
+        // other, only with something else on their *own* connection. ──
+        AssertNoRepeatedItemId(firstConnection);
+        AssertNoRepeatedItemId(secondConnection);
+
         // ── The actual assertion: across every frame of every type on both browser connections,
         // no >=32-char substring of any of the four secrets ever reached the browser. ──
         var allBrowserFrames = first.ReceivedFrames.Snapshot().Concat(second.ReceivedFrames.Snapshot());
@@ -227,6 +237,38 @@ public sealed class WholeSessionLeakTests(ShortTimersConformanceFixture fixture)
             $"The browser must never receive any {MinLeakSubstringLength}+ char substring of operator-only text " +
             $"(instructions, greeting, rehydration or nudge), but frame type '{leaked?.Type}' did: {leaked?.Json.GetRawText()}");
     });
+
+    /// <summary>PR #30 review "G1"/item 2: asserts every `conversation.item.create` the backend
+    /// sent on this upstream connection used a distinct `item.id` -- GA rejects a repeat within
+    /// one conversation with `item_create_duplicate_item_id` (live-verified against
+    /// gpt-realtime-2.1 / gpt-realtime-2.1-dz for PR #30), so a collision here would mean a
+    /// browser-visible request would actually fail against the real service. Mutation: reverting
+    /// `new_middle_tier_item_id()` to a fixed string (rather than a fresh `secrets.token_hex(6)`
+    /// per call) makes this fail on connection 2, since the rehydration and nudge items would
+    /// then share one id -- the greeting itself can't be used as the mutation trigger here
+    /// because <c>send_greeting_once</c>'s own `greeting_sent` guard means it is only ever
+    /// invoked once per upstream connection regardless of whether its id is fresh or cached, so
+    /// item 1's "stamp a fresh id per send" fix has no *second* same-connection greeting send to
+    /// prove reachable black-box today; item 1's Python unit test
+    /// (`test_greeting_msg_gets_a_fresh_id_on_every_call`) remains its sole regression guard.</summary>
+    private static void AssertNoRepeatedItemId(FakeRealtimeConnection connection)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var frame in connection.ReceivedFrames.Snapshot())
+        {
+            if (frame.Type != "conversation.item.create" ||
+                !frame.Json.TryGetProperty("item", out var item) ||
+                !item.TryGetProperty("id", out var idProp) ||
+                idProp.ValueKind != JsonValueKind.String)
+            {
+                continue;
+            }
+            var id = idProp.GetString()!;
+            Assert.True(seen.Add(id),
+                $"The backend sent conversation.item.create with id '{id}' more than once on the same " +
+                "upstream connection -- GA would reject the second one with item_create_duplicate_item_id.");
+        }
+    }
 
     /// <summary>Extracts the plain `content[0].text` GA/legacy conversation items of this shape
     /// (greeting, rehydration and nudge items all use it) carry -- named generically because the

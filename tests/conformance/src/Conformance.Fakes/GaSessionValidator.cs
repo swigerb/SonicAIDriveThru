@@ -238,6 +238,13 @@ public sealed class RealtimeSessionState
     public bool AssistantAudioSeen { get; set; }
     public string? LastConversationItemId { get; set; }
 
+    /// <summary>Every conversation item id this connection has ever created, client-supplied
+    /// ids included. GA rejects a `conversation.item.create` that reuses an id already present
+    /// in the conversation with `item_create_duplicate_item_id` (live-verified against
+    /// gpt-realtime-2.1 / gpt-realtime-2.1-dz for PR #30 review "G1") -- this set is what lets
+    /// <see cref="RealtimeScript.WithVadDefaults"/> reproduce that rejection.</summary>
+    public HashSet<string> SeenConversationItemIds { get; } = new(StringComparer.Ordinal);
+
     /// <summary>The full session as GA would report it in `session.updated`, accumulated across
     /// every accepted `session.update` on this connection. Top-level keys from each update
     /// overwrite the corresponding key here; `audio.input`/`audio.output` are merged one level
