@@ -164,5 +164,15 @@
 - `git status` clean; no `bin/`/`obj/` staged.
 - Commit: `caa278e`.
 
+## 2026-09-24 — feat/conformance-harness Stage C item N1 (#7)
+
+- Rick's approve-with-follow-ups review, N1: `RealtimeScript.Rules` was a plain, unsynchronized `List<>` and `QueuedResponses` a plain `Queue<>` — a test arming/clearing a rule mid-scenario could race `FakeRealtimeUpstreamServer.HandleFrameAsync`'s own `foreach` enumeration over `Rules` and throw `InvalidOperationException: "Collection was modified"`.
+- `QueuedResponses` is now `ConcurrentQueue<ResponseScript>`; `RespondAsync` uses `TryDequeue` instead of `Count>0`-then-`Dequeue`.
+- `Rules` is now a read-only property that snapshots (`ToArray()`) under a private `Lock` on every read; `On()`/new `ClearRules()` mutate the backing list under the same lock. `ClearRules()` replaces the old `Rules.Clear()` call pattern (the one existing call site in `FakeRealtimeScriptingModelTests.cs` updated).
+- New test `Rules_can_be_mutated_safely_while_a_concurrent_enumeration_is_in_progress`: a direct `RealtimeScript`-only repro (no socket/Kestrel) — 4 tasks hammering `On()`/`ClearRules()` concurrently with 4 tasks enumerating `Rules`, for 2s.
+- Mutation-checked: reverted the `Rules` getter to `return _rules;` (the live list) — the new test failed reliably with `InvalidOperationException: Collection was modified; enumeration operation may not execute.` within ~2s; restored `_rules.ToArray()` — green again.
+- Full suite: 72 passed / 1 skipped / 73 total. No regressions.
+- Commit: `3e8d10f`.
+
 
 
