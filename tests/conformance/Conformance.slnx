@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Conformance.Fakes/Conformance.Fakes.csproj" />
+    <Project Path="src/Conformance.Harness/Conformance.Harness.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Conformance.Tests/Conformance.Tests.csproj" />
+  </Folder>
+</Solution>

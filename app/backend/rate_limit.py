@@ -21,6 +21,16 @@ tool follow-up), a `response.create` from the browser, or the socket detaching.
 The resume nudge checks `busy` and stays quiet while a retry is pending or
 running. A retry never fires while another response is in flight, and it is not
 guest activity (it never touches the idle clock).
+
+Conformance test-hook caveat (issue #7): CONFORMANCE_RATE_LIMIT_RETRY_DELAY_SECONDS
+/ CONFORMANCE_RATE_LIMIT_SECOND_RETRY_DELAY_SECONDS (see conformance_hooks.py)
+only override the *no-hint default* fed into `retry_delay()` below -- they do
+NOT change FIRST_RETRY_BOUNDS / SECOND_RETRY_BOUNDS. A scripted rate-limit
+error carrying a service "retry after Ns" hint still clamps into the
+*production* bounds ([0.5s, 5s] / [2s, 8s]) even when CONFORMANCE_TEST_HOOKS=1
+is set. Conformance scenarios that need a fast, deterministic retry should
+either omit the hint text entirely (letting the shortened default apply
+unclamped) or use a hint value already inside the production bounds.
 """
 
 from __future__ import annotations
@@ -32,6 +42,8 @@ import re
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
+
+import conformance_hooks
 
 logger = logging.getLogger("sonic-drive-in")
 
@@ -85,7 +97,11 @@ def parse_retry_hint(text: Any) -> float | None:
 
 
 def retry_delay(hint: float | None, default: float, bounds: tuple[float, float]) -> float:
-    """The service's hint clamped to `bounds`; `default` when there is no hint."""
+    """The service's hint clamped to `bounds`; `default` when there is no hint.
+
+    Note: `bounds` are fixed production constants, never overridable via
+    CONFORMANCE_TEST_HOOKS (see this module's docstring for the caveat this
+    implies for scripted rate-limit hints under test hooks)."""
     if hint is None:
         return default
     low, high = bounds
@@ -114,8 +130,12 @@ class RateLimitSettings:
             enabled = _truthy(env_value)
         return cls(
             enabled=enabled,
-            retry_delay_seconds=float(cfg.get("retry_delay_seconds", 1.5)),
-            second_retry_delay_seconds=float(cfg.get("second_retry_delay_seconds", 4.0)),
+            retry_delay_seconds=conformance_hooks.seconds(
+                "CONFORMANCE_RATE_LIMIT_RETRY_DELAY_SECONDS", float(cfg.get("retry_delay_seconds", 1.5))
+            ),
+            second_retry_delay_seconds=conformance_hooks.seconds(
+                "CONFORMANCE_RATE_LIMIT_SECOND_RETRY_DELAY_SECONDS", float(cfg.get("second_retry_delay_seconds", 4.0))
+            ),
             max_retries=max(0, int(cfg.get("max_retries", 2))),
         )
 

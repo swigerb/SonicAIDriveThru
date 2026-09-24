@@ -1,0 +1,210 @@
+name: Conformance Suite
+
+"on":
+  pull_request:
+    branches: [dev, main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: conformance-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Keep these two in sync with global.json (repo root).
+  DOTNET_VERSION: "11.0.100-rc.1.26425.128"
+  PYTHON_VERSION: "3.12"
+  DOTNET_NOLOGO: "true"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "true"
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "true"
+
+jobs:
+  # Part of issue #11 (S1.5): Python unit tests, run on every PR to dev/main.
+  python-tests:
+    name: Python backend unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: app/backend/requirements.txt
+
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r app/backend/requirements.txt
+          # Dev-only tooling: not in requirements.txt (that file is the
+          # backend's runtime dependency set), pinned to the versions this
+          # branch was validated against.
+          pip install ruff==0.16.1 pytest==9.1.1 pytest-asyncio==1.4.0
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/frontend/package-lock.json
+
+      - name: Build frontend (app/backend/static is gitignored and required by app.py's add_static)
+        working-directory: app/frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: ruff check
+        run: ruff check .
+
+      - name: pytest
+        run: |
+          set -o pipefail
+          python -m pytest app/backend/tests -q --junitxml=pytest-results.xml 2>&1 | tee pytest-output.log
+
+      - name: Upload pytest results on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-tests-results
+          path: |
+            pytest-results.xml
+            pytest-output.log
+          retention-days: 7
+
+  # Part of issue #11 (S1.5): frontend build + tests, run on every PR to dev/main.
+  frontend-tests:
+    name: Frontend build and tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/frontend/package-lock.json
+
+      - name: npm ci
+        working-directory: app/frontend
+        run: npm ci
+
+      - name: npm run build
+        working-directory: app/frontend
+        run: npm run build
+
+      - name: npm test
+        working-directory: app/frontend
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee ../../frontend-test-output.log
+
+      - name: Upload frontend test output on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-tests-results
+          path: |
+            frontend-test-output.log
+            app/frontend/coverage
+          retention-days: 7
+
+  # Part of issue #7 (S1.1) / #11 (S1.5): the shared black-box conformance
+  # suite, against every backend it can currently run. S2 adds "dotnet" to the
+  # matrix once the .NET backend (tracked separately from this test suite)
+  # exists. Adding it to this matrix early would NOT be harmless today:
+  # CONFORMANCE_BACKEND=dotnet FAILS the suite by default in CI (PR #22 review
+  # item 15 -- DotnetPlaceholderPolicy/CiEnvironment.IsCi always ignore the
+  # CONFORMANCE_ALLOW_SKIP=1 opt-in when GITHUB_ACTIONS=true), precisely so CI
+  # can never silently report green with zero real backend coverage. Only add
+  # "dotnet" here once S2 lands.
+  conformance:
+    name: Conformance suite (backend=${{ matrix.backend }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [python]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: app/backend/requirements.txt
+
+      - name: Create Python venv for the backend under test
+        # PythonBackendLauncher (tests/conformance/src/Conformance.Harness)
+        # expects a .venv at the repo root with the backend's runtime deps
+        # installed -- exactly what a developer's local checkout has.
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/python -m pip install -r app/backend/requirements.txt
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/frontend/package-lock.json
+
+      - name: Build frontend (app/backend/static is gitignored and required by app.py's add_static)
+        working-directory: app/frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Set up .NET ${{ env.DOTNET_VERSION }}
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('tests/conformance/Directory.Packages.props', 'tests/conformance/**/*.csproj') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
+      - name: dotnet test tests/conformance
+        working-directory: tests/conformance
+        env:
+          # Resolved from a repo-root-relative .venv by RepoPaths/PythonBackendLauncher.
+          CONFORMANCE_BACKEND: ${{ matrix.backend }}
+        run: |
+          set -o pipefail
+          dotnet test Conformance.slnx \
+            --logger "trx;LogFileName=conformance.trx" \
+            --logger "console;verbosity=detailed" \
+            --results-directory TestResults \
+            --blame-hang --blame-hang-timeout 10min --blame-hang-dump-type mini \
+            --blame-crash --blame-crash-dump-type mini \
+            2>&1 | tee conformance-output.log
+          # PR #22 review item 17: a hung scenario (e.g. a broken await-with-timeout, or the
+          # Python backend wedged and never answering /health) must produce a crash/hang dump and
+          # fail the job well before the job-level timeout-minutes kill, instead of silently
+          # eating the whole 20-minute budget with no diagnostic artifact at all.
+
+      - name: Upload conformance test results on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: conformance-results-${{ matrix.backend }}
+          path: |
+            tests/conformance/TestResults
+            tests/conformance/conformance-output.log
+          retention-days: 7

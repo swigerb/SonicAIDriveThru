@@ -226,7 +226,8 @@ class TestAbsorptionPricing:
         req = order_state_singleton.get_combo_requirements(sid)
         assert req["is_complete"]
 
-    def test_combo_plus_standalone_drink_at_full_price(self):
+    @patch("order_state.is_happy_hour", return_value=False)
+    def test_combo_plus_standalone_drink_at_full_price(self, _mock_hh):
         """Combo with components filled + extra standalone drink is full price."""
         sid = order_state_singleton.create_session()
         order_state_singleton.handle_order_update(

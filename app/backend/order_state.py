@@ -2,9 +2,9 @@ import logging
 import os
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
 from zoneinfo import ZoneInfo
 
+import conformance_hooks
 from config_loader import get_config
 from menu_utils import infer_category, normalize_size
 from models import OrderItem, OrderSummary
@@ -23,7 +23,7 @@ _STORE_TZ = ZoneInfo(os.environ.get("STORE_TIMEZONE", "America/Chicago"))
 
 def is_happy_hour() -> bool:
     """Check if the current time is within the happy hour window (store-local time)."""
-    now = datetime.now(_STORE_TZ)
+    now = conformance_hooks.now(_STORE_TZ)
     start = _biz_cfg.get("happy_hour_start", 14)
     end = _biz_cfg.get("happy_hour_end", 16)
     return start <= now.hour < end

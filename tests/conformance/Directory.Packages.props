@@ -1,0 +1,18 @@
+<Project>
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+    <CentralPackageTransitivePinningEnabled>true</CentralPackageTransitivePinningEnabled>
+  </PropertyGroup>
+  <!--
+    Restored only through https://packagefeedproxy.microsoft.io/nuget/v3/index.json
+    (configured at the machine level; nuget.org is disabled there — do not add a
+    repo-level NuGet.Config that re-enables it or any other feed).
+    Versions below were verified to restore and run against net11.0 in this
+    environment before being pinned here.
+  -->
+  <ItemGroup>
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.10.0" />
+    <PackageVersion Include="xunit.runner.visualstudio" Version="4.0.0" />
+    <PackageVersion Include="xunit.v3.mtp-off" Version="4.0.1" />
+  </ItemGroup>
+</Project>

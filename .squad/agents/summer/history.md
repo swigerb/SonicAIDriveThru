@@ -174,3 +174,21 @@ Detailed technical learnings from demo readiness, debugging, and prompt external
   - The 30 s nudge checks `RateLimitRecovery.busy` before firing; the handler's `finally` detach cancels a pending retry, so nothing fires into a held session.
   - The session.update fallback keeps its correlated-error path; `scripts/benchmark_reasoning.py` unaffected.
 - `resilience.rate_limit` block added to `config.yaml`; env override `RATE_LIMIT_RECOVERY_ENABLED` (empty keeps config).
+
+## 2026-09-23 — feat/conformance-harness (#7)
+
+- Built `app/backend/test_hooks.py`: gated by `CONFORMANCE_TEST_HOOKS=1` (literal `"1"` only), `HOOKS_ENABLED` read once at import time, `now(tz)` (fixed instant from `CONFORMANCE_FIXED_NOW`, requires an explicit offset/zone, converts into caller's `tz`), `seconds(env_var, default)` (parsed override or silent fallback to `default`).
+- Wired into 4 sites / 7 env vars: `order_state.is_happy_hour()` (`CONFORMANCE_FIXED_NOW`), `session_manager.py`'s idle/grace/nudge/first-frame-timeout constants, `rtmt.py`'s `_SESSION_CONFIGURED_TIMEOUT_SEC` (greeting timeout), `rate_limit.py`'s `RateLimitSettings.from_config()` retry delays. Never touched bicep or the Dockerfile.
+- `tests/test_test_hooks.py`: 18 new tests, mutation-checked (hardcoding `HOOKS_ENABLED = True` fails 8/18; restoring is green).
+- Found and fixed a genuine pre-existing flaky test directly in the domain the hooks address: `test_combo_orders.py::test_combo_plus_standalone_drink_at_full_price` never patched `is_happy_hour()` unlike its siblings, so it failed whenever run during the real happy-hour window.
+- `pytest app/backend/tests -q`: 586 passed, 61 subtests (568 baseline + 18 new). `ruff check .` clean.
+- Decision logged: `.squad/decisions/inbox/summer-test-hooks.md`.
+
+## 2026-09-24 — feat/conformance-harness Stage C item N8 (#7)
+
+- Rick's N8 (Python half): `conformance_hooks.py`'s `seconds()` silently swallowed an unparseable override and fell back to `default` — the same "silent ignore" shape item 14 already fixed for `CONFORMANCE_FIXED_NOW`, just left over for the timer overrides. Also fixed a wrong docstring claim that a trailing "IANA zone" is accepted by `_parse_fixed_now` — `datetime.fromisoformat` only accepts a numeric UTC offset (or `Z`), confirmed empirically (`fromisoformat("...America/Chicago")` raises).
+- `seconds(env_var, default)` now raises `ValueError` immediately when hooks are enabled and the override is present but unparseable, NaN, +/-infinity, zero, or negative; unset/empty still falls back to `default` untouched. Every call site (`session_manager.py`, `rate_limit.py`, `rtmt.py`) assigns the result to a module-level constant at its own import time, so this makes a bad override fail the backend's startup immediately (non-zero exit) instead of silently running an entire test/production run with a wrong timer value.
+- `test_conformance_hooks.py`: removed `test_seconds_falls_back_on_unparseable_override` (it locked in the old silent-ignore behaviour, which is exactly what this item removes); added `TestSecondsFailsFastOnInvalidOverride` — 6 tests: unparseable/NaN(`"nan"`,`"NaN"`)/+-inf(`"inf"`,`"-inf"`,`"Infinity"`)/zero/negative all must raise `ValueError` naming the env var; unset-override and hooks-disabled-with-garbage-value must not raise.
+- Mutation-checked: reverted `seconds()` to the old catch-and-fall-back body → all 10 parametrized/direct cases in the new test class failed with "DID NOT RAISE ValueError" → restored → 36/36 green in `test_conformance_hooks.py`.
+- `pytest app/backend/tests -q`: 604 passed, 61 subtests passed (up from the 592 baseline reported after Stage B, plus this stage's incremental additions). `ruff check .` clean.
+- Beth logged the C#/README/workflow half of this item (`BackendEnvironment.cs` reclassification, the stale CI comment, the "Test hooks" README section) — commit `94f2432` covers both halves in one changeset since they landed together.

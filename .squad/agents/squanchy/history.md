@@ -101,3 +101,19 @@
   - Guard: `tests/test_infra_resume.py` (parses the Dockerfile and bicep). 5 mutations, all killed.
   - `az bicep build`: 0 errors, with the baseline warnings.
   - Live-only checks: the affinity cookie on the WS upgrade through the EasyAuth sidecar, and the secrets PUT semantics.
+
+- **Conformance CI workflow (2026-09-23, `feat/conformance-harness`, #11)**
+  - Added `.github/workflows/conformance.yml`: `pull_request` to `dev`/`main` + `workflow_dispatch`, three independent jobs (`python-tests`, `frontend-tests`, `conformance`), `ubuntu-latest`.
+  - `conformance` job runs `dotnet test tests/conformance` with `CONFORMANCE_BACKEND=python` against a repo-root `.venv`; matrixed on `backend: [python]` so S2 adds `dotnet` with a one-line diff.
+  - Required Beth's cross-platform fix first: `RepoPaths.PythonExecutable()` was Windows-only (`.venv/Scripts/python.exe`); GitHub-hosted Linux runners need `.venv/bin/python`.
+  - Actions pinned at major-version tags, `permissions: contents: read`, concurrency-cancel on superseded runs, caching (pip/npm built-in via setup actions, explicit `actions/cache` for `~/.nuget/packages`), failure-only log/results artifact upload on every job.
+  - Confirmed no changes needed for public-registry CI access: `package-lock.json` already 0 internal hosts (grep-verified), no repo-level `NuGet.Config` forcing the corporate proxy.
+  - YAML validated via `PyYAML`'s `yaml.safe_load` (caught and quoted the `on:` boolean-coercion gotcha) — `actionlint` not available without an out-of-policy binary fetch, so schema correctness was reasoned manually against documented `actions/*` inputs.
+  - Not yet empirically verified (can't run Actions locally): `actions/setup-dotnet` resolving the exact prerelease SDK string `11.0.100-rc.1.26425.128` on a fresh Linux runner — flagged for the first real PR run.
+  - Commit: `d1d0720`. Decision logged: `.squad/decisions/inbox/squanchy-conformance-ci.md`.
+
+- **Conformance CI Stage A fix (2026-09-24, `feat/conformance-harness`, Rick's PR #22 review, #7/#11)**
+  - Root cause of red CI: `app/backend/static` is gitignored and only exists after `npm run build`; the coordinator's local "8/8" had only passed because that machine already had a stale built frontend. GitHub-hosted runners start clean, so both `python-tests` and `conformance` jobs failed the moment the backend (or the harness's Python launcher) needed `static/index.html`.
+  - Fixed as item 1 (implemented alongside Beth's harness-side fail-fast message, committed together as `1e33e5f`): `.github/workflows/conformance.yml` now runs `npm ci && npm run build` in `app/frontend` before both the `python-tests` and `conformance` jobs consume the backend, so `app/backend/static` exists by the time either suite starts.
+  - Verified the harness's own defense-in-depth: with `app/backend/static` moved aside locally (simulating a clean runner before the frontend-build step would have run), `dotnet test tests/conformance` fails immediately with a clear, actionable message (`'...\static\index.html' does not exist...`) instead of the previous opaque "backend exited early" — so even if a future workflow edit reorders steps incorrectly, CI will fail loud and clear rather than silently.
+  - No other CI job changes needed for Stage A; items 8–17 (Stage B) are out of scope until the coordinator pushes and confirms this round is green.
