@@ -237,5 +237,17 @@
 - Full suite: 84 passed / 1 skipped / 85 total, run 3×. No regressions.
 - Commit: `db71637`.
 
+## 2026-09-24 — feat/conformance-harness Stage C item N8 (#7)
+
+- Rick's N8: a batch of documentation/hardening follow-ups. `app/backend/conformance_hooks.py` was already fail-fast for `CONFORMANCE_FIXED_NOW` (item 14) but `seconds()` still silently swallowed any unparseable override and fell back to `default` — the same "lock in a silent ignore" shape item 14 fixed for the clock, just left over for the timer overrides. Also: the `_parse_fixed_now` docstring claimed a trailing "IANA zone" was accepted, which is false — `datetime.fromisoformat` only accepts a numeric UTC offset (or `Z`).
+- `seconds(env_var, default)` now raises `ValueError` immediately when hooks are enabled and the override is present but unparseable, NaN, +/-infinity, zero, or negative — absence/empty still falls back to `default` untouched (that's not a misconfiguration). Since every call site (`session_manager.py`, `rate_limit.py`, `rtmt.py`) assigns the result to a module-level constant at its own import time, this makes a bad override a fail-fast, non-zero-exit backend startup failure instead of a silently-wrong timer value for an entire test run — symmetric with the existing `CONFORMANCE_FIXED_NOW` behaviour.
+- `test_conformance_hooks.py`: removed `test_seconds_falls_back_on_unparseable_override` (the test that had locked in the old silent-ignore behaviour); added `TestSecondsFailsFastOnInvalidOverride` (6 tests: unparseable/NaN/+-inf/zero/negative must raise with the env var name in the message; unset override and hooks-disabled must not raise).
+- `BackendEnvironment.cs`: reclassified `RUNNING_IN_PRODUCTION`, `LOG_LEVEL`, `APP_SESSION_SECRET`, `RATE_LIMIT_RECOVERY_ENABLED` from the "Python-launcher-specific" comment group into the "neutral BackendContract" group — their *names* happen to come from this backend's own config surface, but the underlying need (production-like startup, explicit log level, a session secret, rate-limit recovery enabled) applies to any backend under test. Only `PYTHONUNBUFFERED`/`PYTHONUTF8` (genuine CPython interpreter env vars) remain in the Python-specific group.
+- `.github/workflows/conformance.yml`: fixed a stale comment near the `conformance` job claiming `CONFORMANCE_BACKEND=dotnet` "skips cleanly" — item 15 changed that to FAIL by default in CI instead (so CI can never silently report green with zero real backend coverage); the comment now says so. Validated the YAML still parses (`yaml.safe_load`).
+- `README.md`: added a full "Test hooks" section (every `CONFORMANCE_*` test-hook var: units, allowed range, consumer, failure behaviour), documented the frozen-clock semantics precisely (RFC 3339 numeric offset only — never an IANA zone name — does not advance, business wall-clock logic only), the rate-limit hint-clamping caveat, and the startup `WARNING` log; updated the env-var table for the `BackendEnvironment` reclassification above and added the previously-undocumented `CONFORMANCE_SWEEP_INTERVAL_SECONDS` row.
+- Mutation-checked: reverted `seconds()` to the old catch-and-fall-back body → all 10 relevant cases in `TestSecondsFailsFastOnInvalidOverride` failed with "DID NOT RAISE ValueError" → restored → 36/36 green in `test_conformance_hooks.py`.
+- Full suite: 84 passed / 1 skipped / 85 total (.NET), run 3×. `pytest`: 604 passed, 61 subtests passed. `ruff check .`: clean. No regressions.
+- Commit: `94f2432`.
+
 
 
