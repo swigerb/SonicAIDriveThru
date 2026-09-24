@@ -236,11 +236,17 @@ a correct backend in another language must reproduce all three, in this order:
    `reasoning` once shouldn't keep re-triggering the fallback path for every new browser tab.
 2. **The explicit `reasoning_model` switch, tri-state.** `AZURE_OPENAI_REALTIME_REASONING_MODEL`
    (env) / `model.reasoning_model` (config.yaml) is parsed by `parse_reasoning_model` into
-   `True` / `False` / `None`: the literal strings `"true"`/`"false"` (case-insensitive) force the
-   feature on or off outright; anything else — `"auto"`, unset, empty, or an unrecognised value —
-   is `None` and falls through to the name-based default (input 3). `None` is *not* the same as
-   `False`: an explicit `false` and an unset/`"auto"` value are different tri-state members and are
-   asserted separately (see below).
+   `True` / `False` / `None`. The literal string comparison is case-insensitive and accepts
+   synonyms, not just `"true"`/`"false"`:
+   - `"true"`, `"yes"`, `"on"`, `"1"` → `True` (force reasoning on).
+   - `"false"`, `"no"`, `"off"`, `"0"` → `False` (force reasoning off).
+   - `""`, `"auto"`, `"null"`, `"none"` (or an unset value) → `None` ("auto"), explicitly, not
+     merely by falling through as an unrecognised value.
+   - Anything else is *also* `None`, but logs a `WARNING` ("Ignoring unknown reasoning_model...")
+     since it wasn't one of the recognised spellings above.
+
+   `None` is *not* the same as `False`: an explicit `false` and an unset/`"auto"` value are
+   different tri-state members and are asserted separately (see below).
 3. **The deployment-name check, `auto`'s default only.** `deployment_supports_reasoning` matches the
    deployment name against `_NON_REASONING_DEPLOYMENT_RE`, copied here **verbatim** from
    `app/backend/rtmt.py` so this doesn't silently drift from the real regex:
@@ -258,6 +264,27 @@ a correct backend in another language must reproduce all three, in this order:
    `gpt-realtime-2.1[-dz]`, this suite's own default deployment, and any unrecognised custom name —
    is assumed reasoning-capable, so an unrecognised name fails open into the fallback path (input 1)
    rather than silently omitting a feature it might actually support.
+
+**Inputs 1–3 above (`_reasoning_model()`) only decide whether reasoning-model-only fields *may* be
+sent at all — they are not sufficient on their own.** `reasoning_enabled()`, the actual gate
+`_build_session` checks before adding the `reasoning` key, additionally requires
+`normalize_reasoning_effort(self.reasoning_effort) is not None`:
+
+```python
+def reasoning_enabled(self) -> bool:
+    return normalize_reasoning_effort(self.reasoning_effort) is not None and self._reasoning_model()
+```
+
+So even on a deployment/switch combination where `_reasoning_model()` is `True`, `reasoning` is
+still omitted entirely if `AZURE_OPENAI_REALTIME_REASONING_EFFORT` / `model.reasoning_effort`
+normalizes to `None` — i.e. it is unset, empty, or one of `_REASONING_DISABLED_VALUES`
+(`""`, `"off"`, `"disabled"`, `"false"`, `"null"`). This is a 4th, independent precondition on top
+of the three-input precedence above, not a fourth member of that precedence chain: it doesn't
+interact with the rejection latch or the deployment-name default at all, it just short-circuits
+`reasoning_enabled()` to `False` regardless of what they decide. `config.yaml`'s own default
+(`reasoning_effort: "low"`) means every existing fixture below already has a non-`None` effort, so
+this precondition isn't independently exercised by any dedicated fixture yet — noted here rather
+than silently assumed.
 
 All four combinations input 2/3 can produce are covered, each pinned on its own dedicated fixture in
 `ReasoningDeploymentFixtures.cs` (a distinct deployment name and/or env var forces its own backend
