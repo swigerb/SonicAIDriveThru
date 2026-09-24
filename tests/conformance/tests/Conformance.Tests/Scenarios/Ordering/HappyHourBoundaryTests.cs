@@ -68,6 +68,52 @@ public sealed class HappyHourAtOpenTests(HappyHourAtOpenFixture fixture)
         OrderScenarioHelpers.AssertMoneyEqual(
             HappyHourBoundaryTestSupport.HappyHourFinalTotal(HappyHourBoundaryTestSupport.DrinkPrice), finalTotal);
     });
+
+    [Fact]
+    public Task A_non_drink_item_is_unaffected_by_happy_hour_pricing_logic() => fixture.RunAsync(async () =>
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (browser, connection, roundTripIndex) = await OrderScenarioHelpers.ConnectAndGreetAsync(fixture, ct);
+        await using var _ = browser;
+
+        var result = await OrderScenarioHelpers.RunOrderStepsAsync(
+            connection, browser,
+            [("add", "Tots", "medium", 1, 2.79m)],
+            roundTripIndex, ct);
+
+        // Paired with HappyHourJustBeforeClose's drink-item assertion (also taken during an
+        // active window) this demonstrates order_state.py::_update_summary's
+        // `_infer_combo_component(...) == "drinks"` guard is item-category-scoped, not merely
+        // clock-scoped: a non-drink item's price is never discounted regardless of the clock.
+        OrderScenarioHelpers.AssertMoneyEqual(
+            HappyHourBoundaryTestSupport.FullPriceFinalTotal(2.79m),
+            OrderScenarioHelpers.GetOrderFinalTotal(result.ToolResultJson!));
+    });
+
+    [Fact(Skip = "order_state.py/menu_utils.py's category fallback treats any name containing " +
+                 "'pepper' (matching Dr Pepper's keyword heuristic) as a drink, so Ched 'R' " +
+                 "Peppers (a side) gets the 50% happy-hour discount it should never receive -- " +
+                 "#39. Not fixing Python here (needs the golden category table, which is out of " +
+                 "scope per this task's instructions); tracked for the C# backend.")]
+    public Task Ched_R_Peppers_is_full_price_during_happy_hour_despite_the_keyword_pepper() => fixture.RunAsync(async () =>
+    {
+        var ct = TestContext.Current.CancellationToken;
+        const decimal unitPrice = 3.99m; // Small, app/frontend/src/data/menuItems.json
+        var (browser, connection, roundTripIndex) = await OrderScenarioHelpers.ConnectAndGreetAsync(fixture, ct);
+        await using var _ = browser;
+
+        var result = await OrderScenarioHelpers.RunOrderStepsAsync(
+            connection, browser,
+            [("add", "Ched 'R' Peppers", "small", 1, unitPrice)],
+            roundTripIndex, ct);
+
+        // A side must price exactly like this class's own non-drink case above (full price, no
+        // happy-hour discount) even though its name contains "pepper" -- unlike an actual drink
+        // such as Dr Pepper, which the keyword fallback exists to correctly catch.
+        OrderScenarioHelpers.AssertMoneyEqual(
+            HappyHourBoundaryTestSupport.FullPriceFinalTotal(unitPrice),
+            OrderScenarioHelpers.GetOrderFinalTotal(result.ToolResultJson!));
+    });
 }
 
 [Collection(HappyHourJustBeforeCloseCollection.Name)]
@@ -93,27 +139,6 @@ public sealed class HappyHourAtCloseTests(HappyHourAtCloseFixture fixture)
         var finalTotal = await HappyHourBoundaryTestSupport.AddOneDrinkAndReadFinalTotalAsync(fixture, ct);
         OrderScenarioHelpers.AssertMoneyEqual(
             HappyHourBoundaryTestSupport.FullPriceFinalTotal(HappyHourBoundaryTestSupport.DrinkPrice), finalTotal);
-    });
-
-    [Fact]
-    public Task A_non_drink_item_is_unaffected_by_happy_hour_pricing_logic() => fixture.RunAsync(async () =>
-    {
-        var ct = TestContext.Current.CancellationToken;
-        var (browser, connection, roundTripIndex) = await OrderScenarioHelpers.ConnectAndGreetAsync(fixture, ct);
-        await using var _ = browser;
-
-        var result = await OrderScenarioHelpers.RunOrderStepsAsync(
-            connection, browser,
-            [("add", "Tots", "medium", 1, 2.79m)],
-            roundTripIndex, ct);
-
-        // Paired with HappyHourAtOpen/JustBeforeClose's drink-item assertions (both taken during
-        // an active window) this demonstrates order_state.py::_update_summary's
-        // `_infer_combo_component(...) == "drinks"` guard is item-category-scoped, not merely
-        // clock-scoped: a non-drink item's price is never discounted regardless of the clock.
-        OrderScenarioHelpers.AssertMoneyEqual(
-            HappyHourBoundaryTestSupport.FullPriceFinalTotal(2.79m),
-            OrderScenarioHelpers.GetOrderFinalTotal(result.ToolResultJson!));
     });
 }
 
