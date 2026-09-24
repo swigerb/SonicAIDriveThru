@@ -7,7 +7,10 @@ namespace Conformance.Tests;
 /// #8: app/backend/app.py's `_index_handler` serves the built frontend's `static/index.html` for
 /// the root route with `Cache-Control: no-cache` explicitly set (so a stale cached shell never
 /// masks a new deploy) — see app/backend/tests/test_app.py. Not previously covered by any
-/// existing conformance test.
+/// existing conformance test. Asserted via the typed `CacheControlHeaderValue.NoCache` flag (PR
+/// #42 review item 13), not a raw string comparison — the contract is the directive being present,
+/// not the exact header string a C# backend happens to serialise it as (e.g. alongside other
+/// directives, different casing/whitespace).
 /// </summary>
 [Collection(ConformanceCollection.Name)]
 public sealed class StaticIndexHtmlTests(ConformanceFixture fixture)
@@ -19,7 +22,8 @@ public sealed class StaticIndexHtmlTests(ConformanceFixture fixture)
         using var response = await http.GetAsync(fixture.Backend!.BaseUri, TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Equal("no-cache", response.Headers.CacheControl?.ToString());
+        Assert.True(response.Headers.CacheControl?.NoCache,
+            $"Expected Cache-Control: no-cache on the index route, got '{response.Headers.CacheControl}'.");
         Assert.Contains("text/html", response.Content.Headers.ContentType?.MediaType ?? "", StringComparison.OrdinalIgnoreCase);
 
         var body = await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken);
