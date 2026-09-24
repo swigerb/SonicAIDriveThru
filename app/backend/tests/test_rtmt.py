@@ -211,7 +211,7 @@ class SessionManagerGreetingTests(unittest.TestCase):
         self.assertFalse(self.sm.has_sent_greeting(sid2))
 
     def test_greeting_msg_default(self):
-        msg = json.loads(self.sm.greeting_msg)
+        msg = json.loads(self.sm.build_greeting_msg())
         self.assertEqual(msg["type"], "conversation.item.create")
 
     def test_greeting_msg_default_carries_middle_tier_item_id(self):
@@ -219,22 +219,33 @@ class SessionManagerGreetingTests(unittest.TestCase):
         greeting is role="user", so a role-based drop in rtmt.py can never
         catch it -- it must be identifiable by authorship (item id prefix)
         instead."""
-        msg = json.loads(self.sm.greeting_msg)
+        msg = json.loads(self.sm.build_greeting_msg())
         self.assertEqual(msg["item"]["role"], "user")
         self.assertTrue(msg["item"]["id"].startswith(MIDDLE_TIER_ITEM_ID_PREFIX))
 
-    def test_greeting_msg_id_is_stable_across_reads(self):
-        """The id is baked in once at construction time, not regenerated per
-        read -- session_manager.py's own exact-dict-equality tests
-        (test_order_resume.py) compare two independent reads of greeting_msg
-        against each other and against what was actually sent upstream."""
-        self.assertEqual(self.sm.greeting_msg, self.sm.greeting_msg)
+    def test_greeting_msg_gets_a_fresh_id_on_every_call(self):
+        """PR #30 review "G1"/item 1: GA live-verified that a repeated item id
+        within one conversation is rejected (item_create_duplicate_item_id).
+        A greeting id baked in once at construction and reused for every send
+        would collide with itself the first time a second greeting is needed
+        on the same upstream conversation history (e.g. resume-before-any-
+        conversation, which re-greets). build_greeting_msg must therefore
+        stamp a fresh id on every call, exactly like build_rehydration_item
+        and build_nudge_item already do."""
+        first = json.loads(self.sm.build_greeting_msg())
+        second = json.loads(self.sm.build_greeting_msg())
+        self.assertNotEqual(first["item"]["id"], second["item"]["id"])
+        self.assertTrue(second["item"]["id"].startswith(MIDDLE_TIER_ITEM_ID_PREFIX))
+        # Only the id differs -- the rest of the greeting is identical.
+        first["item"].pop("id")
+        second["item"].pop("id")
+        self.assertEqual(first, second)
 
     def test_greeting_msg_from_prompt_loader(self):
         loader = MagicMock()
         loader.get_greeting_json_str.return_value = '{"type":"custom_greeting"}'
         sm = SessionManager(prompt_loader=loader)
-        self.assertEqual(sm.greeting_msg, '{"type":"custom_greeting"}')
+        self.assertEqual(sm.build_greeting_msg(), '{"type":"custom_greeting"}')
 
     def test_greeting_msg_from_prompt_loader_with_item_gets_id_injected(self):
         loader = MagicMock()
@@ -243,7 +254,7 @@ class SessionManagerGreetingTests(unittest.TestCase):
             "item": {"type": "message", "role": "user", "content": []},
         })
         sm = SessionManager(prompt_loader=loader)
-        msg = json.loads(sm.greeting_msg)
+        msg = json.loads(sm.build_greeting_msg())
         self.assertTrue(msg["item"]["id"].startswith(MIDDLE_TIER_ITEM_ID_PREFIX))
 
 

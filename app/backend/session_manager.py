@@ -266,13 +266,24 @@ class SessionManager:
         self.sweep_interval_seconds = _RESUME_SWEEP_INTERVAL_SECONDS
 
         if prompt_loader is not None:
-            self._greeting_msg = _with_middle_tier_item_id(prompt_loader.get_greeting_json_str())
+            self._greeting_template = prompt_loader.get_greeting_json_str()
         else:
-            self._greeting_msg = _with_middle_tier_item_id(_DEFAULT_GREETING_MSG)
+            self._greeting_template = _DEFAULT_GREETING_MSG
 
-    @property
-    def greeting_msg(self) -> str:
-        return self._greeting_msg
+    def build_greeting_msg(self) -> str:
+        """A fresh `conversation.item.create` for the greeting, with a brand-new
+        middle-tier item id stamped on *this* call (swigerb/SonicAIDriveThru#29
+        follow-up, PR #30 review "G1" / item 1).
+
+        GA rejects a repeated item id within the same conversation
+        (`item_create_duplicate_item_id`), so an id baked in once at
+        `SessionManager` construction and reused for every greeting would
+        break any second greeting on the same upstream conversation history
+        (e.g. a resume that happens before the conversation ever started, which
+        re-greets rather than rehydrating). Mirrors `build_rehydration_item`
+        and `build_nudge_item`, which already build a fresh item -- id
+        included -- on every call rather than caching one at init."""
+        return _with_middle_tier_item_id(self._greeting_template)
 
     @property
     def idle_timeout_seconds(self) -> float:

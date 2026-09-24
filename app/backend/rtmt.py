@@ -1166,14 +1166,15 @@ class RTMiddleTier:
                     echo.start_greeting_suppression(verbose)
                     # Flush any stale audio that arrived before session was configured
                     await target_ws.send_str(_INPUT_AUDIO_CLEAR_MSG)
-                    await target_ws.send_str(self._sessions.greeting_msg)
+                    greeting_msg = self._sessions.build_greeting_msg()
+                    await target_ws.send_str(greeting_msg)
                     await target_ws.send_str(_RESPONSE_CREATE_MSG)
                     if session_id is not None:
                         self._sessions.mark_greeting_sent(session_id)
                     # Track greeting in context window
                     ctx_monitor = self._sessions.get_context_monitor(session_id)
                     if ctx_monitor:
-                        ctx_monitor.add_content(self._sessions.greeting_msg)
+                        ctx_monitor.add_content(greeting_msg)
 
                 async def announce_fresh():
                     """Send extension.session_metadata (with a resume id) once the resume
