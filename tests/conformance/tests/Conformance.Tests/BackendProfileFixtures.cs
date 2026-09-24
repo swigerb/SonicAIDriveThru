@@ -24,6 +24,38 @@ public sealed class ShortTimersConformanceCollection : ICollectionFixture<ShortT
 }
 
 /// <summary>
+/// Same generous idle/grace/nudge budgets as <see cref="BackendProfiles.BrowserTimers"/>, but for
+/// a plain-WebSocket reason: see <see cref="BackendProfiles.RateLimitTimers"/>'s doc comment for
+/// why a fresh connection's echo-suppression cooldown needs this much wall-clock room.
+/// </summary>
+public sealed class RateLimitTimersConformanceFixture : ConformanceFixture
+{
+    protected override BackendProfile Profile => BackendProfiles.RateLimitTimers;
+}
+
+[CollectionDefinition(Name)]
+public sealed class RateLimitTimersConformanceCollection : ICollectionFixture<RateLimitTimersConformanceFixture>
+{
+    public const string Name = "ConformanceRateLimitTimers";
+}
+
+/// <summary>
+/// See <see cref="BackendProfiles.ResumeTimers"/>'s doc comment: an 8-second idle/grace budget
+/// (instead of <see cref="ShortTimersConformanceFixture"/>'s 1-second one) for the multi-round-trip
+/// resume-handshake scenarios that aren't testing idle behaviour themselves.
+/// </summary>
+public sealed class ResumeTimersConformanceFixture : ConformanceFixture
+{
+    protected override BackendProfile Profile => BackendProfiles.ResumeTimers;
+}
+
+[CollectionDefinition(Name)]
+public sealed class ResumeTimersConformanceCollection : ICollectionFixture<ResumeTimersConformanceFixture>
+{
+    public const string Name = "ConformanceResumeTimers";
+}
+
+/// <summary>
 /// Frozen at 2026-07-04T15:00:00-05:00 (America/Chicago, CDT) — inside the 14:00-16:00 happy-hour
 /// window app/backend/config.yaml's business_rules configure, so scenarios needing deterministic
 /// happy-hour pricing don't depend on what day or hour the suite happens to run.
