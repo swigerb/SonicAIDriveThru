@@ -1,6 +1,6 @@
-using System.Text.Json;
 using Conformance.Fakes;
 using Conformance.Harness;
+using Conformance.Tests.Scenarios.Ordering;
 using Xunit;
 
 namespace Conformance.Tests;
@@ -70,16 +70,19 @@ public sealed class HappyHourPricingTests(FixedClockConformanceFixture fixture)
             $"Expected extension.middle_tier_tool_response for update_order on the browser within {FrameTimeout}.");
 
         // tool_result is the order summary's JSON-serialised OrderSummary (see
-        // app/backend/tools.py's update_order -> client_text=json_order_summary).
+        // app/backend/tools.py's update_order -> client_text=json_order_summary). Parsed as
+        // decimal per the money contract (golden-order-pricing.json's own `description` /
+        // README's "Money contract" section) -- never GetDouble(), which would reintroduce the
+        // double-arithmetic rounding this suite's decimal contract exists to catch.
         var toolResultJson = toolResponse!.Json.GetProperty("tool_result").GetString();
         Assert.NotNull(toolResultJson);
-        using var orderSummary = JsonDocument.Parse(toolResultJson!);
-        var finalTotal = orderSummary.RootElement.GetProperty("finalTotal").GetDouble();
+        var finalTotal = OrderScenarioHelpers.GetOrderFinalTotal(toolResultJson!);
 
-        // price(4.00) * qty(1) * happy_hour_discount(0.5) = 2.00; + tax_rate(0.08) = 2.16.
-        // See app/backend/config.yaml's business_rules and order_state.py's _update_summary.
-        const double expectedFinalTotal = price * 0.5 * 1.08;
-        Assert.Equal(expectedFinalTotal, finalTotal, precision: 2);
+        // price(4.00) * qty(1) * happy_hour_discount(0.5) = 2.00 subtotal; tax = 2.00 * tax_rate
+        // (0.08) = 0.16; finalTotal = 2.16. See app/backend/config.yaml's business_rules and
+        // order_state.py's _update_summary. Exact decimal, no rounding at any step (must-fix #1).
+        const decimal expectedFinalTotal = 2.16m;
+        OrderScenarioHelpers.AssertMoneyEqual(expectedFinalTotal, finalTotal);
 
         // The "backend logged no unhandled error during this scenario" invariant (PR #22 review
         // item N5) is now a fixture-wide, language-neutral check applied by
