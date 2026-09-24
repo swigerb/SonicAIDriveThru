@@ -200,13 +200,23 @@ public static class OrderScenarioHelpers
     }
 
     /// <summary>
-    /// Money-contract tolerance (PR #38 review item 1): the live Python backend computes in
-    /// IEEE-754 double and echoes back tiny float noise on the wire (e.g. 0.8151999999999999
-    /// instead of the exact decimal 0.8152); this absolute tolerance absorbs exactly that noise
-    /// while still failing a genuinely wrong implementation (e.g. one that rounds tax to cents
-    /// per line before summing, which differs by far more than a double-rounding error's width).
+    /// Money-contract tolerance (PR #38 review item 1; tightened per PR #38 re-review should-fix
+    /// 3). The live Python backend computes in IEEE-754 double and echoes back tiny float noise on
+    /// the wire (e.g. 0.8151999999999999 instead of the exact decimal 0.8152); a non-zero absolute
+    /// tolerance absorbs exactly that noise. But a real `decimal`-based .NET backend has no excuse
+    /// for *any* noise at all — giving it the same 1e-6 slack would silently let a broken
+    /// `double`-internally implementation pass, reintroducing precisely the bug the exact-decimal
+    /// contract exists to catch (Rick's review). So the tolerance is conditional on which backend
+    /// is under test: exactly `0m` for `CONFORMANCE_BACKEND=dotnet`, `0.000001m` otherwise
+    /// (`python`, the default, or an external URL pointed at a Python instance).
     /// </summary>
-    public const decimal MoneyTolerance = 0.000001m;
+    public static decimal MoneyTolerance =>
+        string.Equals(
+            Environment.GetEnvironmentVariable("CONFORMANCE_BACKEND"),
+            "dotnet",
+            StringComparison.OrdinalIgnoreCase)
+            ? 0m
+            : 0.000001m;
 
     /// <summary>
     /// Asserts two money values are equal within <see cref="MoneyTolerance"/>. Never use xUnit's

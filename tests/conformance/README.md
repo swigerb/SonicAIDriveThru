@@ -467,11 +467,17 @@ Consequences for how this suite is written:
   `JsonElement.GetDecimal()` — **never** `JsonElement.GetDouble()` — which reads the raw JSON number
   token text directly into `decimal`.
 - All money assertions go through `OrderScenarioHelpers.AssertMoneyEqual(expected, actual)`, an
-  absolute-tolerance decimal comparison (`|expected − actual| ≤ 0.000001m`). This tolerance exists
-  solely to absorb the live Python backend's own internal `double` arithmetic noise on the wire
-  (e.g. it may echo back `0.8151999999999999` instead of the golden `0.8152`) — it is **not** a
-  license to round anywhere in this suite's own math, and it is far too tight to mask a genuinely
-  wrong implementation (e.g. one that rounds tax to cents per line before summing).
+  absolute-tolerance decimal comparison. The tolerance is **backend-conditional**
+  (PR #38 re-review should-fix 3): `0.000001m` when testing the live Python backend (the default,
+  `CONFORMANCE_BACKEND=python`, or an external URL pointed at one) — solely to absorb *that*
+  backend's own internal `double` arithmetic noise on the wire (e.g. it may echo back
+  `0.8151999999999999` instead of the golden `0.8152`) — and exactly `0m` (no slack at all) when
+  `CONFORMANCE_BACKEND=dotnet`. A real `decimal`-based .NET implementation has no excuse for any
+  noise whatsoever; giving it the same 1e-6 slack as Python would silently let a broken
+  `double`-internally implementation pass, reintroducing precisely the bug this exact-decimal
+  contract exists to catch. Neither tolerance is a license to round anywhere in this suite's own
+  math, and 1e-6 is far too tight to mask a genuinely wrong implementation (e.g. one that rounds
+  tax to cents per line before summing).
 - **Never** use xUnit's `Assert.Equal(double, double, precision: N)` for money in this stream: that
   rounds via `Math.Round(double, N)` semantics, which both wrongly fails some correct decimal-exact
   values (`10.185m` rounds to `10.18`, not the correct `10.19`) and wrongly passes some incorrect
