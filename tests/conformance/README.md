@@ -478,11 +478,17 @@ Consequences for how this suite is written:
   contract exists to catch. Neither tolerance is a license to round anywhere in this suite's own
   math, and 1e-6 is far too tight to mask a genuinely wrong implementation (e.g. one that rounds
   tax to cents per line before summing).
-- **Never** use xUnit's `Assert.Equal(double, double, precision: N)` for money in this stream: that
-  rounds via `Math.Round(double, N)` semantics, which both wrongly fails some correct decimal-exact
-  values (`10.185m` rounds to `10.18`, not the correct `10.19`) and wrongly passes some incorrect
-  ones. There must be no `precision: 2` (or any other precision-based money assertion) anywhere
-  under `Scenarios/Ordering/`.
+- **Never** use xUnit's `Assert.Equal(double, double, precision: N)` for money in this stream: it
+  rounds *both* operands via `Math.Round(double, N)` (banker's/to-even rounding) before comparing,
+  which is simply the wrong operation for asserting on an exact wire value — a correct
+  implementation's exact `10.185` and a broken one that happens to round to `10.19` first can both
+  satisfy `precision: 2` equally well, and a correct exact `10.185` can just as easily be reported
+  as unequal to another correct exact `10.185` if float parsing introduced even a whisker of noise
+  below the second decimal place. (Separately, `10.185` *rendered* to two decimal places under this
+  suite's own display-rounding rule is `10.19` — see "Rendering money for display" below — but that
+  rule is about presentation text, never about how wire/golden values are compared.) There must be
+  no `precision: 2` (or any other precision-based money assertion) anywhere under
+  `Scenarios/Ordering/`.
 
 ### Tool-error unhandled-error-count contract (PR #38 review item 2)
 
@@ -548,4 +554,27 @@ value is equivalent on the wire (`10.185`, `10.1850`, `1.0185e1` all parse to th
 value, per `AssertMoneyEqual`. `search`'s `tool_result` is always `null`
 (it's `ToolResultDirection.TO_SERVER`-only and never reaches the browser at all) — its
 model-visible content is instead the plain-text `function_call_output` sent upstream.
+
+### Rendering money for display (PR #38 re-review should-fix 2)
+
+The exact-decimal contract above governs every wire/golden numeric field (`total`, `tax`,
+`finalTotal`, `items[].price`) — there is no rounding anywhere in that arithmetic. Separately, the
+**spoken/human-readable `$X.XX` text** the model reads back to the guest (and any `.2f`-style
+display formatting) is presentation-only and follows its own, additional rule: round the exact
+decimal to two places using **round half away from zero** (C#: `decimal` value with
+`Math.Round(value, 2, MidpointRounding.AwayFromZero)`). This rule only ever consumes the exact
+decimal as input — it must never feed back into subtotal/tax/finalTotal math, and it is
+independent of (not a replacement for) the wire/golden exact-decimal contract.
+
+Python's actual behavior does not implement this (or any single) decimal rounding rule for
+half-cent-landing totals: it renders with `float`'s `:.2f` format specifier, which round-trips
+through IEEE-754 double and can disagree with *every* consistent decimal rounding rule (round half
+away from zero, round half to even, etc.) depending on the specific value's binary representation.
+Rick's 200k-order simulation found hundreds of disagreements for values that land exactly on a half
+cent. Golden cases whose `finalTotal` lands exactly on a half cent (e.g. a scenario engineered so
+pre-tax subtotal + tax produces an `X.XX5` total) therefore have their spoken-text assertion
+`Skip`'d, referencing #46 — this is a known, filed Python defect, not a harness or contract defect.
+Non-half-cent cases are not affected by this ambiguity and their spoken-text assertions stay
+active, so a backend that (for example) speaks the pre-tax subtotal instead of the final total is
+still caught today.
 
