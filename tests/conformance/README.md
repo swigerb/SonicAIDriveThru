@@ -29,7 +29,14 @@ under test:
   cannot simultaneously satisfy the Default profile's requirements and a different profile's
   `CONFORMANCE_TEST_HOOKS` overrides, and every profile collection would otherwise try to bind
   the same fixed fake ports concurrently and race for them. Run non-Default profile scenarios
-  with `CONFORMANCE_BACKEND=python` (harness-launched) instead.
+  with `CONFORMANCE_BACKEND=python` (harness-launched) instead. **The same skip applies to any
+  fixture that overrides `Deployment`** (PR #42 review item 2) — e.g. the
+  `gpt-realtime-1.5-conformance`/`gpt-realtime-2.1-dz-conformance` fixtures in
+  `ReasoningDeploymentFixtures.cs` — even when that fixture's `Profile` is otherwise Default:
+  external mode's one already-running backend was started with whatever
+  `AZURE_OPENAI_REALTIME_DEPLOYMENT` its operator gave it, which the harness cannot know or
+  change, so running (say) the "reasoning is never sent for 1.5" assertions against it would pass
+  or fail for the wrong reason instead of skipping.
 - `CONFORMANCE_BACKEND=python` (the default) — launch `app/backend` via `.venv`.
 - `CONFORMANCE_BACKEND=dotnet` — the S2 .NET backend placeholder (issue #7; the backend doesn't
   exist yet). **This FAILS the suite by default** (PR #22 review item 15) — CI must never silently
@@ -129,7 +136,182 @@ needed to exercise this policy).
 `status` is `"healthy"` (HTTP 200) once every startup check passes, or `"unhealthy"` (HTTP 503)
 otherwise. `PythonBackendLauncher.WaitForHealthAsync` polls this endpoint until it returns 200 (or
 the backend process exits early, in which case captured stdout/stderr is included in the
-failure).
+failure). `version` is a **semver-shaped** string (`\d+\.\d+\.\d+` with optional pre-release/build
+metadata) — the contract is the shape, not the Python backend's own literal value, which is an
+implementation detail with its own release cadence (PR #42 review item 11).
+
+### Wire ordering the conformance scenarios depend on (issue #8)
+
+These orderings are asserted directly by frame sequence number in the scenarios below — they are
+not incidental details of `app/backend/rtmt.py`'s current implementation, and any backend under
+test (Python today, a future .NET backend for issue #7) must reproduce all of them, not just the
+shape of each individual frame.
+
+1. **The bootstrap `session.update` is the first upstream frame on the connection**, `Sequence == 0`
+   on this connection's own upstream socket, before anything the browser has sent is ever
+   forwarded. Asserted by frame index, not by content alone, so a backend that sent it second would
+   fail even if the frame's own shape were otherwise correct.
+   (`SmokeSessionBootstrapTests.Bootstrap_session_update_with_four_tools_is_the_first_upstream_frame`)
+
+2. **The greeting `response.create` is gated on `session.updated`, but *triggered* by the browser's
+   `session.update`, not the bootstrap's own reply.** `rtmt.py` arms a single `session_configured`
+   gate the moment *any* `session.updated` arrives from upstream — in practice that's almost always
+   the bootstrap's own near-instant reply, well before the browser sends anything (`rtmt.py`, ~line
+   1320: "The bootstrap session.updated arrives as soon as the socket opens, so it must NOT trigger
+   the greeting — the browser's session.update (conversation start) does that."). Only forwarding
+   the *browser's* `session.update` upstream fires `send_greeting_once`, which then awaits that gate
+   (already set, in the normal case) before actually emitting `response.create`. If no
+   `session.updated` arrives at all within `CONFORMANCE_GREETING_TIMEOUT_SECONDS` (production
+   default 5s), the greeting fires anyway rather than blocking forever.
+   (`SmokeSessionBootstrapTests.Greeting_response_create_arrives_only_after_the_browser_session_update`,
+   `GreetingTimeoutFallbackTests`)
+
+3. **`extension.round_trip_token` reaches the browser strictly before `response.done` for the same
+   turn.** `rtmt.py`'s `response.done` handler (inside `_process_message_to_client`) calls
+   `emit_session_identifiers(client_ws, "extension.round_trip_token", ...)` directly and awaits it
+   to completion *before returning* the (possibly tool-call-filtered) `response.done` payload; the
+   caller only sends `response.done` to the browser after `_process_message_to_client` returns. This
+   is a synchronous prerequisite, not a race that merely usually resolves in this order — no code
+   path can reorder the two sends. (`ResponseCancelRelayTests`, `HeartbeatPongSurvivalTests`,
+   `VoiceLockTests`, `SessionUpdateFallbackTests`, `UnrelatedErrorsDoNotTriggerFallbackTests` all
+   assert this by comparing `Sequence` values directly rather than relying on arrival timing.)
+
+4. **A rejected `session.update` recovers with exactly one fallback, sent before any
+   browser-forwarded `session.update`.** When the bootstrap's own `session.update` (sequence 0) is
+   rejected by an upstream `error`, the fallback (`instructions`/`tools`/`tool_choice`/`type` only)
+   is sent upstream before the browser's `session.update` is ever forwarded —
+   `bootstrap.Sequence < fallback.Sequence < browserUpdate.Sequence` — and no `error` frame ever
+   reaches the browser for that rejection. (`SessionUpdateFallbackTests`)
+
+5. **Close handshake ordering:**
+   - **1000 `session_ended`** only fires in direct response to an `extension.end_session` frame from
+     the browser; the backend closes immediately with no acknowledgement frame first.
+   - **4002 `superseded`** — only the *original*, still-attached socket receives the 4002 close, and
+     only *after* the resuming socket has already received its own `extension.session_resumed`
+     confirmation, i.e. the resumer's success frame precedes the superseded socket's close on the
+     wire. (`CloseCodeTests.Resuming_a_still_attached_session_supersedes_the_original_socket_with_4002`)
+   - **4000 `idle_timeout`** fires with no client frame at all once the idle sweep interval elapses.
+     Only the close-code *shape* is a contract fact here — the exact idle *timing* is issue #10's
+     concern, not this suite's. (`IdleCloseCodeTests`)
+
+   | Code | Reason string | Triggered by | Fixture |
+   |---|---|---|---|
+   | 1000 (`NormalClosure`) | `session_ended` | Browser sends `extension.end_session` | `CloseCodeTests` (Default) |
+   | 4000 | `idle_timeout` | No client frame at all before the idle sweep fires | `IdleCloseCodeTests` (`ShortTimersConformanceFixture`, so the wait is seconds not the production 15s default) |
+   | 4002 | `superseded` | Another socket resumes the same session while this one is still attached (not merely dropped) | `CloseCodeTests` (Default) |
+
+6. **The resume-vs-fresh-start decision is made on the connection's very first client frame only.**
+   Only a connection's first frame may be an `extension.resume`; sending anything else first (e.g.
+   `session.update`) commits that connection to a fresh session and forecloses resuming on it later,
+   and any resume attempt after the first frame is rejected outright.
+   (`CloseCodeTests.Resuming_a_still_attached_session_supersedes_the_original_socket_with_4002`'s
+   "A's very first client frame — not a resume — makes the resume decision fresh" comment)
+
+### Backend logging is not a wire contract (PR #42 review item 1)
+
+`ConformanceFixture.RunAsync(body, allowedNewBackendErrors)` bounds — from **above only** — how
+many new backend ERROR-level log lines (`CapturedProcessOutput.CountUnhandledErrors`) a scenario's
+own body may cause, asserted as `actual <= baseline + allowedNewBackendErrors`, never exact
+equality. This is deliberately a ceiling, not a pinned count: *how many* ERROR-level lines a
+backend logs for a given recovered condition (one line vs. two, or ERROR vs. WARNING) is a
+logging/observability choice specific to this backend's own code, not part of the neutral contract
+a correct backend in another language must reproduce. A future .NET backend that logs one line
+where the Python backend logs two — or logs at a level this harness doesn't count as an "unhandled
+error" at all — must still pass every scenario that uses this overload. Only genuinely *unexpected*
+errors (anything above the declared ceiling) fail a scenario. The zero-arg `RunAsync(body)` overload
+still asserts a hard `0` ceiling, i.e. this scenario must cause no new backend errors at all.
+
+### Reasoning contract (PR #42 review item 10)
+
+Whether `reasoning` is sent upstream at all (`RTMiddleTier.reasoning_enabled()`/`_reasoning_model()`
+in `app/backend/rtmt.py`) is decided by three independent inputs, checked in this precedence order —
+a correct backend in another language must reproduce all three, in this order:
+
+1. **A runtime rejection always wins, for the rest of the process.** If the upstream ever rejects a
+   session.update because of `reasoning` (the fallback path — see the wire-ordering section above),
+   an in-memory latch (`self._reasoning_rejected`, an instance field on the single per-process
+   `RTMiddleTier`) flips to `True` and `reasoning` is never sent again on that connection *or any
+   later connection in the same process*, regardless of what the other two inputs say. This is
+   intentionally process-wide, not per-connection: a deployment that has already proven it rejects
+   `reasoning` once shouldn't keep re-triggering the fallback path for every new browser tab.
+2. **The explicit `reasoning_model` switch, tri-state.** `AZURE_OPENAI_REALTIME_REASONING_MODEL`
+   (env) / `model.reasoning_model` (config.yaml) is parsed by `parse_reasoning_model` into
+   `True` / `False` / `None`. The literal string comparison is case-insensitive and accepts
+   synonyms, not just `"true"`/`"false"`:
+   - `"true"`, `"yes"`, `"on"`, `"1"` → `True` (force reasoning on).
+   - `"false"`, `"no"`, `"off"`, `"0"` → `False` (force reasoning off).
+   - `""`, `"auto"`, `"null"`, `"none"` (or an unset value) → `None` ("auto"), explicitly, not
+     merely by falling through as an unrecognised value.
+   - Anything else is *also* `None`, but logs a `WARNING` ("Ignoring unknown reasoning_model...")
+     since it wasn't one of the recognised spellings above.
+
+   `None` is *not* the same as `False`: an explicit `false` and an unset/`"auto"` value are
+   different tri-state members and are asserted separately (see below).
+3. **The deployment-name check, `auto`'s default only.** `deployment_supports_reasoning` matches the
+   deployment name against `_NON_REASONING_DEPLOYMENT_RE`, copied here **verbatim** from
+   `app/backend/rtmt.py` so this doesn't silently drift from the real regex:
+
+   ```python
+   _NON_REASONING_DEPLOYMENT_RE = re.compile(
+       r"^(gpt-4o.*|gpt-realtime(-mini.*|-1(\.\d+)?(-.*)?|-\d{4}-\d{2}-\d{2})?)$",
+       re.IGNORECASE,
+   )
+   ```
+
+   A match means *not* reasoning-capable (`gpt-4o*`, `gpt-realtime-mini*`, `gpt-realtime-1*`
+   including `-1.5`, and the dated `gpt-realtime-YYYY-MM-DD` snapshot, which is the original
+   non-reasoning `gpt-realtime`, not `gpt-realtime-2`). Everything else — including
+   `gpt-realtime-2.1[-dz]`, this suite's own default deployment, and any unrecognised custom name —
+   is assumed reasoning-capable, so an unrecognised name fails open into the fallback path (input 1)
+   rather than silently omitting a feature it might actually support.
+
+**Inputs 1–3 above (`_reasoning_model()`) only decide whether reasoning-model-only fields *may* be
+sent at all — they are not sufficient on their own.** `reasoning_enabled()`, the actual gate
+`_build_session` checks before adding the `reasoning` key, additionally requires
+`normalize_reasoning_effort(self.reasoning_effort) is not None`:
+
+```python
+def reasoning_enabled(self) -> bool:
+    return normalize_reasoning_effort(self.reasoning_effort) is not None and self._reasoning_model()
+```
+
+So even on a deployment/switch combination where `_reasoning_model()` is `True`, `reasoning` is
+still omitted entirely if `AZURE_OPENAI_REALTIME_REASONING_EFFORT` / `model.reasoning_effort`
+normalizes to `None` — i.e. it is unset, empty, or one of `_REASONING_DISABLED_VALUES`
+(`""`, `"off"`, `"disabled"`, `"false"`, `"null"`). This is a 4th, independent precondition on top
+of the three-input precedence above, not a fourth member of that precedence chain: it doesn't
+interact with the rejection latch or the deployment-name default at all, it just short-circuits
+`reasoning_enabled()` to `False` regardless of what they decide. `config.yaml`'s own default
+(`reasoning_effort: "low"`) means every existing fixture below already has a non-`None` effort, so
+this precondition isn't independently exercised by any dedicated fixture yet — noted here rather
+than silently assumed.
+
+All four combinations input 2/3 can produce are covered, each pinned on its own dedicated fixture in
+`ReasoningDeploymentFixtures.cs` (a distinct deployment name and/or env var forces its own backend
+process, since `AZURE_OPENAI_REALTIME_DEPLOYMENT`/`AZURE_OPENAI_REALTIME_REASONING_MODEL` are read
+once at Python module-import time):
+
+| Deployment name | `reasoning_model` | Expected | Fixture |
+|---|---|---|---|
+| `gpt-realtime-2.1-conformance` (default) | `auto` (unset) | sent | `ConformanceFixture` (Default collection) |
+| `gpt-realtime-2.1-dz-conformance` | `auto` (unset) | sent | `Gpt21DzConformanceFixture` |
+| `gpt-realtime-1.5-conformance` | `auto` (unset) | **not** sent | `Gpt15ConformanceFixture` |
+| `gpt-realtime-1.5-conformance` | `true` (forced) | sent (then rejected upstream → exactly one fallback) | `Gpt15ForcedReasoningConformanceFixture` |
+| `gpt-realtime-2.1-conformance` (default) | `false` (forced) | **not** sent | `Gpt21ReasoningSwitchOffConformanceFixture` |
+
+The last row is the tri-state's third member and completes the coverage: the explicit switch must
+beat the name-based default in *both* directions, not just the "force reasoning on for a
+non-reasoning name" direction the fourth row already proved.
+
+**`Gpt15ForcedReasoningConformanceFixture`'s collection must stay a single test (PR #42 review item
+16).** Because the rejection latch (input 1 above, `self._reasoning_rejected`) is process-wide and
+permanent for the fixture's whole backend process's lifetime, a second `[Fact]` added to
+`SessionUpdateFallbackTests`'s `[Collection(Gpt15ForcedReasoningConformanceCollection.Name)]` class
+would run *after* the first test has already tripped the rejection and the fallback, so it would
+silently observe `reasoning_enabled() == False` for the wrong reason (the latch, not a fresh
+name/switch decision) — passing or failing without actually exercising what it claims to. Any new
+scenario that also needs a forced-reasoning-then-rejected deployment must get its own dedicated
+fixture/collection (a fresh backend process), not add a second `[Fact]` here.
 
 ### Backend logging is not a wire contract (PR #42 review item 1)
 
@@ -578,3 +760,47 @@ Non-half-cent cases are not affected by this ambiguity and their spoken-text ass
 active, so a backend that (for example) speaks the pre-tax subtotal instead of the final total is
 still caught today.
 
+### `response.cancel` still emits the normal `.done`-shaped events (#8 follow-up)
+
+A question came up while re-checking `EchoSuppressionBargeInTests` (barge-in, #8): does GA skip the
+usual per-item/per-response `.done` events for a *cancelled* response, or still emit them (just with
+an "incomplete"/"cancelled" status instead of "completed")? This matters because
+`app/backend/rtmt.py` drives `audio_pipeline.EchoSuppressor.on_audio_done()` off
+`response.output_audio.done` regardless of why the response ended, so if GA silently dropped that
+event for a cancellation, the fake would need a corresponding special case.
+
+**Checked against the official GA realtime reference** (no live probe needed — the docs are
+unambiguous on this point):
+
+- <https://developers.openai.com/api/reference/resources/realtime/client-events.md>, `response.cancel`
+  section: cancelling an in-progress response makes "the server ... respond with a `response.done`
+  event with a status of `response.status=cancelled`."
+- <https://developers.openai.com/api/reference/resources/realtime/server-events.md>:
+  `response.output_audio.done`, `response.content_part.done`, `response.output_text.done`,
+  `response.output_audio_transcript.done`, and `response.function_call_arguments.done` are each
+  documented as **"Also emitted when a Response is interrupted, incomplete, or cancelled."**
+  `response.done` itself is documented as **"Always emitted, no matter the final state"**
+  (completed/cancelled/failed/incomplete).
+
+**Conclusion: GA does not skip these events on cancellation** — it still emits the full
+`...output_item.done` / `response.content_part.done` / `response.output_audio.done` /
+`response.done(status:"cancelled")` sequence for whatever output had already started streaming,
+exactly matching what `FakeRealtimeUpstreamServer.RespondAsync`'s cancellation path already does via
+`CloseOpenAudioItemAsync(itemStatus: "incomplete")` followed by the cancelled `response.done`. **No
+fake change was needed here** — the fake was already GA-accurate on this point.
+
+That said, this GA behaviour is exactly why isolating `on_barge_in()` from `on_audio_done()` in a
+test is subtle: any scenario where the AI has spoken real audio and then gets cancelled will *also*
+run `on_audio_done()`'s own cooldown-clearing path a moment later, on the same wire sequence. A live
+mutation of `on_barge_in()` (removing its `self.ai_speaking = False` line, keeping only
+`self.cooldown_end = 0.0`) surfaced exactly this: `EchoSuppressionBargeInTests`'s "Phase A" was
+*intended* to sidestep the race entirely by giving the greeting a silent (audio-free) fake response,
+so nothing but `on_barge_in()` could ever clear `ai_speaking` before its own isolated
+`response.cancel`+append proof ran — but the greeting was actually still using
+`ResponseScript.Default` (which *does* carry one `AudioDeltaEvent`), so the greeting's own normal
+completion cleared `ai_speaking` via `on_audio_done()` before Phase A's cancel was even sent, leaving
+only `cooldown_end` to drive suppression by that point — which the mutation's surviving
+`cooldown_end = 0.0` line was sufficient to lift on its own. Fixed by explicitly enqueuing an
+audio-free `ResponseScript` (`[new DoneEvent()]`, no `AudioDeltaEvent`) for the greeting in that test
+before triggering it, restoring genuine isolation; the mutation now fails Phase A as intended. See
+the updated docstring on `EchoSuppressionBargeInTests` for the full account.
