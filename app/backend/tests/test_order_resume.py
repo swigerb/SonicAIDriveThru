@@ -103,6 +103,18 @@ class FakeGAPerConnection(FakeGARealtime):
                     "previous_item_id": event.get("previous_item_id"),
                     "item": event["item"],
                 })
+                # GA also emits conversation.item.done "when the item is
+                # finalized", carrying the full item a second time on a
+                # separate event type (swigerb/SonicAIDriveThru#29 follow-up,
+                # PR #30 review "M1") -- Rick's review proved the existing
+                # suppression missed this event entirely. Mirror it too so
+                # the Python suite can catch a regression the same way the
+                # conformance harness does (see M2).
+                await ws.send_json({
+                    "type": "conversation.item.done",
+                    "previous_item_id": event.get("previous_item_id"),
+                    "item": event["item"],
+                })
         return ws
 
     async def release_session_updated(self) -> None:
@@ -712,10 +724,16 @@ class RehydrationAndNudgeTests(_ResumeHarness):
     async def test_browser_never_receives_the_rehydration_system_item(self):
         """swigerb/SonicAIDriveThru#29: upstream (per FakeGAPerConnection, which
         now mirrors real GA's ack behaviour) echoes the rehydration item back
-        via conversation.item.created on the same socket -- the middle tier
-        must swallow that frame rather than relay it, since it carries the
-        recent transcript and order JSON, not something the guest should see
-        on their own screen."""
+        via conversation.item.created *and* conversation.item.done (GA emits
+        both -- swigerb/SonicAIDriveThru#29 follow-up, PR #30 review "M1"/"M2")
+        on the same socket -- the middle tier must swallow both frames
+        rather than relay them, since they carry the recent transcript and
+        order JSON, not something the guest should see on their own screen.
+
+        Rick's PR #30 review proved that without the .done handling, this
+        test passed anyway (the leak was on the .done event this test didn't
+        check for) -- .done is asserted here specifically so a regression on
+        either event type fails it."""
         meta, sid = await self._converse_then_drop()
         browser, upstream = await self._resume_ok(meta["resumeId"])
         # Drain everything the browser receives while the rehydration item
@@ -725,7 +743,8 @@ class RehydrationAndNudgeTests(_ResumeHarness):
             any(e.get("type") == "conversation.item.create" and e["item"].get("role") == "system" for e in upstream),
             "precondition: the fake upstream must have echoed the rehydration item for this test to mean anything",
         )
-        leaked = [e for e in seen if e.get("type") in ("conversation.item.created", "conversation.item.added")
+        leaked = [e for e in seen
+                  if e.get("type") in ("conversation.item.created", "conversation.item.added", "conversation.item.done")
                   and e.get("item", {}).get("role") == "system"]
         self.assertEqual(leaked, [], "the browser must never see a server-authored system conversation item")
         await browser.close()

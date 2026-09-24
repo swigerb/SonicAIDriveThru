@@ -36,6 +36,7 @@ from rtmt import (
     Tool,
     ToolResult,
     ToolResultDirection,
+    _drop_from_client,
     _origin_matches_host,
     _to_ga_session,
     create_hmac_token,
@@ -43,7 +44,12 @@ from rtmt import (
 )
 
 # ── Imports under test ──
-from session_manager import ContextMonitor, SessionManager
+from session_manager import (
+    MIDDLE_TIER_ITEM_ID_PREFIX,
+    ContextMonitor,
+    SessionManager,
+    new_middle_tier_item_id,
+)
 
 # ── Helpers ──
 
@@ -208,11 +214,47 @@ class SessionManagerGreetingTests(unittest.TestCase):
         msg = json.loads(self.sm.greeting_msg)
         self.assertEqual(msg["type"], "conversation.item.create")
 
+    def test_greeting_msg_default_carries_middle_tier_item_id(self):
+        """swigerb/SonicAIDriveThru#29 follow-up (PR #30 review "S1"): the
+        greeting is role="user", so a role-based drop in rtmt.py can never
+        catch it -- it must be identifiable by authorship (item id prefix)
+        instead."""
+        msg = json.loads(self.sm.greeting_msg)
+        self.assertEqual(msg["item"]["role"], "user")
+        self.assertTrue(msg["item"]["id"].startswith(MIDDLE_TIER_ITEM_ID_PREFIX))
+
+    def test_greeting_msg_id_is_stable_across_reads(self):
+        """The id is baked in once at construction time, not regenerated per
+        read -- session_manager.py's own exact-dict-equality tests
+        (test_order_resume.py) compare two independent reads of greeting_msg
+        against each other and against what was actually sent upstream."""
+        self.assertEqual(self.sm.greeting_msg, self.sm.greeting_msg)
+
     def test_greeting_msg_from_prompt_loader(self):
         loader = MagicMock()
         loader.get_greeting_json_str.return_value = '{"type":"custom_greeting"}'
         sm = SessionManager(prompt_loader=loader)
         self.assertEqual(sm.greeting_msg, '{"type":"custom_greeting"}')
+
+    def test_greeting_msg_from_prompt_loader_with_item_gets_id_injected(self):
+        loader = MagicMock()
+        loader.get_greeting_json_str.return_value = json.dumps({
+            "type": "conversation.item.create",
+            "item": {"type": "message", "role": "user", "content": []},
+        })
+        sm = SessionManager(prompt_loader=loader)
+        msg = json.loads(sm.greeting_msg)
+        self.assertTrue(msg["item"]["id"].startswith(MIDDLE_TIER_ITEM_ID_PREFIX))
+
+
+class MiddleTierItemIdTests(unittest.TestCase):
+    """swigerb/SonicAIDriveThru#29 follow-up (PR #30 review "S1"/"M1")."""
+
+    def test_new_middle_tier_item_id_carries_prefix(self):
+        self.assertTrue(new_middle_tier_item_id().startswith(MIDDLE_TIER_ITEM_ID_PREFIX))
+
+    def test_new_middle_tier_item_id_is_unique_per_call(self):
+        self.assertNotEqual(new_middle_tier_item_id(), new_middle_tier_item_id())
 
 
 class SessionManagerIdleTimeoutTests(unittest.TestCase):
@@ -893,9 +935,10 @@ class ProcessMessageToClientTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(result, f"{event_type} with role=system must be dropped from the client relay")
 
     async def test_conversation_item_created_still_forwards_user_and_assistant_items(self):
-        """Only role="system" items are dropped -- role="user"/"assistant"
-        items (real conversation turns) must keep reaching the browser
-        unchanged; the frontend's transcript UI depends on them."""
+        """Only role="system" items (or items with a middle-tier item id) are
+        dropped -- role="user"/"assistant" items (real conversation turns)
+        must keep reaching the browser unchanged; the frontend's transcript
+        UI depends on them."""
         rtmt = self._make_rtmt()
         client_ws = _make_mock_ws()
         server_ws = _make_mock_ws()
@@ -908,6 +951,74 @@ class ProcessMessageToClientTests(unittest.IsolatedAsyncioTestCase):
             })
             result = await rtmt._process_message_to_client(msg, client_ws, server_ws, tools_pending)
             self.assertEqual(result, msg.data, f"role={role} conversation item must still be forwarded")
+
+    async def test_conversation_item_created_drops_middle_tier_item_by_id_not_role(self):
+        """swigerb/SonicAIDriveThru#29 follow-up (PR #30 review "S1"): the
+        greeting is role="user" (not "system") and is middle-tier-authored --
+        a role-based drop alone can never catch it, since the model also
+        sends real role="user" items. Authorship must be keyed off the
+        item id prefix instead."""
+        rtmt = self._make_rtmt()
+        client_ws = _make_mock_ws()
+        server_ws = _make_mock_ws()
+        tools_pending = {}
+        for event_type in ("conversation.item.created", "conversation.item.added"):
+            msg = MagicMock()
+            msg.data = json.dumps({
+                "type": event_type,
+                "item": {
+                    "id": f"{MIDDLE_TIER_ITEM_ID_PREFIX}deadbeef0000",
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "Say EXACTLY this greeting and NOTHING else: ..."}],
+                },
+            })
+            result = await rtmt._process_message_to_client(msg, client_ws, server_ws, tools_pending)
+            self.assertIsNone(result, f"{event_type} with a middle-tier item id must be dropped regardless of role")
+
+    async def test_conversation_item_done_and_retrieved_drop_server_authored_items(self):
+        """swigerb/SonicAIDriveThru#29 follow-up (PR #30 review "M1"): GA
+        emits conversation.item.done "when the item is finalized" with the
+        *full* item -- carrying the exact same leak surface (rehydration
+        text, nudge, function_call args, function_call_output/tool results)
+        as .created/.added if left unfiltered. conversation.item.retrieved
+        (sent in reply to an explicit conversation.item.retrieve) must be
+        handled defensively the same way even though nothing in this
+        codebase currently issues that request."""
+        rtmt = self._make_rtmt()
+        client_ws = _make_mock_ws()
+        server_ws = _make_mock_ws()
+        tools_pending = {}
+        items = [
+            {"type": "message", "role": "system", "content": [{"type": "input_text", "text": "Current order (JSON): {...}"}]},
+            {"id": f"{MIDDLE_TIER_ITEM_ID_PREFIX}abc123", "type": "message", "role": "user", "content": [{"type": "input_text", "text": "Say EXACTLY this greeting..."}]},
+            {"type": "function_call", "call_id": "call-done-1", "name": "search", "arguments": '{"q":"combo"}'},
+            {"type": "function_call_output", "call_id": "call-done-1", "output": "search hit: secret result"},
+        ]
+        for event_type in ("conversation.item.done", "conversation.item.retrieved"):
+            for item in items:
+                msg = MagicMock()
+                msg.data = json.dumps({"type": event_type, "item": item})
+                result = await rtmt._process_message_to_client(msg, client_ws, server_ws, tools_pending)
+                self.assertIsNone(result, f"{event_type} leaked item={item!r}")
+
+    async def test_conversation_item_done_still_forwards_user_and_assistant_items(self):
+        """A genuine, model-authored message item (no middle-tier id, no
+        system role, not a function_call/function_call_output) must still
+        reach the browser on .done -- the transcript UI needs the finalized
+        text."""
+        rtmt = self._make_rtmt()
+        client_ws = _make_mock_ws()
+        server_ws = _make_mock_ws()
+        tools_pending = {}
+        for role in ("user", "assistant"):
+            msg = MagicMock()
+            msg.data = json.dumps({
+                "type": "conversation.item.done",
+                "item": {"type": "message", "role": role, "content": [{"type": "input_text", "text": "finalized turn"}]},
+            })
+            result = await rtmt._process_message_to_client(msg, client_ws, server_ws, tools_pending)
+            self.assertEqual(result, msg.data, f"role={role} conversation item must still be forwarded on .done")
 
     async def test_unknown_message_type_returned_as_data(self):
         """Unknown message types should pass through without crashing."""
@@ -1056,6 +1167,45 @@ class OriginMatchesHostTests(unittest.TestCase):
 
     def test_completely_different_host_is_rejected(self):
         self.assertFalse(_origin_matches_host("https://evil.com", "example.com"))
+
+    def test_empty_host_never_matches(self):
+        """swigerb/SonicAIDriveThru#25 follow-up (PR #30 review "S4"): a
+        missing/blank Host header must never accidentally validate an
+        origin. Without this guard, urlsplit("null").netloc == "" would
+        make a bare Origin: null match an empty host."""
+        self.assertFalse(_origin_matches_host("https://example.com", ""))
+        self.assertFalse(_origin_matches_host("null", ""))
+        self.assertFalse(_origin_matches_host("", ""))
+
+
+class DropFromClientTests(unittest.TestCase):
+    """Direct unit tests of `_drop_from_client`, the shared authorship/type
+    filter used by every conversation.item.* case in
+    `_process_message_to_client` (swigerb/SonicAIDriveThru#29 follow-up,
+    PR #30 review "M1"/"S1")."""
+
+    def test_function_call_is_dropped(self):
+        self.assertTrue(_drop_from_client({"type": "function_call", "call_id": "c1"}))
+
+    def test_function_call_output_is_dropped(self):
+        self.assertTrue(_drop_from_client({"type": "function_call_output", "call_id": "c1"}))
+
+    def test_middle_tier_item_id_is_dropped_regardless_of_role(self):
+        self.assertTrue(_drop_from_client({
+            "id": f"{MIDDLE_TIER_ITEM_ID_PREFIX}xyz",
+            "type": "message",
+            "role": "user",
+        }))
+
+    def test_role_system_is_dropped_as_legacy_backstop(self):
+        self.assertTrue(_drop_from_client({"type": "message", "role": "system"}))
+
+    def test_normal_user_and_assistant_items_are_kept(self):
+        self.assertFalse(_drop_from_client({"type": "message", "role": "user", "id": "item-abc"}))
+        self.assertFalse(_drop_from_client({"type": "message", "role": "assistant", "id": "item-def"}))
+
+    def test_non_string_id_does_not_crash(self):
+        self.assertFalse(_drop_from_client({"type": "message", "role": "user", "id": 12345}))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

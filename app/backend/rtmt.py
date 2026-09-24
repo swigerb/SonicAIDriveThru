@@ -56,11 +56,13 @@ from config_loader import get_config
 from order_state import order_state_singleton
 from rate_limit import RateLimitRecovery, RateLimitSettings, is_rate_limit_error
 from session_manager import (
+    MIDDLE_TIER_ITEM_ID_PREFIX,
     SESSION_ENDED_CLOSE_CODE,
     SESSION_ENDED_CLOSE_REASON,
     SUPERSEDED_CLOSE_CODE,
     SUPERSEDED_CLOSE_REASON,
     SessionManager,
+    new_middle_tier_item_id,
     resume_id_fingerprint,
 )
 
@@ -127,8 +129,46 @@ def _origin_matches_host(origin: str, host: str) -> bool:
     against the literal `Host` header value -- the same shape browsers send
     for same-origin requests (no path, and no port for the scheme's default
     port), so a genuine same-origin request is unaffected.
+
+    An empty `host` (a missing/blank `Host` header) can never be a legitimate
+    match -- without it #25's fix degenerates to `urlsplit(origin).netloc ==
+    ""`, which a bare/schemeless Origin value like the literal string "null"
+    satisfies (PR #30 review, "S4"). Reject outright instead.
     """
+    if not host:
+        return False
     return urllib.parse.urlsplit(origin).netloc.lower() == host.lower()
+
+
+# ── Conversation item authorship/wire-format filtering ──
+
+def _drop_from_client(item: dict) -> bool:
+    """True if a `conversation.item.*` event's item must never reach the
+    browser, across every subtype GA can send it on (`.created`, `.added`,
+    `.done`, `.retrieved`):
+
+    - `function_call` / `function_call_output` -- the model's raw tool
+      invocation and its result. The browser gets `extension.middle_tier_tool_response`
+      instead (see `response.output_item.done`); it must never see the raw item.
+    - Anything the middle tier itself authored (the greeting, resume
+      rehydration, silence nudge, or a tool's `function_call_output`) --
+      identified primarily by its `sonic_mt_`-prefixed item id (authorship;
+      swigerb/SonicAIDriveThru#29, PR #30 review "S1"), with the legacy
+      `role == "system"` check kept as a second guard for any middle-tier
+      item that predates the id convention.
+
+    GA emits `.done` "when the item is finalized" with the *full* item
+    (swigerb/SonicAIDriveThru#29 follow-up, PR #30 review "M1") -- carrying
+    exactly the same leak surface as `.created`/`.added` if left unfiltered,
+    so this same check must run for every subtype, not just the first two.
+    """
+    item_type = item.get("type")
+    if item_type in ("function_call", "function_call_output"):
+        return True
+    item_id = item.get("id")
+    if isinstance(item_id, str) and item_id.startswith(MIDDLE_TIER_ITEM_ID_PREFIX):
+        return True
+    return item.get("role") == "system"
 
 
 class ToolResultDirection(Enum):
@@ -847,24 +887,31 @@ class RTMiddleTier:
                         tools_pending[item["call_id"]] = RTToolCall(item["call_id"], message.get("previous_item_id", ""))
                         _vlog(verbose, "  Tool pending confirmed: call_id=%s, prev=%s", item["call_id"], message.get("previous_item_id", ""))
                         updated_message = None
-                    elif "item" in message and message["item"]["type"] == "function_call_output":
-                        updated_message = None
-                    elif "item" in message and message["item"].get("role") == "system":
-                        # The only role="system" conversation items in this
-                        # conversation are ones the middle tier itself created
-                        # (build_rehydration_item / build_nudge_item, sent
-                        # straight to the upstream socket) -- the model never
-                        # originates a system-role item. Upstream echoes the
-                        # item straight back via this same event, which would
-                        # otherwise hand the browser our resume rehydration
-                        # text (recent transcript + order JSON) or nudge
-                        # prompt. The frontend has no case for either event
-                        # type, so dropping it changes nothing it reads.
-                        _vlog(verbose, "  Server-authored system item suppressed from client")
+                    elif "item" in message and _drop_from_client(message["item"]):
+                        # Covers function_call_output (tool result) and any
+                        # middle-tier-authored item (rehydration/nudge/tool
+                        # echo, by id prefix; role="system" as a backstop) --
+                        # see _drop_from_client.
+                        _vlog(verbose, "  Server-authored/tool item suppressed from client (id=%s)", message["item"].get("id", "?"))
                         updated_message = None
                     elif "item" in message and message["item"].get("role") == "assistant":
                         # Log AI conversation items (non-tool)
                         _vlog(verbose, "  AI conversation item created")
+
+                case "conversation.item.done" | "conversation.item.retrieved":
+                    # GA emits `.done` "when the item is finalized" (and
+                    # `.retrieved` in reply to a conversation.item.retrieve)
+                    # with the *full* item -- the same leak surface as
+                    # `.created`/`.added` above, so the same filter must run
+                    # here too (swigerb/SonicAIDriveThru#29 follow-up, PR #30
+                    # review "M1"). Unlike `.created`/`.added`, function_call
+                    # items don't need tools_pending registered again here --
+                    # that already happened on the earlier `.created`/`.added`
+                    # (or the response.output_item.added fallback).
+                    if "item" in message and _drop_from_client(message["item"]):
+                        _vlog(verbose, "  Server-authored/tool item suppressed from client (%s, id=%s)",
+                              msg_type, message["item"].get("id", "?"))
+                        updated_message = None
 
                 case "response.function_call_arguments.delta":
                     updated_message = None
@@ -920,6 +967,7 @@ class RTMiddleTier:
                                 await server_ws.send_json({
                                     "type": "conversation.item.create",
                                     "item": {
+                                        "id": new_middle_tier_item_id(),
                                         "type": "function_call_output",
                                         "call_id": item["call_id"],
                                         "output": result.to_text() if result.destination in (ToolResultDirection.TO_SERVER, ToolResultDirection.TO_BOTH) else ""
@@ -1456,7 +1504,7 @@ class RTMiddleTier:
         allowed_origins = _security_cfg.get("allowed_origins", [])
         host = request.headers.get("Host", "")
         if origin and not _origin_matches_host(origin, host) and origin not in allowed_origins:
-            logger.warning("Rejected WebSocket from disallowed origin: %s", origin)
+            logger.warning("Rejected WebSocket from disallowed origin: host=%s origin=%s", host, origin)
             return web.Response(status=403, text="Origin not allowed")
 
         # ── HMAC session token validation (Task 4) ──
