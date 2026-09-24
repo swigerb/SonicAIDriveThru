@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import time
+import urllib.parse
 import uuid
 from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable
@@ -107,6 +108,27 @@ def validate_hmac_token(token: str, secret: bytes) -> bool:
         return payload.get("exp", 0) > time.time()
     except Exception:
         return False
+
+
+# ── Origin validation utilities ──
+
+def _origin_matches_host(origin: str, host: str) -> bool:
+    """True iff the `Origin` header's host (and port, if non-default) is an
+    *exact* match for the request's `Host` header.
+
+    Replaces a previous `origin.endswith(host)` check (#25), which accepted
+    any origin whose netloc merely ended with `host` as a *string suffix* --
+    e.g. `https://evil-legituser.example.com` passes
+    `"evil-legituser.example.com".endswith("legituser.example.com")`, letting
+    a lookalike domain the attacker actually controls pass origin validation
+    for a site named `legituser.example.com`. `urllib.parse.urlsplit` gives
+    us the real `scheme://host[:port]` authority component of the Origin
+    header (never a suffix match), which we compare case-insensitively
+    against the literal `Host` header value -- the same shape browsers send
+    for same-origin requests (no path, and no port for the scheme's default
+    port), so a genuine same-origin request is unaffected.
+    """
+    return urllib.parse.urlsplit(origin).netloc.lower() == host.lower()
 
 
 class ToolResultDirection(Enum):
@@ -1427,10 +1449,13 @@ class RTMiddleTier:
 
     async def _websocket_handler(self, request: web.Request):
         # ── Origin validation (Task 3) ──
+        # Missing/empty Origin is accepted unchanged (non-browser and same-
+        # process callers legitimately omit it) -- #25 only hardens the case
+        # where an Origin *is* present.
         origin = request.headers.get("Origin", "")
         allowed_origins = _security_cfg.get("allowed_origins", [])
         host = request.headers.get("Host", "")
-        if origin and not origin.endswith(host) and origin not in allowed_origins:
+        if origin and not _origin_matches_host(origin, host) and origin not in allowed_origins:
             logger.warning("Rejected WebSocket from disallowed origin: %s", origin)
             return web.Response(status=403, text="Origin not allowed")
 

@@ -36,6 +36,7 @@ from rtmt import (
     Tool,
     ToolResult,
     ToolResultDirection,
+    _origin_matches_host,
     _to_ga_session,
     create_hmac_token,
     validate_hmac_token,
@@ -1009,6 +1010,55 @@ class ProcessMessageToClientTests(unittest.IsolatedAsyncioTestCase):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# ORIGIN MATCHING TESTS (#25)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class OriginMatchesHostTests(unittest.TestCase):
+    """Direct unit tests of `_origin_matches_host`, which replaced the buggy
+    `origin.endswith(host)` check (#25): a suffix match let
+    `https://evil-<host>` through since a lookalike domain the attacker
+    controls can still legitimately end with the real host's characters.
+    """
+
+    def test_exact_scheme_and_host_matches(self):
+        self.assertTrue(_origin_matches_host("https://example.com", "example.com"))
+
+    def test_exact_host_and_non_default_port_matches(self):
+        self.assertTrue(_origin_matches_host("https://localhost:8080", "localhost:8080"))
+
+    def test_case_insensitive_match(self):
+        self.assertTrue(_origin_matches_host("https://Example.COM", "example.com"))
+
+    def test_lookalike_prefix_suffix_is_rejected(self):
+        """The exact bug: a suffix match let a domain the attacker actually
+        owns (evil-example.com) through, because it merely ends with the
+        legitimate host's characters."""
+        self.assertFalse(_origin_matches_host("https://evil-example.com", "example.com"))
+
+    def test_lookalike_prefix_suffix_with_port_is_rejected(self):
+        self.assertFalse(_origin_matches_host("https://evil-localhost:8080", "localhost:8080"))
+
+    def test_subdomain_is_rejected(self):
+        """A subdomain is a different origin -- must not be silently trusted
+        just because it ends with the real host."""
+        self.assertFalse(_origin_matches_host("https://attacker.example.com", "example.com"))
+
+    def test_mismatched_port_is_rejected(self):
+        self.assertFalse(_origin_matches_host("https://example.com:9999", "example.com:8080"))
+
+    def test_missing_scheme_still_compares_correctly(self):
+        # urlsplit treats a schemeless "host:port"-shaped string as
+        # scheme=host, path=port unless it starts with "//" -- exercised here
+        # to document that a malformed Origin (no browser ever sends one
+        # without a scheme) simply fails to match rather than being
+        # mis-parsed into an accidental pass.
+        self.assertFalse(_origin_matches_host("example.com", "example.com"))
+
+    def test_completely_different_host_is_rejected(self):
+        self.assertFalse(_origin_matches_host("https://evil.com", "example.com"))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # WEBSOCKET HANDLER INTEGRATION TESTS
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1028,6 +1078,66 @@ class WebSocketHandlerTests(unittest.IsolatedAsyncioTestCase):
         request.query = {}
         result = await rtmt._websocket_handler(request)
         self.assertEqual(result.status, 403)
+
+    async def test_origin_validation_rejects_lookalike_suffix_origin(self):
+        """#25: `origin.endswith(host)` used to accept any origin whose
+        netloc merely ended with the Host header as a string suffix --
+        `https://evil-localhost:8080` passes
+        `"evil-localhost:8080".endswith("localhost:8080")` even though it's
+        an attacker-controlled domain, not the real host. Must be rejected.
+        """
+        rtmt = self._make_rtmt()
+        request = MagicMock(spec=web.Request)
+        request.headers = {"Origin": "https://evil-localhost:8080", "Host": "localhost:8080"}
+        request.query = {}
+        result = await rtmt._websocket_handler(request)
+        self.assertEqual(result.status, 403)
+
+    async def test_origin_validation_accepts_exact_host_match(self):
+        """Positive-path companion to the rejection tests above: an Origin
+        that exactly matches Host must NOT be rejected by the origin check.
+        Forces can_accept_session() to False so the handler takes its next,
+        already-covered early-return branch (session limit reached) instead
+        of attempting a full WebSocket upgrade against a MagicMock request;
+        that branch's own WebSocketResponse is replaced with a stub so it
+        doesn't need a real transport either.
+        """
+        rtmt = self._make_rtmt()
+        request = MagicMock(spec=web.Request)
+        request.headers = {"Origin": "https://localhost:8080", "Host": "localhost:8080"}
+        request.query = {}
+        stub_ws = MagicMock()
+        stub_ws.prepare = AsyncMock()
+        stub_ws.send_json = AsyncMock()
+        stub_ws.close = AsyncMock()
+        with patch.dict("rtmt._security_cfg", {"allowed_origins": []}), \
+             patch.object(rtmt._sessions, "can_accept_session", return_value=False), \
+             patch("rtmt.web.WebSocketResponse", return_value=stub_ws):
+            result = await rtmt._websocket_handler(request)
+        # Session-limit branch returns the prepared WebSocketResponse rather
+        # than the plain 403 web.Response the origin check returns -- proves
+        # we got past origin validation.
+        self.assertIs(result, stub_ws)
+
+    async def test_origin_validation_missing_origin_is_unchanged(self):
+        """Documents existing (unchanged by #25) behaviour: a request with no
+        Origin header at all is still accepted -- non-browser callers (curl,
+        server-to-server, the conformance harness's own health checks)
+        legitimately omit it, and #25 only hardens the case where an Origin
+        *is* present but doesn't match."""
+        rtmt = self._make_rtmt()
+        request = MagicMock(spec=web.Request)
+        request.headers = {"Host": "localhost:8080"}
+        request.query = {}
+        stub_ws = MagicMock()
+        stub_ws.prepare = AsyncMock()
+        stub_ws.send_json = AsyncMock()
+        stub_ws.close = AsyncMock()
+        with patch.dict("rtmt._security_cfg", {"allowed_origins": []}), \
+             patch.object(rtmt._sessions, "can_accept_session", return_value=False), \
+             patch("rtmt.web.WebSocketResponse", return_value=stub_ws):
+            result = await rtmt._websocket_handler(request)
+        self.assertIs(result, stub_ws)
 
     async def test_token_validation_rejects_bad_token(self):
         rtmt = self._make_rtmt()

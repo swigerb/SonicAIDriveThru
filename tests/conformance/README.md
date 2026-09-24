@@ -190,6 +190,29 @@ production, 1s under `BackendProfiles.ShortTimers`) would fail every scenario af
 going to close. Documented here (rather than newly enforced) since `ConformanceFixture` already
 behaves this way; see `ConformanceFixture.cs`'s `RunAsync`.
 
+### WebSocket Origin validation (swigerb/SonicAIDriveThru#25)
+
+A backend **must** validate the `Origin` header on the `/realtime` WebSocket upgrade by an
+**exact** match — not a string-suffix match — against one of:
+
+- the request's own `Host` header (host, and port when non-default, case-insensitive), or
+- an entry in the backend's configured cross-origin allow-list (`security.allowed_origins` in
+  `app/backend/config.yaml`), when that list is non-empty.
+
+A `.endswith(host)`-style suffix check (the bug fixed by #25) is **not** conformant: it accepts a
+lookalike Origin an attacker actually controls, e.g. `https://evil-<host>`, because the string
+`"evil-<host>"` ends with `"<host>"` even though the two are different domains. Python's fix
+(`_origin_matches_host` in `app/backend/rtmt.py`) parses the Origin with `urllib.parse.urlsplit`
+and compares its `netloc` to `Host` for equality.
+
+A request with **no** `Origin` header at all is accepted unchanged (pre-existing, #25-unaffected
+behaviour) — this covers non-browser callers (e.g. server-to-server, curl) that never send one.
+The Origin check runs *before* session-token validation, so it rejects a bad Origin with `403`
+regardless of `security.require_session_token`.
+
+Exercised by `Scenarios/Security/OriginValidationTests.cs`: exact origin accepted, lookalike-suffix
+origin rejected with `403`, and missing origin accepted (documenting the unchanged behaviour).
+
 ## Test hooks (`app/backend/conformance_hooks.py`)
 
 Everything in this section is gated behind `CONFORMANCE_TEST_HOOKS=1` and is a complete no-op
