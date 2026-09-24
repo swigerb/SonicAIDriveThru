@@ -103,6 +103,44 @@ public sealed class ComboAbsorptionTests(HappyHourJustBeforeOpenFixture fixture)
         OrderScenarioHelpers.AssertMoneyEqual(8.49m, order.GetProperty("total").GetDecimal());
     });
 
+    [Fact(Skip = "app/backend/order_state.py::reset_order clears order_state/absorbed_sides/" +
+                 "absorbed_drinks but not the absorbed_side_display/absorbed_drink_display " +
+                 "session strings, so the next combo's display carries over the previous order's " +
+                 "absorbed component names -- #41. Not fixing Python; tracked for the C# backend.")]
+    public Task Reset_order_clears_the_previous_orders_absorbed_component_display() => fixture.RunAsync(async () =>
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (browser, connection, roundTripIndex) = await OrderScenarioHelpers.ConnectAndGreetAsync(fixture, ct);
+        await using var _ = browser;
+
+        // Establish stale absorbed_side_display/absorbed_drink_display state (order_state.py:98-99,
+        // 179-191) with a combo whose side (Tots) and drink (Cherry Limeade) both get absorbed and
+        // recorded onto the *session*, not just the order line.
+        var result = await OrderScenarioHelpers.RunOrderStepsAsync(
+            connection, browser,
+            [
+                ("add", "SONIC® Cheeseburger Combo", "standard", 1, 8.49m),
+                ("add", "Tots", "medium", 1, 2.79m),
+                ("add", "Cherry Limeade", "medium", 1, 2.89m),
+                ("reset", "", "", 0, 0m),
+                // A fresh combo of the same kind, then only ONE new side (Onion Rings) absorbed.
+                // The reported #41 example is literally this shape ("...Combo w/ Medium Tots &
+                // Medium Cherry Limeade & Medium Onion Rings" after reset+fresh-combo+one side).
+                ("add", "SONIC® Cheeseburger Combo", "standard", 1, 8.49m),
+                ("add", "Onion Rings", "medium", 1, 3.89m),
+            ],
+            roundTripIndex, ct);
+
+        var order = JsonDocument.Parse(result.ToolResultJson!).RootElement;
+        var comboDisplay = order.GetProperty("items").EnumerateArray()
+            .Single(i => i.GetProperty("item").GetString()!.Contains("Combo"))
+            .GetProperty("display").GetString();
+
+        Assert.Contains("Onion Rings", comboDisplay);
+        Assert.DoesNotContain("Tots", comboDisplay);
+        Assert.DoesNotContain("Cherry Limeade", comboDisplay);
+    });
+
     public static TheoryData<int> ComboItemIndexes()
     {
         var golden = GoldenOrderPricingData.Load(RepoPaths.FindRepoRoot());
