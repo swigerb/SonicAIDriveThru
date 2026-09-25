@@ -1630,6 +1630,30 @@ survives, just without the extras):
    raw tool `args` (contradicting a comment nearby claiming "never raw args"); it's been trimmed to
    omit them, and the stale comment corrected to match reality.
 
+### Two probes pinning both entry points into layer 1 (PR #58 review round 2, S3)
+
+Rick's S3 asked for two black-box scenarios exercising layer 1's `except Exception` from two
+different directions, each asserting the same three things: a `function_call_output` reaches the
+server, the session survives (a further round trip / tool call still works), and no stray
+`extension.middle_tier_tool_response` for the failed call reaches the browser.
+
+1. **Non-numeric `price`** (`update_order(price:"cheap")`) — a genuine exception *inside* the tool
+   handler, after `tools.py`'s own layer-2 presence validation has already passed. This is
+   `ToolFailureCapAndTicketRefreshTests.A_genuine_tool_exception_refreshes_the_guests_ticket`,
+   already added and mutation-verified as part of S2 above (S2 and S3 share this one scenario —
+   deliberately not duplicated).
+2. **Malformed (non-JSON) `arguments`** (`"{not json"`) — the *other* way into layer 1: rtmt.py's
+   `args = json.loads(item["arguments"])` is itself the first line inside the `try` block, before
+   `tool.target(...)` is ever called, so a malformed argument string raises
+   `json.JSONDecodeError` without the tool handler (or `tools.py`'s layer-2 validation, which never
+   even runs — it only sees a `dict`, never the raw string) getting a chance to run at all. This is
+   `ToolMalformedArgumentsTests.Malformed_tool_arguments_produce_a_graceful_error_and_the_session_survives`.
+   Shown red by temporarily replacing rtmt.py's `except Exception:` with `except
+   ZeroDivisionError:` (bypassing the handler): the `JSONDecodeError` then propagates through
+   `_forward_messages`'s connection-wide catch-all and tears the socket down, so the scenario's
+   first assertion (`function_call_output is not null`) fails — confirming the scenario actually
+   exercises layer 1 and isn't vacuously true.
+
 ## Client-controlled server logging must be gated off in production (#53)
 
 `extension.set_verbose_logging` and `extension.set_log_to_file` are two browser-sent extension
