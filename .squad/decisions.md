@@ -445,6 +445,27 @@
   `OrderSummaryProps` in `order-summary.tsx`, so a resumed session's ticket
   (`extension.session_resumed`) keeps reading the same backend-rounded strings a fresh order does,
   rather than losing them to a structurally-permissive type gap.
+
+## PR #50 review, round 4 (Rick: Approve, with should-fix items before merge)
+
+- **`®` removal is now one rule, not two.** `_menu_key()` (the shared normalisation helper) now
+  strips `®` itself, as its own explicit step, alongside paren-group removal, whitespace collapse,
+  and lowercasing. Previously `®` removal only existed in `order_state.py`'s ad-hoc combo-conversion
+  string, and `MENU_CATEGORY_MAP` was still keyed by bare `name.lower()` — so a *lookup* of a
+  `®`-bearing menu item name (not just a customised one) missed the map's own entry for itself and
+  fell through to keyword guessing. This turned out to affect **12 of the 60** menu items (every
+  `®`-bearing name — `SuperSONIC® Bacon Double Cheeseburger`, `SONIC® Cheeseburger`, `Ocean Water®`,
+  both FRITOS® wraps, etc.), not just the single NBSP-affected OREO Blast Rick's report named —
+  proven by a mutation reverting the map-key line back to `name.lower()`, which failed a new
+  direct-resolution test for all 12 in one shot.
+- **Keyword fallbacks now match on word boundaries, not bare substrings.** A plain
+  `any(kw in normalized ...)` substring check let `"tea"` match inside `"steak"`, silently
+  absorbing an off-menu `"Philly Cheesesteak"`/`"Steak Sandwich"` into a combo's drink slot for
+  free and happy-hour-discounting it. Both the fountain-drink and shake/blast/malt keyword lists
+  are now compiled `\b...\b` regexes (optional trailing `s` for plurals); Dr Pepper's existing
+  regex was already word-boundary and is unchanged. Every on-menu item still resolves via
+  `MENU_CATEGORY_MAP` directly (proven by a test that patches both fallback functions to raise) —
+  these fallbacks only ever see genuinely off-menu names.
 - **Explicitly out of scope (Rick will file separately):** the Python conformance-suite money
   tolerance change, and the `menuItems.json` schema redesign referenced in the correction on entry 38
   above.

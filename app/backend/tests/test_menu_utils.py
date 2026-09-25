@@ -211,5 +211,68 @@ class CustomisedItemMenuLookupTests(unittest.TestCase):
             self.assertEqual(infer_combo_component(off_menu_customised), "drinks")
 
 
+class KeywordFallbackWordBoundaryTests(unittest.TestCase):
+    """PR #50 review (round 4, must-fix): the off-menu keyword fallbacks used to be plain
+    substring checks (``kw in normalized``), so the keyword "tea" matched inside "steak" -- an
+    off-menu "Philly Cheesesteak"/"Steak Sandwich" was silently absorbed into a combo's drink slot
+    for free AND happy-hour discounted. Word-boundary regexes (``\\b...\\b``) fix this while still
+    matching every real standalone keyword occurrence, plural or singular."""
+
+    def test_steak_items_are_not_misclassified_as_a_tea_drink(self):
+        for name in ("Philly Cheesesteak", "Steak Sandwich"):
+            self.assertEqual(infer_combo_component(name), "", name)
+            self.assertFalse(is_happy_hour_discounted(name), name)
+
+    def test_real_tea_keyword_still_matches_as_a_standalone_word(self):
+        for name in ("Sweet Tea", "Iced Tea", "Unsweetened Tea"):
+            self.assertEqual(infer_combo_component(name), "drinks", name)
+            self.assertTrue(is_happy_hour_discounted(name), name)
+
+    def test_real_drink_keyword_plurals_still_match(self):
+        """The word-boundary regex allows an optional trailing "s" so plural mentions keep
+        matching (e.g. a guest ordering "2 Cokes")."""
+        self.assertEqual(infer_combo_component("Cokes"), "drinks")
+        self.assertTrue(is_happy_hour_discounted("Cokes"))
+
+    def test_milkshake_is_not_misclassified_by_a_bare_shake_substring(self):
+        """"shake" must not match merely because it's a substring of a longer compound word with
+        no word boundary in between -- guards the shake/blast/malt list the same way."""
+        self.assertEqual(infer_combo_component("Milkshake Mixer Cleaning Kit"), "")
+
+
+class MenuCategoryMapDirectResolutionTests(unittest.TestCase):
+    """PR #50 review (round 4, should-fix 2): every menuItems.json item must resolve via
+    ``MENU_CATEGORY_MAP`` directly -- never by falling through to keyword-guessing luck. This is
+    the regression class the OREO Blast's NBSP caused: ``MENU_CATEGORY_MAP`` used to be keyed by a
+    bare ``name.lower()``, which doesn't collapse NBSP, so that item's own exact name missed its
+    own map entry and only classified correctly because the substring "blast" happened to still
+    match in the keyword fallback."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.menu_names = _load_menu_item_names()
+
+    def test_every_menu_item_name_resolves_directly_via_the_category_map(self):
+        """Direct proof the map key resolves -- ``_menu_key(name)`` must be a member of
+        ``MENU_CATEGORY_MAP`` for every real menu item, with no fallback involved at all."""
+        missing = [name for name in self.menu_names if menu_utils._menu_key(name) not in menu_utils.MENU_CATEGORY_MAP]
+        self.assertEqual(missing, [], f"Missing from MENU_CATEGORY_MAP: {missing}")
+
+    def test_combo_and_happy_hour_classification_never_reaches_the_keyword_fallback(self):
+        """Stronger proof, per Rick's suggestion: patch BOTH keyword-fallback functions to raise,
+        then classify every real menu item name -- if either function still reached the fallback
+        for an on-menu item, this raises instead of silently passing."""
+        def _boom(_normalized):
+            raise AssertionError("keyword fallback must not be reached for an on-menu item")
+
+        with (
+            patch.object(menu_utils, "_keyword_fallback_combo_drink", _boom),
+            patch.object(menu_utils, "_keyword_fallback_happy_hour_discounted", _boom),
+        ):
+            for name in self.menu_names:
+                infer_combo_component(name)
+                is_happy_hour_discounted(name)
+
+
 if __name__ == "__main__":
     unittest.main()

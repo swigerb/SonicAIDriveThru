@@ -18,6 +18,7 @@ __all__ = [
     "normalize_size",
     "canonical_size_key",
     "strip_modifiers",
+    "_menu_key",
     "infer_category",
     "infer_combo_component",
     "is_happy_hour_discounted",
@@ -123,6 +124,79 @@ def canonical_size_key(size: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Modifier-suffix stripping & the ONE lookup-key normalisation rule (PR #50 review)
+#
+# Defined BEFORE _load_menu_category_map()/MENU_CATEGORY_MAP below so the map itself can be keyed
+# by _menu_key() (PR #50 review, round 4) -- previously it was keyed by a bare ``name.lower()``,
+# which does NOT collapse Unicode whitespace (e.g. NBSP, U+00A0) or the registered-trademark
+# symbol "®". Several real menuItems.json names contain an NBSP where a normal space would be
+# expected (e.g. "SONIC Blast®\xa0made with OREO®\xa0Cookie Pieces" -- verified via the raw JSON
+# bytes), so that item's own exact name MISSED its own map entry and only classified correctly by
+# keyword-fallback luck (the substring "blast" happened to still match). Keying the map with the
+# same _menu_key() used to look items up at runtime closes that gap for good, for every current and
+# future menu item, not just this one.
+# ---------------------------------------------------------------------------
+
+# Strips a trailing parenthesized customization suffix, e.g. "Tots (Extra Crispy)" -> "Tots"
+# (PR #50 review: customised items were bypassing every menuItems.json-based lookup because the
+# modifiers travel inside item_name, tools.py's ``update_order`` -- see ``strip_modifiers`` below).
+_MODIFIER_SUFFIX_RE = re.compile(r"\s*\([^)]*\)\s*")
+
+
+def strip_modifiers(item_name: str) -> str:
+    """Strip parenthesized customization suffix(es) from *item_name* and collapse whitespace.
+
+    THE single normalisation rule for turning a possibly-customised order-line name (e.g.
+    ``"Chili Cheese Tots (Extra Cheese)"``, ``"Tots (Extra Crispy)"``) into its base menu-item
+    name. Used both for every menuItems.json-based lookup below (combo slot / sundae / category /
+    happy-hour eligibility) *and* for combo-conversion base-name matching in ``order_state.py`` --
+    one rule, one implementation, so the two can never drift (Rick's PR #50 review: "reuse one
+    helper, don't duplicate").
+
+    The exact algorithm (PR #50 review round 4 -- documented in full in the conformance README):
+    every ``\\s*\\([^)]*\\)\\s*`` group ANYWHERE in the string (not just a trailing one) collapses
+    to a single space, then ``str.split()``/``" ".join(...)`` collapses all whitespace runs --
+    including Unicode whitespace such as NBSP (U+00A0), which Python's ``str.split()`` already
+    treats as a separator. A modifier group in the middle of the name is stripped exactly like a
+    trailing one, and multiple groups are all stripped. Nested or unbalanced parentheses are a
+    deliberate fail-safe, NOT a special case: ``[^)]*`` cannot skip over an inner ``(``, so a nested
+    group only ever partially matches, leaving a stray unmatched ``)`` in the result -- that stray
+    character then guarantees the cleaned name won't equal any real (or allow-listed) menu key, so
+    the item is classified as unknown and charged in full rather than risking an incorrect match.
+
+    >>> strip_modifiers("Tots (Extra Crispy)")
+    'Tots'
+    >>> strip_modifiers("Chili Cheese Tots (Extra Cheese)")
+    'Chili Cheese Tots'
+    >>> strip_modifiers("Cherry Limeade")
+    'Cherry Limeade'
+    >>> strip_modifiers("Tots (Extra Crispy) (No Salt)")
+    'Tots'
+    >>> strip_modifiers("Chili Cheese (Extra Cheese) Tots")
+    'Chili Cheese Tots'
+    >>> strip_modifiers("Tots (Extra (Really) Crispy)")
+    'Tots Crispy)'
+    """
+    return " ".join(_MODIFIER_SUFFIX_RE.sub(" ", item_name or "").split())
+
+
+def _menu_key(item_name: str) -> str:
+    """Lowercased, modifier-stripped, ®-stripped key used for ALL menuItems.json-based
+    classification (combo slot / sundae / category / happy-hour eligibility) AND for
+    ``MENU_CATEGORY_MAP``'s own keys below. A customised item must classify identically to its
+    uncustomised base item -- PR #50 review: "Chili Cheese Tots (Extra Cheese)" must be charged in
+    full exactly like "Chili Cheese Tots" is, and "Cherry Limeade (Extra Cherries)" must still get
+    the happy-hour discount exactly like "Cherry Limeade" does.
+
+    The registered-trademark symbol "®" is stripped here -- and ONLY here, i.e. this is now the one
+    and only place that rule lives (PR #50 review round 4: it used to live ONLY in
+    ``order_state.py``'s combo-conversion matching, as a second, independently-maintained
+    ``.replace("®", "")``, which ``order_state.py`` now gets for free by calling this function
+    instead)."""
+    return strip_modifiers(item_name).lower().replace("®", "")
+
+
+# ---------------------------------------------------------------------------
 # Menu category map (loaded once from menuItems.json)
 # ---------------------------------------------------------------------------
 def _load_menu_category_map() -> dict[str, str]:
@@ -150,7 +224,9 @@ def _load_menu_category_map() -> dict[str, str]:
             for item in category_entry.get("items", []):
                 name = item.get("name")
                 if name:
-                    mapping[name.lower()] = category
+                    # PR #50 review round 4: key by _menu_key(name), not a bare name.lower() -- see
+                    # the module comment above this section for the NBSP regression this closes.
+                    mapping[_menu_key(name)] = category
         return mapping
     except Exception as exc:  # pragma: no cover
         logger.warning("Failed to load menu items; falling back to keyword inference: %s", exc)
@@ -158,40 +234,6 @@ def _load_menu_category_map() -> dict[str, str]:
 
 
 MENU_CATEGORY_MAP: dict[str, str] = _load_menu_category_map()
-
-# Strips a trailing parenthesized customization suffix, e.g. "Tots (Extra Crispy)" -> "Tots"
-# (PR #50 review: customised items were bypassing every menuItems.json-based lookup because the
-# modifiers travel inside item_name, tools.py's ``update_order`` -- see ``strip_modifiers`` below).
-_MODIFIER_SUFFIX_RE = re.compile(r"\s*\([^)]*\)\s*")
-
-
-def strip_modifiers(item_name: str) -> str:
-    """Strip a parenthesized customization suffix from *item_name* and collapse whitespace.
-
-    THE single normalisation rule for turning a possibly-customised order-line name (e.g.
-    ``"Chili Cheese Tots (Extra Cheese)"``, ``"Tots (Extra Crispy)"``) into its base menu-item
-    name. Used both for every menuItems.json-based lookup below (combo slot / sundae / category /
-    happy-hour eligibility) *and* for combo-conversion base-name matching in ``order_state.py`` --
-    one rule, one implementation, so the two can never drift (Rick's PR #50 review: "reuse one
-    helper, don't duplicate").
-
-    >>> strip_modifiers("Tots (Extra Crispy)")
-    'Tots'
-    >>> strip_modifiers("Chili Cheese Tots (Extra Cheese)")
-    'Chili Cheese Tots'
-    >>> strip_modifiers("Cherry Limeade")
-    'Cherry Limeade'
-    """
-    return " ".join(_MODIFIER_SUFFIX_RE.sub(" ", item_name or "").split())
-
-
-def _menu_key(item_name: str) -> str:
-    """Lowercased, modifier-stripped key used for ALL menuItems.json-based classification (combo
-    slot / sundae / category / happy-hour eligibility). A customised item must classify identically
-    to its uncustomised base item -- PR #50 review: "Chili Cheese Tots (Extra Cheese)" must be
-    charged in full exactly like "Chili Cheese Tots" is, and "Cherry Limeade (Extra Cherries)" must
-    still get the happy-hour discount exactly like "Cherry Limeade" does."""
-    return strip_modifiers(item_name).lower()
 
 
 def infer_category(item_name: str) -> str:
@@ -250,13 +292,22 @@ _DR_PEPPER_RE = re.compile(r"\bdr\.?\s*pepper\b")
 # happy-hour discount, matching every "Slushes & Drinks" menuItems.json item's unconditional
 # behaviour. Used ONLY as a fallback for items that aren't in the menu at all (e.g. a spoken item
 # never added to menuItems.json) -- on-menu items are always matched by JSON category first.
-_FOUNTAIN_DRINK_KEYWORDS = ("slush", "limeade", "ocean water", "drink", "tea", "lemonade", "coke", "sprite", "root beer")
+#
+# Word-boundary (PR #50 review round 4): a plain substring check let "tea" match inside "steak",
+# so an off-menu "Philly Cheesesteak"/"Steak Sandwich" was silently absorbed into a combo's drink
+# slot AND happy-hour discounted. ``\b...\b`` requires the keyword to be its own word (optionally
+# pluralised, e.g. "Cokes"), so "steak" no longer contains "tea" as a match. Dr Pepper keeps its
+# own separate, already-word-boundary regex above.
+_FOUNTAIN_DRINK_KEYWORD_RE = re.compile(
+    r"\b(?:slush|limeade|ocean water|drink|tea|lemonade|coke|sprite|root beer)s?\b"
+)
 
 # Shake/Blast/Malt keywords: same (unconditional) combo-drink-slot eligibility as fountain drinks,
 # but the happy-hour DISCOUNT for this bucket must obey ``_SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED``
 # below -- PR #50 review: flipping that one flag must change *every* shake/blast variant, plain or
-# customised, on-menu or off, not just the ones matched by JSON category.
-_SHAKE_BLAST_KEYWORDS = ("shake", "blast", "malt")
+# customised, on-menu or off, not just the ones matched by JSON category. Word-boundary for the
+# same reason as the fountain-drink regex above.
+_SHAKE_BLAST_KEYWORD_RE = re.compile(r"\b(?:shake|blast|malt)s?\b")
 
 
 def _keyword_fallback_combo_drink(normalized: str) -> bool:
@@ -265,8 +316,8 @@ def _keyword_fallback_combo_drink(normalized: str) -> bool:
     happy-hour-discount flag, which is a separate question (see ``is_happy_hour_discounted``)."""
     return (
         bool(_DR_PEPPER_RE.search(normalized))
-        or any(kw in normalized for kw in _FOUNTAIN_DRINK_KEYWORDS)
-        or any(kw in normalized for kw in _SHAKE_BLAST_KEYWORDS)
+        or bool(_FOUNTAIN_DRINK_KEYWORD_RE.search(normalized))
+        or bool(_SHAKE_BLAST_KEYWORD_RE.search(normalized))
     )
 
 
@@ -275,9 +326,9 @@ def _keyword_fallback_happy_hour_discounted(normalized: str) -> bool:
     drinks are always discounted; shakes/blasts/malts obey
     ``_SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED`` so that flag is the single switch for every
     shake/blast, on-menu or off, plain or customised (PR #50 review)."""
-    if _DR_PEPPER_RE.search(normalized) or any(kw in normalized for kw in _FOUNTAIN_DRINK_KEYWORDS):
+    if _DR_PEPPER_RE.search(normalized) or _FOUNTAIN_DRINK_KEYWORD_RE.search(normalized):
         return True
-    if any(kw in normalized for kw in _SHAKE_BLAST_KEYWORDS):
+    if _SHAKE_BLAST_KEYWORD_RE.search(normalized):
         return _SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED
     return False
 

@@ -163,6 +163,37 @@ public sealed class CustomisedItemMenuLookupTests
                 OrderScenarioHelpers.AssertMoneyEqual(BaseComboPrice, OrderScenarioHelpers.GetOrderTotal(result.ToolResultJson!));
                 Assert.Equal(1, OrderScenarioHelpers.GetOrderItemCount(result.ToolResultJson!));
             });
+
+        /// <summary>PR #50 review (round 4): pins the word-boundary fix for the fountain-drink
+        /// keyword fallback -- a plain substring check let "tea" match inside "steak", so this
+        /// genuinely off-menu item (not in menuItems.json at all) was silently absorbed into a
+        /// combo's drink slot for free. Word-boundary regex fixes this; a mutation removing the
+        /// `\b` anchors must fail this test.</summary>
+        [Fact]
+        public Task Off_menu_steak_item_is_not_misclassified_as_a_tea_drink_and_charges_in_full() =>
+            fixture.RunAsync(async () =>
+            {
+                var ct = TestContext.Current.CancellationToken;
+                const string item = "Steak Sandwich"; // off-menu; contains "tea" as a substring of "steak"
+                const decimal unitPrice = 5.49m; // placeholder -- see comment on the off-menu side test above
+
+                var (browser, connection, roundTripIndex) = await OrderScenarioHelpers.ConnectAndGreetAsync(fixture, ct);
+                await using var _ = browser;
+
+                var result = await OrderScenarioHelpers.RunOrderStepsAsync(
+                    connection, browser,
+                    [
+                        ("add", BaseComboName, BaseComboSize, 1, BaseComboPrice),
+                        ("add", item, "standard", 1, unitPrice),
+                    ],
+                    roundTripIndex, ct);
+
+                OrderScenarioHelpers.AssertMoneyEqual(
+                    BaseComboPrice + unitPrice,
+                    OrderScenarioHelpers.GetOrderTotal(result.ToolResultJson!),
+                    $"'{item}' must not match the bare substring 'tea' inside 'steak' and silently fill the combo drink slot.");
+                Assert.Equal(2, OrderScenarioHelpers.GetOrderItemCount(result.ToolResultJson!));
+            });
     }
 
     [Collection(HappyHourAtOpenCollection.Name)]

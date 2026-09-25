@@ -8,11 +8,11 @@ from zoneinfo import ZoneInfo
 import conformance_hooks
 from config_loader import get_config
 from menu_utils import (
+    _menu_key,
     canonical_size_key,
     infer_combo_component,
     is_happy_hour_discounted,
     normalize_size,
-    strip_modifiers,
 )
 from models import OrderItem, OrderSummary
 from money_utils import format_money, to_decimal
@@ -170,15 +170,16 @@ class OrderState:
 
             # ── Combo conversion: auto-remove matching standalone entree ──
             if is_combo:
-                # Shared modifier-stripping rule (menu_utils.strip_modifiers, PR #50 review) so
-                # "burger (Pickles Only)" matches "burger" using the exact same normalisation the
-                # menu-lookup functions use elsewhere -- one rule, not two independently
-                # maintained ones.
-                combo_base = strip_modifiers(item_name).lower().replace(" combo", "").replace("®", "").strip()
+                # Shared lookup-key rule (menu_utils._menu_key, PR #50 review round 4) so
+                # "burger (Pickles Only)" matches "burger" using the EXACT same normalisation the
+                # menu-lookup functions use elsewhere (paren-stripping, whitespace/NBSP collapse,
+                # lowercasing, "®" removal) -- one rule, one implementation, not two independently
+                # maintained copies of the same "®"-removal logic.
+                combo_base = _menu_key(item_name).replace(" combo", "").strip()
                 for i, existing in enumerate(order_state):
                     if "combo" in existing.item.lower():
                         continue  # skip other combos
-                    existing_base = strip_modifiers(existing.item).lower().replace("®", "")
+                    existing_base = _menu_key(existing.item)
                     if existing_base == combo_base:
                         # Carry customization mods (e.g., "Pickles Only") to the combo
                         if "(" in existing.item:
