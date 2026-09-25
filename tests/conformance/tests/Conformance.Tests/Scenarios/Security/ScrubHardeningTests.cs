@@ -27,6 +27,19 @@ namespace Conformance.Tests.Scenarios.Security;
 /// session shape (non-empty `instructions`, `model`, etc.), the browser-visible
 /// `session.created` is a real, exercised proof — see
 /// <see cref="Browser_never_receives_secrets_in_session_created"/>.
+///
+/// #35: the "isn't reliably black-box-triggerable without a dedicated env profile" note above is
+/// now out of date for `reasoning` specifically: the suite's own default deployment (
+/// <see cref="BackendContract.DefaultDeployment"/>, gpt-realtime-2.1) is reasoning-capable by
+/// name (see ReasoningByDeploymentTests.cs, landed for #42), so this collection's own default
+/// fixture already exercises it -- no dedicated profile needed. See
+/// <see cref="Session_updated_never_carries_reasoning_for_a_reasoning_capable_deployment"/>.
+/// `parallel_tool_calls` remains genuinely untestable black-box: it is sourced only from
+/// `config.yaml`'s `model_cfg.get("parallel_tool_calls")` (`rtmt.py`'s `_build_session`), with no
+/// environment-variable override the way `reasoning_model`/`reasoning_effort` have
+/// (`AZURE_OPENAI_REALTIME_REASONING_MODEL`/`_EFFORT`) -- and `config.yaml` is under
+/// `app/backend/`, out of this stream's scope to add one to. Documented here rather than worked
+/// around.
 /// </summary>
 [Collection(ConformanceCollection.Name)]
 public sealed class ScrubHardeningTests(ConformanceFixture fixture)
@@ -58,6 +71,34 @@ public sealed class ScrubHardeningTests(ConformanceFixture fixture)
             transcription.TryGetProperty("model", out _);
         Assert.False(hasLeakedTranscriptionModel,
             "The browser must never receive the transcription deployment name (audio.input.transcription.model) via session.updated.");
+    });
+
+    /// <summary>
+    /// #35: this fixture's deployment (<see cref="BackendContract.DefaultDeployment"/>,
+    /// gpt-realtime-2.1) is reasoning-capable by name, so the bootstrap `session.update` the
+    /// backend sends upstream carries `reasoning` (see ReasoningByDeploymentTests.cs), which the
+    /// fake merges into its accumulated effective session and echoes back on every subsequent
+    /// `session.updated` -- including the one the browser sees after its own handshake. Proves
+    /// `_scrub_session_for_client`'s `session.pop("reasoning", None)` actually has something real
+    /// to strip here, rather than relying solely on the Python-unit-level coverage in
+    /// `test_rtmt.py::ProcessMessageToClientTests`.
+    /// </summary>
+    [Fact]
+    public Task Session_updated_never_carries_reasoning_for_a_reasoning_capable_deployment() => fixture.RunAsync(async () =>
+    {
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var browser = await RealtimeBrowserClient.ConnectAsync(fixture.Backend!.BaseUri, cancellationToken: ct);
+        await browser.SendStartSessionAsync(cancellationToken: ct);
+
+        var updated = await browser.ReceivedFrames.WaitForAsync(f => f.Type == "session.updated", FrameTimeout, ct);
+        Assert.True(updated is not null, "Expected the browser to receive a session.updated frame within the timeout.");
+
+        var session = updated!.Json.GetProperty("session");
+        Assert.False(session.TryGetProperty("reasoning", out _),
+            $"The browser must never receive the server-owned `reasoning` tuning knob via " +
+            $"session.updated, even for a reasoning-capable deployment " +
+            $"('{BackendContract.DefaultDeployment}').");
     });
 
     /// <summary>
