@@ -18,6 +18,15 @@ namespace Conformance.Tests.Scenarios.Security;
 /// Python unit level in `test_rtmt.py::ProcessMessageToClientTests` -- those two only appear on a
 /// deployment name recognised as reasoning-capable, which isn't reliably black-box-triggerable
 /// without a dedicated env profile, so they aren't asserted here).
+///
+/// #33: `session.created` used to be stubbed down to `id`/`object` only
+/// (<see cref="FakeRealtimeUpstreamServer"/>'s old `BuildSessionCreated()`), so the backend's
+/// `session.created` scrub branch (same `_scrub_session_for_client` helper, called from
+/// `_process_message_to_client`'s `case "session.created"`) trivially "passed" any leak check —
+/// there was nothing in it to leak in the first place. Now that the fake mirrors the GA default
+/// session shape (non-empty `instructions`, `model`, etc.), the browser-visible
+/// `session.created` is a real, exercised proof — see
+/// <see cref="Browser_never_receives_secrets_in_session_created"/>.
 /// </summary>
 [Collection(ConformanceCollection.Name)]
 public sealed class ScrubHardeningTests(ConformanceFixture fixture)
@@ -49,5 +58,40 @@ public sealed class ScrubHardeningTests(ConformanceFixture fixture)
             transcription.TryGetProperty("model", out _);
         Assert.False(hasLeakedTranscriptionModel,
             "The browser must never receive the transcription deployment name (audio.input.transcription.model) via session.updated.");
+    });
+
+    /// <summary>
+    /// #33: companion to <see cref="Session_updated_never_carries_ga_only_secret_fields"/> but for
+    /// `session.created` (the very first frame the fake sends, before any `session.update` has
+    /// been exchanged). Needs the fake's `session.created` to actually carry `instructions`/
+    /// `tools`/`model` (see <see cref="FakeRealtimeUpstreamServer"/>'s `BuildSessionCreated`) for
+    /// this to be a meaningful proof rather than a vacuous one.
+    /// </summary>
+    [Fact]
+    public Task Browser_never_receives_secrets_in_session_created() => fixture.RunAsync(async () =>
+    {
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var browser = await RealtimeBrowserClient.ConnectAsync(fixture.Backend!.BaseUri, cancellationToken: ct);
+
+        var created = await browser.ReceivedFrames.WaitForAsync(f => f.Type == "session.created", FrameTimeout, ct);
+        Assert.True(created is not null, "Expected the browser to receive a session.created frame within the timeout.");
+
+        var session = created!.Json.GetProperty("session");
+
+        var hasNonEmptyInstructions = session.TryGetProperty("instructions", out var instructions) &&
+            instructions.ValueKind == JsonValueKind.String &&
+            instructions.GetString() is { Length: > 0 };
+        Assert.False(hasNonEmptyInstructions,
+            "The browser must never receive the (even fake/default) system prompt via session.created.");
+
+        var hasNonEmptyTools = session.TryGetProperty("tools", out var toolsProp) &&
+            toolsProp.ValueKind == JsonValueKind.Array &&
+            toolsProp.GetArrayLength() > 0;
+        Assert.False(hasNonEmptyTools,
+            "The browser must never receive a non-empty tool schema via session.created.");
+
+        Assert.False(session.TryGetProperty("model", out _),
+            "The browser must never receive the internal Azure deployment name (model) via session.created.");
     });
 }
