@@ -9,13 +9,16 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from pathlib import Path
 
 __all__ = [
     "SIZE_MAP",
     "SIZE_ALIASES",
     "normalize_size",
+    "canonical_size_key",
     "infer_category",
+    "infer_combo_component",
     "MENU_CATEGORY_MAP",
 ]
 
@@ -43,6 +46,7 @@ SIZE_ALIASES: dict[str, str] = {
     "rt44": "route 44",
     "44": "route 44",
     "44oz": "route 44",
+    "route44": "route 44",
 }
 
 # Sizes that should be hidden in display strings (no prefix)
@@ -65,6 +69,33 @@ def normalize_size(size: str) -> str:
     # Resolve aliases first
     canonical = SIZE_ALIASES.get(key, key)
     return SIZE_MAP.get(canonical, "")
+
+
+def canonical_size_key(size: str) -> str:
+    """Return the canonical, alias-resolved key used to match/merge/remove order lines (#40).
+
+    All spellings of the same physical size must collapse to one key *before* any order-state
+    matching happens, so e.g. ``"rt44"``, ``"route44"``, ``"44 oz"``, ``"RT 44"`` and
+    ``"Route 44"`` are all treated as the same line item. This mirrors the alias resolution
+    ``normalize_size`` already does for its display string, but returns the lookup key itself
+    (not a human-readable label) and is case/whitespace-normalised even for sizes with no known
+    alias, so callers get consistent matching regardless of input casing.
+
+    >>> canonical_size_key("rt44")
+    'route 44'
+    >>> canonical_size_key("Route44")
+    'route 44'
+    >>> canonical_size_key("44 oz")
+    'route 44'
+    >>> canonical_size_key(" Medium ")
+    'medium'
+    """
+    key = (size or "").strip().lower()
+    # Collapse internal whitespace so "44 oz" and "44oz" resolve the same way as a plain "44".
+    compact_key = "".join(key.split())
+    if compact_key in SIZE_ALIASES:
+        return SIZE_ALIASES[compact_key]
+    return SIZE_ALIASES.get(key, key)
 
 
 # ---------------------------------------------------------------------------

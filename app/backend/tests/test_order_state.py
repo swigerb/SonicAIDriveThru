@@ -631,6 +631,31 @@ class OrderStateTests(unittest.TestCase):
         self.assertIn("Combo", items[0].item)
         self.assertIn("combo_converted_from", result_info)
 
+    # ── #40: Route 44 alias normalization ──────────────────────────────────
+
+    def test_adding_same_drink_with_two_route_44_aliases_merges_into_one_line(self):
+        """Adding "rt44" then "route 44" (or "44 oz"/"route44"/mixed case) must all resolve to
+        the same canonical size key and merge into a single order line, not two."""
+        session_id = order_state_singleton.create_session()
+        order_state_singleton.handle_order_update(session_id, "add", "Cherry Limeade", "rt44", 1, 3.79)
+        order_state_singleton.handle_order_update(session_id, "add", "Cherry Limeade", "route 44", 1, 3.79)
+        order_state_singleton.handle_order_update(session_id, "add", "Cherry Limeade", "44 oz", 1, 3.79)
+        order_state_singleton.handle_order_update(session_id, "add", "Cherry Limeade", "ROUTE44", 1, 3.79)
+
+        items = order_state_singleton.get_order_items(session_id)
+        self.assertEqual(len(items), 1, "All four Route 44 aliases should merge into one line")
+        self.assertEqual(items[0].quantity, 4)
+        self.assertEqual(items[0].display, "Route 44 Cherry Limeade")
+
+    def test_removing_route_44_drink_with_different_alias_than_added_removes_it(self):
+        """A Route 44 item added with one alias must be removable using any other alias."""
+        session_id = order_state_singleton.create_session()
+        order_state_singleton.handle_order_update(session_id, "add", "Cherry Limeade", "rt44", 1, 3.79)
+        order_state_singleton.handle_order_update(session_id, "remove", "Cherry Limeade", "44oz", 1, 3.79)
+
+        items = order_state_singleton.get_order_items(session_id)
+        self.assertEqual(len(items), 0, "Removing with a different alias should still find and remove the line")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 
 import conformance_hooks
 from config_loader import get_config
-from menu_utils import infer_category, normalize_size
+from menu_utils import canonical_size_key, infer_category, normalize_size
 from models import OrderItem, OrderSummary
 
 __all__ = ["OrderState", "SessionIdentifiers", "order_state_singleton", "is_happy_hour"]
@@ -112,6 +112,12 @@ class OrderState:
         session = self.sessions[session_id]
         order_state = session["order_state"]
         result_info = {}
+
+        # #40: canonicalize the size to a single alias-resolved key BEFORE any matching/merging
+        # so different spellings of the same physical size (e.g. "rt44" vs "route 44" vs "44 oz"
+        # vs "ROUTE44") collapse onto one order line and can be removed with any alias, not only
+        # the one it was added with.
+        size = canonical_size_key(size)
 
         resolved = normalize_size(size)
         formatted_size = f"{resolved} " if resolved else ""
