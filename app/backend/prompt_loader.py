@@ -115,8 +115,8 @@ class PromptLoader:
         self._maybe_reload()
         templates = self._cache["hints"].get("delta_templates", {})
         if action == "add":
-            return templates.get("item_added", "Added {{quantity}} {{display_name}} — your total is now ${{total}}")
-        return templates.get("item_removed", "Removed {{quantity}} {{display_name}} — your total is now ${{total}}")
+            return templates.get("item_added", "Added {{quantity}} {{display_name}} — your total is now {{total}}")
+        return templates.get("item_removed", "Removed {{quantity}} {{display_name}} — your total is now {{total}}")
 
     def render_template(self, template_str: str, **kwargs: Any) -> str:
         """Render any Jinja2 template string with the given variables."""

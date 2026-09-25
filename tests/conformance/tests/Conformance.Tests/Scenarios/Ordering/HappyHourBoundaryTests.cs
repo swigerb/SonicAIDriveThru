@@ -90,12 +90,7 @@ public sealed class HappyHourAtOpenTests(HappyHourAtOpenFixture fixture)
             OrderScenarioHelpers.GetOrderFinalTotal(result.ToolResultJson!));
     });
 
-    [Fact(Skip = "order_state.py/menu_utils.py's category fallback treats any name containing " +
-                 "'pepper' (matching Dr Pepper's keyword heuristic) as a drink, so Ched 'R' " +
-                 "Peppers (a side) gets the 50% happy-hour discount it should never receive -- " +
-                 "#39. Not fixing Python here (needs the golden category table, which is out of " +
-                 "scope per this task's instructions); tracked for the C# backend.",
-        SkipWhen = nameof(BackendUnderTest.IsPython), SkipType = typeof(BackendUnderTest))]
+    [Fact]
     public Task Ched_R_Peppers_is_full_price_during_happy_hour_despite_the_keyword_pepper() => fixture.RunAsync(async () =>
     {
         var ct = TestContext.Current.CancellationToken;

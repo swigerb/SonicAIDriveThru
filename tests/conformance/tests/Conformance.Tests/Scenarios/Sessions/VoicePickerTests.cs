@@ -1,4 +1,6 @@
 using System.Net.WebSockets;
+using System.Text.Json;
+using Conformance.Fakes;
 using Conformance.Harness;
 using Xunit;
 
@@ -56,9 +58,18 @@ public sealed class VoicePickerTests(VoicePickerConformanceFixture fixture)
         // it would arrive before this sentinel and be the frame this wait actually captures,
         // failing the "voice omitted" assertion below immediately rather than relying on a race
         // against a fixed sleep.
+        //
+        // #28 N20 (Rick's final review of #42, follow-up 1): matching on `Type == "session.update"`
+        // alone was not enough -- a locked extension.set_voice regressed to a *voice-less*
+        // fallback update (`instructions`/`tools` only, no `audio` block at all) still arrives
+        // first and gets captured as "the sentinel", passing the voice-omitted check below for
+        // the wrong reason (survived 3/3). The browser's own SendStartSessionAsync follow-up
+        // always carries a full `session.audio.input.turn_detection` block; the fallback-shaped
+        // update never does -- requiring it here rejects that impostor frame and keeps waiting
+        // for the real one.
         await browser.SendStartSessionAsync(cancellationToken: ct);
         var sentinelUpdate = await connection.ReceivedFrames.WaitForAsync(
-            f => f.Sequence >= watermark && f.Type == "session.update", FrameTimeout, ct);
+            f => f.Sequence >= watermark && f.Type == "session.update" && HasTurnDetection(f), FrameTimeout, ct);
         Assert.True(sentinelUpdate is not null, "Expected the browser's own follow-up session.update to reach upstream.");
 
         var updateCountAfter = connection.ReceivedFrames.Snapshot().Count(f => f.Type == "session.update");
@@ -72,6 +83,58 @@ public sealed class VoicePickerTests(VoicePickerConformanceFixture fixture)
             "the only session.update to reach upstream after the pick must be the browser's own follow-up, " +
             $"with voice still omitted (locked): {sentinelUpdate.Json}");
     });
+
+    /// <summary>#28 N20: true only for a session.update that carries the full
+    /// `session.audio.input.turn_detection` block the browser's own follow-up session.update
+    /// always sends -- a voice-less *fallback* session.update (the shape a locked
+    /// extension.set_voice would regress to) never has an `audio` block at all, so this predicate
+    /// tells the two apart instead of matching on `type` alone.</summary>
+    private static bool HasTurnDetection(RecordedFrame frame) =>
+        frame.Type == "session.update"
+        && frame.Json.TryGetProperty("session", out var session)
+        && session.TryGetProperty("audio", out var audio)
+        && audio.TryGetProperty("input", out var input)
+        && input.TryGetProperty("turn_detection", out _);
+
+    /// <summary>
+    /// Mutation-check for #28 N20's fix, reproduced from the issue's own description of mutation
+    /// D2 ("a locked set_voice sends a voice-less update with instructions and tools only")
+    /// without needing to actually regress <c>app/backend/rtmt.py</c> (out of Stream C's scope) to
+    /// prove it: hand-build the exact two frame shapes the real defer test's sentinel wait must
+    /// tell apart, and assert <see cref="HasTurnDetection"/> accepts the real one and rejects the
+    /// D2-shaped impostor. Reverting this predicate to `Type == "session.update"` alone (the
+    /// pre-N20 code) makes the second assertion below fail, which is exactly the false-pass the
+    /// issue reports the live suite previously had.
+    /// </summary>
+    [Fact]
+    public void HasTurnDetection_accepts_the_real_follow_up_and_rejects_the_D2_fallback_shape()
+    {
+        var realFollowUp = MakeSessionUpdateFrame("""
+            {
+              "type": "session.update",
+              "session": {
+                "instructions": "You are Sonic.",
+                "tools": [],
+                "audio": { "input": { "turn_detection": { "type": "server_vad" } } }
+              }
+            }
+            """);
+        Assert.True(HasTurnDetection(realFollowUp), "The browser's own follow-up session.update always carries audio.input.turn_detection.");
+
+        var d2Fallback = MakeSessionUpdateFrame("""
+            {
+              "type": "session.update",
+              "session": {
+                "instructions": "You are Sonic.",
+                "tools": []
+              }
+            }
+            """);
+        Assert.False(HasTurnDetection(d2Fallback), "Mutation D2's voice-less fallback update never has an audio block at all -- it must not be mistaken for the real sentinel.");
+    }
+
+    private static RecordedFrame MakeSessionUpdateFrame(string json) =>
+        new(Sequence: 0, Type: "session.update", Json: JsonDocument.Parse(json).RootElement, ReceivedAt: DateTimeOffset.UtcNow);
 
     /// <summary>
     /// PR #42 review item 8 ("set_voice before lock"): the deferred behaviour only applies once

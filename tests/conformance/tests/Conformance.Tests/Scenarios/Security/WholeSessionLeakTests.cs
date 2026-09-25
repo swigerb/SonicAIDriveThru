@@ -1,3 +1,4 @@
+using System.Net.WebSockets;
 using System.Text.Json;
 using Conformance.Fakes;
 using Conformance.Harness;
@@ -13,7 +14,7 @@ namespace Conformance.Tests.Scenarios.Security;
 /// items) is `role: "user"`, not `"system"`, so it is invisible to any test that only checks the
 /// `role == "system"` backstop. This scenario drives one full, realistic session lifecycle --
 /// bootstrap, browser handshake, a voice change, a tool round trip, a disconnect + resume, and a
-/// silence nudge (<see cref="BackendProfiles.ShortTimers"/>) -- while dynamically capturing the
+/// silence nudge (<see cref="BackendProfiles.ResumeMargin"/>) -- while dynamically capturing the
 /// four pieces of text the middle tier authors and sends only to the *upstream* socket
 /// (`session.instructions` from the bootstrap `session.update`, the greeting item's text
 /// (`session_manager.py`'s `greeting_msg` / prompt_loader's real greeting -- `role: "user"`), the
@@ -59,12 +60,16 @@ namespace Conformance.Tests.Scenarios.Security;
 /// `function_call`/`function_call_output` scrub in `response.done` (rtmt.py) makes this fail via
 /// `update_order`'s tool-call arguments leaking on the browser's `response.done` frame.
 ///
-/// Runs under <see cref="BackendProfiles.ShortTimers"/> so the resume grace hold and nudge timer
-/// fit in a fast test.
+/// Runs under <see cref="BackendProfiles.ResumeMargin"/> (PR #52 CI follow-up) so the nudge timer
+/// stays a fast ~1s (vs the 30s production default) while idle timeout and grace get real margin
+/// (5s vs the 300s / 120s production defaults) above what this scenario's own pre-detach setup
+/// (bootstrap, voice change, and a full tool round trip, on top of the shared handshake/greeting)
+/// should ever take, even on a loaded CI runner — see that profile's doc comment for why the
+/// original, equal 1s/1s <see cref="BackendProfiles.ShortTimers"/> raced CI run 36085091969's
+/// "holding order for 0s" detach.
 /// </summary>
-
-[Collection(ShortTimersConformanceCollection.Name)]
-public sealed class WholeSessionLeakTests(ShortTimersConformanceFixture fixture)
+[Collection(ResumeMarginConformanceCollection.Name)]
+public sealed class WholeSessionLeakTests(ResumeMarginConformanceFixture fixture)
 {
     private static readonly TimeSpan FrameTimeout = TimeSpan.FromSeconds(30);
 
@@ -257,25 +262,14 @@ public sealed class WholeSessionLeakTests(ShortTimersConformanceFixture fixture)
         AddSecretWindowsExcludingLegitimateOverlap(
             GreetingText(rehydrationItem!.Json.GetProperty("item")), legitimateBrowserFrames, secretWindows);
 
-        // ── Wait for the silence nudge (ShortTimers' ~1s timer) with a keepalive so the idle
-        // sweep (pinned to the same ~1s under ShortTimers) doesn't close the session first --
-        // same race and same fix as ResumeRehydrationClientVisibilityTests (PR #30 review "S3"). ──
-        using var keepAliveCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        var keepAliveTask = Task.Run(async () =>
-        {
-            try
-            {
-                while (!keepAliveCts.IsCancellationRequested)
-                {
-                    await second.SendExtensionSetVerboseLoggingAsync(false, keepAliveCts.Token);
-                    await Task.Delay(TimeSpan.FromMilliseconds(200), keepAliveCts.Token);
-                }
-            }
-            catch (OperationCanceledException)
-            {
-                // Expected once the wait below cancels the keepalive loop.
-            }
-        }, CancellationToken.None);
+        // ── Wait for the silence nudge (ResumeMargin's ~1s nudge timer) with a keepalive so the
+        // idle sweep (which now has real margin, but the keepalive still resets it defensively)
+        // doesn't close the session first -- same race and same fix as
+        // ResumeRehydrationClientVisibilityTests (PR #30 review "S3"). Extracted into the shared
+        // KeepAlive helper (PR #52 CI follow-up round 5, Rick's review S2) so this scenario and
+        // ResumeRehydrationClientVisibilityTests can't silently diverge from what the self-test in
+        // BrowserClientLifecycleTests actually exercises. ──
+        var keepAlive = KeepAlive.RunAsync(second, TimeSpan.FromMilliseconds(200), ct);
 
         var nudgeItem = await secondConnection.ReceivedFrames.WaitForAsync(
             f => f.Type == "conversation.item.create" &&
@@ -288,8 +282,7 @@ public sealed class WholeSessionLeakTests(ShortTimersConformanceFixture fixture)
         var nudgeResponseCreated = await second.ReceivedFrames.WaitForAsync(
             f => f.Type == "response.created", FrameTimeout, ct);
 
-        keepAliveCts.Cancel();
-        await keepAliveTask;
+        await keepAlive.StopAsync();
 
         Assert.True(nudgeItem is not null, "Expected the silence nudge item to reach the fake upstream.");
         Assert.True(nudgeResponseCreated is not null,
