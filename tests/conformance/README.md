@@ -790,12 +790,18 @@ The exact-decimal contract above governs every wire/golden numeric field (`total
 `finalTotal`, `items[].price`) — there is no rounding anywhere in that arithmetic. Separately, the
 **spoken/human-readable `$X.XX` text** the model reads back to the guest (and any `.2f`-style
 display formatting) is presentation-only and follows its own, additional rule: round the exact
-decimal to two places using **round half up** (C#: `decimal` value with
-`Math.Round(value, 2, MidpointRounding.AwayFromZero)`; Python: `app/backend/money_utils.py::format_money`,
-which converts the value to `Decimal` first — never through a binary `float` intermediate — and
-rounds with `decimal.ROUND_HALF_UP`). This rule only ever consumes the exact decimal as input — it
-must never feed back into subtotal/tax/finalTotal math, and it is independent of (not a
-replacement for) the wire/golden exact-decimal contract.
+decimal to two places using **round half up** and render it as an exact, culture-invariant `"$0.00"`
+string. The precise formula (PR #50 review, should-fix 3):
+
+- **C#**: `"$" + Math.Round(v, 2, MidpointRounding.AwayFromZero).ToString("0.00", CultureInfo.InvariantCulture)`
+  for a `decimal` value `v`.
+- **Python**: `app/backend/money_utils.py::format_money`, which converts the value to `Decimal`
+  first — never through a binary `float` intermediate — and rounds with `decimal.ROUND_HALF_UP`
+  (the `Decimal` equivalent of `MidpointRounding.AwayFromZero`), formatting the result as `"$0.00"`.
+
+This rule only ever consumes the exact decimal as input — it must never feed back into
+subtotal/tax/finalTotal math, and it is independent of (not a replacement for) the wire/golden
+exact-decimal contract.
 
 **(#46, resolved)** Python previously did not implement this (or any single) decimal rounding rule
 for half-cent-landing totals: it rendered with `float`'s `:.2f` format specifier, which round-trips
