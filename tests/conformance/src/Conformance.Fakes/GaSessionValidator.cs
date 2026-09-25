@@ -69,6 +69,36 @@ public static class GaSessionValidator
     };
 
     /// <summary>
+    /// #28 N11: keys accepted under `session.audio.input.transcription` (the `AudioTranscription`
+    /// object) -- previously unchecked, so a translator that forwarded a legacy/renamed nested key
+    /// (e.g. a pre-GA field name) here would pass the fake but be rejected by the real service.
+    /// Confirmed by enumerating the reference's `{ language, languages, model, prompt }` preview
+    /// for this object (same page/fetch date as the class doc).
+    /// </summary>
+    public static readonly IReadOnlySet<string> AudioInputTranscriptionKeys = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "language", "languages", "model", "prompt",
+    };
+
+    /// <summary>
+    /// #28 N11: keys accepted under `session.audio.input.turn_detection` -- previously unchecked.
+    /// GA's `turn_detection` is a discriminated union on `type` (`ServerVad` vs `SemanticVad`);
+    /// this is the union of both variants' keys, since the discriminator itself
+    /// (`turn_detection.type`) isn't validated as a separate concern here — an unknown key is an
+    /// unknown key regardless of which variant the caller meant. `ServerVad`:
+    /// `{ type, create_response, idle_timeout_ms, interrupt_response, prefix_padding_ms,
+    /// silence_duration_ms, threshold }` (7 keys, confirmed by enumerating the reference's
+    /// "4 more" past the first three named in its preview). `SemanticVad`:
+    /// `{ type, create_response, eagerness, interrupt_response }` (4 keys) — `eagerness` is the
+    /// only key not already covered by `ServerVad`.
+    /// </summary>
+    public static readonly IReadOnlySet<string> AudioInputTurnDetectionKeys = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "type", "create_response", "idle_timeout_ms", "interrupt_response",
+        "prefix_padding_ms", "silence_duration_ms", "threshold", "eagerness",
+    };
+
+    /// <summary>
     /// Valid top-level client event `type` values. Primary source is the live-probe rejection
     /// message (ground truth: it's literally the real server's own "Supported values" list for
     /// this exact check): session.update, transcription_session.update, session.close,
@@ -160,6 +190,36 @@ public static class GaSessionValidator
                         param: $"session.audio.input.{badInputKey}",
                         message: $"Unknown parameter: 'session.audio.input.{badInputKey}'.",
                         echoEventId: true);
+                }
+
+                // #28 N11: nested keys under audio.input.transcription / audio.input.turn_detection
+                // were never validated -- only that the parent object itself was named correctly.
+                if (input.TryGetProperty("transcription", out var transcription) &&
+                    transcription.ValueKind == JsonValueKind.Object)
+                {
+                    var badTranscriptionKey = FirstUnknownKey(transcription, AudioInputTranscriptionKeys);
+                    if (badTranscriptionKey is not null)
+                    {
+                        return SessionUpdateValidationResult.Rejected(
+                            code: "unknown_parameter",
+                            param: $"session.audio.input.transcription.{badTranscriptionKey}",
+                            message: $"Unknown parameter: 'session.audio.input.transcription.{badTranscriptionKey}'.",
+                            echoEventId: true);
+                    }
+                }
+
+                if (input.TryGetProperty("turn_detection", out var turnDetection) &&
+                    turnDetection.ValueKind == JsonValueKind.Object)
+                {
+                    var badTurnDetectionKey = FirstUnknownKey(turnDetection, AudioInputTurnDetectionKeys);
+                    if (badTurnDetectionKey is not null)
+                    {
+                        return SessionUpdateValidationResult.Rejected(
+                            code: "unknown_parameter",
+                            param: $"session.audio.input.turn_detection.{badTurnDetectionKey}",
+                            message: $"Unknown parameter: 'session.audio.input.turn_detection.{badTurnDetectionKey}'.",
+                            echoEventId: true);
+                    }
                 }
             }
 
