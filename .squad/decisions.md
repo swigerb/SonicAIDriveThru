@@ -471,6 +471,13 @@
   slot, kills Rick's Z2) and stays full price at happy hour (kills Z3) — added as two new
   `CustomisedItemMenuLookupTests.cs` Facts, alongside the plain-sundae case already pinned in
   `GoldenMenuComboSlotTheoryTests`/`test_menu_utils.py`.
+- **Y4 (an off-menu fountain drink discounted at happy hour) is now pinned at the C# conformance
+  level too, not just Python.** Previously only `test_menu_utils.py` covered "an off-menu drink
+  like Dr Pepper Zero is still happy-hour discounted"; a new
+  `Off_menu_fountain_drink_is_happy_hour_discounted` Fact in `CustomisedItemMenuLookupTests.cs`
+  runs the same assertion end to end against the live backend, mirroring the combo-slot version of
+  the same case (`Off_menu_fountain_drink_still_absorbs_into_the_combo_drink_slot`) that already
+  existed there.
 - **Explicitly out of scope (Rick will file separately):** the Python conformance-suite money
   tolerance change, and the `menuItems.json` schema redesign referenced in the correction on entry 38
   above.

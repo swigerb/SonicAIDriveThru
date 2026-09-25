@@ -307,5 +307,29 @@ public sealed class CustomisedItemMenuLookupTests
                     OrderScenarioHelpers.GetOrderFinalTotal(result.ToolResultJson!),
                     "A customised sundae must stay full price during happy hour -- Brian's #39 decision survives customization.");
             });
+
+        /// <summary>Rick's Y4, re-pinned directly in conformance (previously only covered by a
+        /// pytest): a genuinely off-menu fountain drink must still get the happy-hour discount via
+        /// the keyword fallback, at the C# level too, not just Python's.</summary>
+        [Fact]
+        public Task Off_menu_fountain_drink_is_happy_hour_discounted() =>
+            fixture.RunAsync(async () =>
+            {
+                var ct = TestContext.Current.CancellationToken;
+                const string item = "Dr Pepper Zero"; // off-menu variant, not a literal menuItems.json entry
+                const decimal unitPrice = 2.29m; // placeholder -- see comment on the off-menu drink test above
+
+                var (browser, connection, roundTripIndex) = await OrderScenarioHelpers.ConnectAndGreetAsync(fixture, ct);
+                await using var _ = browser;
+
+                var result = await OrderScenarioHelpers.RunOrderStepsAsync(
+                    connection, browser,
+                    [("add", item, "medium", 1, unitPrice)],
+                    roundTripIndex, ct);
+
+                var rules = GoldenOrderPricingData.Load(RepoPaths.FindRepoRoot()).BusinessRules;
+                var expectedTotal = unitPrice * rules.HappyHourDiscount * (1 + rules.TaxRate);
+                OrderScenarioHelpers.AssertMoneyEqual(expectedTotal, OrderScenarioHelpers.GetOrderFinalTotal(result.ToolResultJson!));
+            });
     }
 }
