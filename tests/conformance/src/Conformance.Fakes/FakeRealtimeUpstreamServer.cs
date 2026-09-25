@@ -510,6 +510,18 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
             connection.TeardownCancellation.Cancel();
             await AwaitOutstandingHandlersAsync().ConfigureAwait(false);
             _connections.NotifyClosed(connection);
+
+            // #28 N16: connection.TeardownCancellation was never disposed -- every connection this
+            // fake ever handled leaked its CancellationTokenSource for the process's lifetime.
+            // teardownOnAbort is disposed explicitly (unregistering its ct.Register callback)
+            // *before* the CTS it closes over, rather than relying on its own `using`'s
+            // compiler-emitted dispose at the end of this method: ct (context.RequestAborted) can
+            // fire on a different thread than this request's own continuation, so leaving that
+            // ordering implicit would allow a hostile timing window where ct fires after
+            // TeardownCancellation is disposed but before teardownOnAbort unregisters, running the
+            // registered callback against an already-disposed CancellationTokenSource.
+            teardownOnAbort.Dispose();
+            connection.TeardownCancellation.Dispose();
         }
     }
 
