@@ -44,6 +44,11 @@ export default defineConfig({
             "/realtime": {
                 target: "ws://localhost:8000",
                 ws: true,
+                // #34: rewriteWsOrigin alone still forwarded Origin: ws://localhost:8000 with
+                // Host: localhost:5173 (mismatched), so the backend's origin check 403'd every
+                // dev-mode connection. changeOrigin rewrites the Host header (and Origin) to match
+                // the proxy target, so both match and the backend's same-origin check passes.
+                changeOrigin: true,
                 rewriteWsOrigin: true
             }
         }
