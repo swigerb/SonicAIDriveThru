@@ -214,24 +214,53 @@ public static class BackendProfiles
     /// one 0.2s sweep pass) against a would-be mutant close no earlier than ~1.6s (0.2s+0.4s=0.6s
     /// of retry delay resetting last_activity, plus the 1s idle_timeout from there) -- a 1.4s
     /// ceiling left only ~190ms of headroom on the correct-code side, tight enough to flake under
-    /// this suite's own heavy concurrent load. Widening idle_timeout to 2s and the retry delays to
-    /// 0.3s/1.2s scales both predictions apart much further: correct code closes by ~2.0-2.2s
-    /// (idle_timeout=2s plus at most one sweep pass), while the mutant can't close before ~3.5s
-    /// (0.3s+1.2s=1.5s of reset last_activity, plus 2s idle_timeout from there) -- a 2.8s ceiling
-    /// now sits almost exactly halfway between the two, leaving ~0.6s of margin on either side
-    /// instead of ~190ms.
+    /// this suite's own heavy concurrent load.
+    ///
+    /// CI run 36176347267 (Linux, backend=python) then flaked *this* 2s/0.3s/1.2s version too, but
+    /// not via the retry-vs-activity race the margin above protects: the backend log showed a
+    /// multi-second stall between the WS upgrade and "Session created", with the idle sweep
+    /// closing the brand-new session in the same tick -- i.e. the idle clock (which starts
+    /// counting from session creation, before <c>RateLimitIdleInteractionTests.
+    /// ConnectAndGetPastGreetingAsync</c>'s un-timed connect-and-greet phase even begins, well
+    /// before the test's own stopwatch starts at its <c>response.create</c> send) tripped during
+    /// ordinary connection/greeting setup rather than during the timed race. `session_manager.py`'s
+    /// idle-clock code itself was audited and instrumented and found race-free (last_activity is
+    /// always stamped from a fresh monotonic read at session-creation time, and the sweep reads an
+    /// equally fresh "now" -- confirmed by direct instrumentation showing diff=0.000 immediately
+    /// after creation, both quiescent and under heavy artificial CPU load). The reproducible cause
+    /// is host contention: GitHub's ubuntu-latest runners have 4 vCPUs, and this suite launches one
+    /// Python backend process per dedicated collection, so xUnit's default collection parallelism
+    /// can have several cold interpreter start-ups (imports, aiohttp/JIT warm-up, etc.) competing
+    /// for those same 4 cores at once -- artificially reproducing that contention locally (heavy
+    /// background CPU load during a full-suite run) measured up to an 11.7s backend start-up delay
+    /// on an otherwise sub-second path. This test's own dedicated collection (added by PR #54) means
+    /// it is now always the *first* connection to its process, with none of the implicit warm-up a
+    /// shared collection used to provide -- so a 2s idle_timeout, which used to be plenty above
+    /// ordinary connect+greet latency, is no longer enough margin against demonstrated worst-case CI
+    /// contention. Since idle_timeout is also the retry-vs-activity race's discriminating budget,
+    /// the fix widens the whole profile by 3x rather than adding a special-case grace period around
+    /// setup: idle_timeout=6s and retry delays 0.9s/3.6s keep the exact same ratios (so the same
+    /// math applies), giving correct code a close at ~6.0-6.2s (idle_timeout=6s plus at most one
+    /// 0.2s sweep pass) against a would-be mutant close no earlier than ~10.5s (0.9s+3.6s=4.5s of
+    /// reset last_activity, plus 6s idle_timeout from there) -- an 8.3s ceiling now sits almost
+    /// exactly halfway between the two, leaving ~2.1s of margin on either side (versus ~0.6s
+    /// before) while *also* giving the un-timed connect-and-greet phase 6s of idle-clock headroom
+    /// instead of 2s to absorb the same class of cold-start contention. grace/nudge/first_frame are
+    /// unused by this test but widened in lockstep for consistency; greeting_timeout is widened too
+    /// since a premature greeting-timeout fallback during a slow connect-and-greet phase could
+    /// equally destabilize this test's un-timed warm-up.
     /// </summary>
     public static BackendProfile RateLimitIdleInteractionTimers { get; } = new(
         "RateLimitIdleInteractionTimers", new Dictionary<string, string>
         {
             ["CONFORMANCE_TEST_HOOKS"] = "1",
-            ["CONFORMANCE_IDLE_TIMEOUT_SECONDS"] = "2",
-            ["CONFORMANCE_GRACE_SECONDS"] = "2",
-            ["CONFORMANCE_NUDGE_AFTER_SECONDS"] = "2",
-            ["CONFORMANCE_FIRST_FRAME_TIMEOUT_SECONDS"] = "2",
-            ["CONFORMANCE_GREETING_TIMEOUT_SECONDS"] = "2",
-            ["CONFORMANCE_RATE_LIMIT_RETRY_DELAY_SECONDS"] = "0.3",
-            ["CONFORMANCE_RATE_LIMIT_SECOND_RETRY_DELAY_SECONDS"] = "1.2",
+            ["CONFORMANCE_IDLE_TIMEOUT_SECONDS"] = "6",
+            ["CONFORMANCE_GRACE_SECONDS"] = "6",
+            ["CONFORMANCE_NUDGE_AFTER_SECONDS"] = "6",
+            ["CONFORMANCE_FIRST_FRAME_TIMEOUT_SECONDS"] = "6",
+            ["CONFORMANCE_GREETING_TIMEOUT_SECONDS"] = "6",
+            ["CONFORMANCE_RATE_LIMIT_RETRY_DELAY_SECONDS"] = "0.9",
+            ["CONFORMANCE_RATE_LIMIT_SECOND_RETRY_DELAY_SECONDS"] = "3.6",
             ["CONFORMANCE_SWEEP_INTERVAL_SECONDS"] = "0.2",
         });
 
