@@ -86,7 +86,7 @@ developer's local `.env`; every value below is authoritative for the launched pr
 | `RATE_LIMIT_RECOVERY_ENABLED` | `true` | Matches production behaviour for the rate-limit-with-hints scenarios; a neutral need, not Python-specific. |
 | `PYTHONUNBUFFERED` | `1` | Ensures `CapturedProcessOutput` sees stdout/stderr promptly instead of buffered, so failure diagnostics are complete. **Python-specific** (a CPython interpreter env var). |
 | `PYTHONUTF8` | `1` | Deterministic encoding regardless of the launching machine's default. **Python-specific** (a CPython interpreter env var). |
-| `CONFORMANCE_TEST_HOOKS` and its overrides (`CONFORMANCE_FIXED_NOW`, timer overrides, etc) | set only by `BackendProfiles.ShortTimers` / `.FixedClock(instant)` | See "Test hooks" below — **never** set for the default profile, so most scenarios exercise real production timing. |
+| `CONFORMANCE_TEST_HOOKS` and its overrides (`CONFORMANCE_FIXED_NOW`, timer overrides, etc) | `CONFORMANCE_TEST_HOOKS=1` set for **every** profile including `Default` (PR #49 review round 2, "S1"); the timer/clock *override* vars (`CONFORMANCE_FIXED_NOW`, `CONFORMANCE_*_SECONDS`) are set only by `BackendProfiles.ShortTimers` / `.FixedClock(instant)` | See "Test hooks" below — `CONFORMANCE_TEST_HOOKS=1` alone, with no paired override var also set, is a verified no-op for every timer/clock behaviour (`now()`/`seconds()` each independently require their own specific override var), so `Default` gained it purely to keep the browser-simulated `response.create` allow-list entry (gated on `conformance_hooks.hooks_enabled_now()`, see the browser→upstream allow-list contract above) working for every existing scenario without changing any scenario's timing. |
 
 PR #22 review item N8: as of this pass, only `PYTHONUNBUFFERED`/`PYTHONUTF8` are genuinely
 Python-specific (CPython's own interpreter env vars) — `RUNNING_IN_PRODUCTION`, `LOG_LEVEL`,
@@ -427,27 +427,86 @@ just the real frontend — anything running same-origin script) override the ope
 prompt/tools for a turn, inject a fabricated system-authored conversation item, or read back any
 conversation item verbatim including middle-tier-authored ones never meant for the browser.
 
-**The exact allow-list** (`_CLIENT_ALLOWED_TYPES` in `rtmt.py`), derived from every event type
-`app/frontend/src/hooks/useRealtime.tsx` (the only frontend code that talks to this socket)
-actually sends:
+**PR #49 review round 2 hardened this further** after the original allow-list-by-type check turned
+out to be bypassable three ways, all reproduced against the real backend, plus several should-fix
+items. Every backend implementation must satisfy the full **parse → validate → re-serialise**
+contract below for every browser→upstream frame — checking the type by name is necessary but not
+sufficient.
 
-| Type | Transform before forwarding |
-|---|---|
-| `session.update` | forwarded as-is (server-owned fields are re-applied separately, see `_build_session`) |
-| `input_audio_buffer.append` | forwarded as-is |
-| `input_audio_buffer.clear` | forwarded as-is |
-| `input_audio_buffer.commit` | forwarded as-is (legacy; kept for parity with the fast passthrough path) |
-| `response.cancel` | forwarded as-is |
-| `response.create` | forwarded, but with its entire top-level `"response"` key stripped whenever present — the bare `{"type":"response.create"}` form is legitimate turn-nudging traffic (the real frontend never sends one today, but it's used as a same-effect stand-in for server-VAD-triggered turns across many existing scenarios), while a `response.instructions`/`response.tools`/`response.tool_choice` override on it must never reach upstream |
+### Parse → validate → re-serialise
+
+Every browser→upstream frame is either matched byte-for-byte by the exact-frame fast path below, or
+fully JSON-parsed, validated, and **rebuilt from scratch** before being forwarded — a backend must
+never forward the browser's original bytes/object once its type has merely been checked ("M2"):
+forwarding the original object let any extra top-level key riding along on an otherwise-legitimate
+event (e.g. a forged `item` object smuggled onto `input_audio_buffer.clear`) reach upstream
+unfiltered.
+
+- **Exact-match fast path** (`_CLIENT_APPEND_FAST_PATH_RE` in `rtmt.py`, "M1"): the *only* frame
+  allowed to skip JSON parsing entirely is an exact, byte-for-byte match of
+  `` {"type":"input_audio_buffer.append","audio":"<base64>"} `` — no extra whitespace, no extra
+  keys, this exact key order — confirmed against `useRealtime.tsx`'s/the audio worklet's
+  `JSON.stringify({type: "input_audio_buffer.append", audio: base64Audio})` compact, key-order-stable
+  output. A prior implementation used an *unanchored* `"type":"..."` substring search that matched
+  the *first* such substring anywhere in the raw frame; combined with `json.loads` keeping the
+  *last* value for a repeated key, that let a forged frame reach upstream completely unfiltered via:
+  a repeated top-level `"type"` key, a `"type"` substring nested inside an arbitrary free-form
+  sub-object (e.g. `item.type` or `response.metadata.type`) placed earlier in the byte stream than
+  the real top-level `type`, or the same trick played on `session.update` specifically (which used
+  to skip session building entirely if it took the old fast path). Anything that doesn't match the
+  anchored regex exactly — including a well-formed append frame with different whitespace/key order,
+  or any of the three bypasses above — falls through to the slow path, which still allows a
+  *genuine* append frame in any other shape, just at the cost of a full parse instead of a regex
+  match.
+- **Slow path**: `json.loads` the frame; if that raises, or the result isn't a JSON object, or its
+  `type` isn't a string (covers e.g. `{"type": ["x"]}`, `[]`, `"a string"`, non-JSON text), drop the
+  frame with a WARNING and keep the socket open — never raise out of the message loop ("S2"). Then
+  check the type against the allow-list below. If allowed, **rebuild** the message from only that
+  type's allow-listed top-level keys (never the browser's original dict) and `json.dumps` it fresh —
+  this is what always happens for every type, including `session.update`, whose `session` object then
+  gets a second, narrower filtering pass (below).
+
+### The exact allow-list
+
+**Top-level event types** (`_CLIENT_ALLOWED_TYPES` in `rtmt.py`), derived from every event type
+`app/frontend/src/hooks/useRealtime.tsx` (the only frontend code that talks to this socket)
+actually sends, plus each type's **allow-listed top-level keys** (`_CLIENT_TOP_LEVEL_KEYS`) that
+survive the rebuild:
+
+| Type | Allowed top-level keys | Notes |
+|---|---|---|
+| `session.update` | `type`, `event_id`, `session` | `session` object is further filtered — see below |
+| `input_audio_buffer.append` | `type`, `event_id`, `audio` | matches the fast path above in the common case |
+| `input_audio_buffer.clear` | `type`, `event_id` | |
+| `response.cancel` | `type`, `event_id`, `response_id` | |
+
+Neither the legacy `input_audio_buffer.commit` nor `response.create` is sent by the real frontend
+(server VAD always auto-commits and auto-triggers the model's turn) — both were **removed from the
+production allow-list** ("S1"). `response.create` is re-added, but *only* when
+`conformance_hooks.hooks_enabled_now()` is true (never in a real deployment — see
+`test_conformance_hooks.py::TestNeverInInfraOrDockerfile`), with allowed top-level keys
+`type`, `event_id`: many existing conformance scenarios use a bare `{"type":"response.create"}` as a
+same-effect stand-in for a server-VAD-triggered turn. Because its allowed keys never include
+`response`, any `response.instructions`/`response.tools`/`response.tool_choice` override is stripped
+unconditionally as a structural property of the allow-list, not special-cased code.
+
+**Session keys the browser may set** (`_CLIENT_SESSION_KEYS` in `rtmt.py`, "M3"): exactly
+`turn_detection`, `input_audio_transcription` — what `useRealtime.tsx`'s `startSession()` actually
+sends. Every other GA session key the upstream API accepts (`prompt`, `tracing`, `include`,
+`truncation`, `model`, `output_modalities`, `instructions`, `tools`, `tool_choice`, ...) is
+server-owned and is filtered out of the browser's `session` object *before* it reaches session
+building — not merely overwritten afterwards, which previously left a fail-open gap: `instructions`
+was only overwritten when the backend had its own `system_message` configured, so a backend with none
+configured would forward the browser's `instructions` unchanged.
 
 **Anything else — including, explicitly, `conversation.item.create` (a browser has no legitimate
 reason to author a conversation item; this is also how `role: "system"`/`"developer"` injection is
 blocked, by rejecting the whole event type rather than filtering the role field),
-`conversation.item.retrieve`, and any bare `extension.*` type sent directly by the browser instead
-of through its dedicated pre-forwarding handling — is dropped: not forwarded, connection left open,
-one WARNING logged** (`Dropped disallowed client→server event type %r`). A backend must not close
-the socket on an unexpected frame; an unrecognised event on an otherwise-legitimate session is not
-itself proof of compromise.
+`conversation.item.retrieve`, `input_audio_buffer.commit` in production, and any bare `extension.*`
+type sent directly by the browser instead of through its dedicated pre-forwarding handling — is
+dropped: not forwarded, connection left open, one WARNING logged** (`Dropped disallowed
+client→server event type %r`). A backend must not close the socket on an unexpected frame; an
+unrecognised event on an otherwise-legitimate session is not itself proof of compromise.
 
 `extension.*` types are deliberately absent from the allow-list table above: the Python backend
 fully consumes them (resume, end_session, set_verbose_logging, set_log_to_file, `set_voice`) before
@@ -455,17 +514,28 @@ a message ever reaches the allow-list check, so they never need an entry there �
 implementation that instead let an `extension.*` type fall through to this check (e.g. a bare
 `extension.middle_tier_tool_response` sent directly by the browser, bypassing the normal tool-call
 flow — see the GA-validation-fidelity finding #3 below) must still drop it, since it is not one of
-the allow-listed entries.
+the allow-listed entries. Side effects keyed on a browser frame (idle-activity reset, silence-nudge
+cancellation, the greeting trigger) must fire on the **parsed, validated type of the frame actually
+forwarded** — never on a raw substring match of the browser's original bytes — so a dropped/rejected
+frame triggers none of them ("F1").
 
 Exercised black-box by `Scenarios/Security/ClientToServerAllowListTests.cs`: a malicious
 `response.create` override is stripped down to the bare form before the fake upstream ever sees it
 (and the override text never appears on any upstream frame); a `conversation.item.create` with
-`role: "system"` never reaches upstream; a `conversation.item.retrieve` never reaches upstream; and
-— to prove the allow-list is a *filter*, not a kill-switch — every one of the frontend's own
-legitimate event types (`session.update`, `input_audio_buffer.append`, `response.cancel`,
-`extension.set_voice`) still reaches the fake upstream unimpeded. Unit-tested at the Python level in
-`test_rtmt.py`'s `ProcessMessageToServerTests` (integration path) and `ClientToServerAllowListTests`
-(pure `_filter_client_to_server`/`_CLIENT_ALLOWED_TYPES` unit tests, log assertions included).
+`role: "system"` never reaches upstream; a `conversation.item.retrieve` never reaches upstream; each
+of the three fast-path bypasses above (repeated `type` key, nested `type` substring, and the same on
+`session.update`) is reproduced and proven *not* to reach upstream unfiltered; a forged extra
+top-level key on an otherwise-legitimate event is proven stripped; each malformed-frame shape from
+"S2" is proven dropped without tearing down the connection; and — to prove the allow-list is a
+*filter*, not a kill-switch — every one of the frontend's own legitimate event types
+(`session.update`, `input_audio_buffer.append`, `response.cancel`, `extension.set_voice`) still
+reaches the fake upstream unimpeded. Unit-tested at the Python level in `test_rtmt.py`'s
+`ProcessMessageToServerTests` (integration path, including the fast-path bypass and malformed-frame
+reproductions) and `ClientToServerAllowListTests` (pure `_filter_client_to_server`/
+`_CLIENT_ALLOWED_TYPES`/`_CLIENT_TOP_LEVEL_KEYS`/`_CLIENT_SESSION_KEYS` unit tests, log assertions
+included).
+
+
 
 ## Session-echo allow-list contract (swigerb/SonicAIDriveThru#45)
 
@@ -574,8 +644,13 @@ mutation-checked (see that file's module docstring). **Never** set `CONFORMANCE_
 `infra/` (bicep), the `Dockerfile`, or `azure.yaml` — guarded by
 `test_conformance_hooks.py::TestNeverInInfraOrDockerfile`, which fails the build if the literal
 string `CONFORMANCE_` ever appears in any of those files. It is only ever set by the conformance
-harness's own child-process environment (`BackendProfiles.ShortTimers` / `.FixedClock(instant)` →
-`PythonBackendOptions.ExtraEnvironment` → `BackendEnvironment.Build`).
+harness's own child-process environment (`BackendProfiles.Default` / `.ShortTimers` /
+`.FixedClock(instant)` → `PythonBackendOptions.ExtraEnvironment` → `BackendEnvironment.Build`).
+`Default` sets `CONFORMANCE_TEST_HOOKS=1` alone (PR #49 review round 2, "S1") — with no
+`CONFORMANCE_FIXED_NOW`/`CONFORMANCE_*_SECONDS` override also set, this is a verified no-op for
+every mechanism below; it exists purely to keep the browser→upstream allow-list's
+`response.create` entry available for every scenario, since that entry is gated on the flag being
+set (see the browser→upstream allow-list contract above).
 
 Two independent mechanisms:
 
@@ -590,7 +665,7 @@ Two independent mechanisms:
 
 | Variable | Units / format | Allowed range | Consumer | Failure behaviour |
 |---|---|---|---|---|
-| `CONFORMANCE_TEST_HOOKS` | literal string `"1"` to enable | only the exact string `"1"` counts as enabled — `"true"`/`"yes"`/`"TRUE"`/anything else leaves hooks **disabled** | `conformance_hooks.HOOKS_ENABLED`, read once at process import time | N/A — any other value is silently treated as disabled, never an error. |
+| `CONFORMANCE_TEST_HOOKS` | literal string `"1"` to enable | only the exact string `"1"` counts as enabled — `"true"`/`"yes"`/`"TRUE"`/anything else leaves hooks **disabled** | `conformance_hooks.HOOKS_ENABLED`, read once at process import time; also `conformance_hooks.hooks_enabled_now()`, which re-reads it live on every call (used by `rtmt.py`'s `response.create` allow-list gate — see the browser→upstream allow-list contract above — so it can't be left stuck disabled by an unrelated Python test file's in-process module reload) | N/A — any other value is silently treated as disabled, never an error. |
 | `CONFORMANCE_FIXED_NOW` | RFC 3339 timestamp with an explicit **numeric** UTC offset (e.g. `2026-07-04T15:30:00-05:00`, or a trailing `Z` for UTC) | any parseable, offset-aware instant; optional (timer-only profiles like `ShortTimers` leave it unset) | `order_state.py`'s happy-hour / time-based pricing via `conformance_hooks.now(tz)` | **Fails fast at import time** (raises `ValueError`, non-zero backend startup) if hooks are enabled and the value is missing its offset or isn't parseable at all — never silently ignored. This module (and issue #7's original task description) sometimes describes the format loosely as "ISO-8601 plus IANA zone" — that phrasing is imprecise: `datetime.fromisoformat` does **not** accept a trailing IANA zone *name* (e.g. `... America/Chicago`), only a numeric offset. Use a numeric offset always. |
 | `CONFORMANCE_IDLE_TIMEOUT_SECONDS` | seconds, float | positive, finite | `session_manager.py`'s idle-disconnect timer | **Fails fast** (raises `ValueError` at the module's own import time, non-zero backend startup) if hooks are enabled and the value is present but unparseable, NaN, +/-infinity, zero, or negative. Absent/empty falls back to the production default (300s) without error. |
 | `CONFORMANCE_GRACE_SECONDS` | seconds, float | positive, finite | `session_manager.py`'s resume grace-hold window | Same fail-fast rule as above (production default 120s). |

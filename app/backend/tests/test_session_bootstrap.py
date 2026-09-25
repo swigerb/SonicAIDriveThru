@@ -89,9 +89,11 @@ class FakeGARealtime:
             elif kind == "conversation.item.delete":
                 # Unrelated client event rejected, with its event_id echoed.
                 await self._error(ws, "item_not_found", "item_id", event.get("event_id"), "No such item.")
-            elif kind == "input_audio_buffer.commit":
-                # Unrelated rejection with no event_id and no param.
-                await self._error(ws, "input_audio_buffer_commit_empty", None, None, "Buffer too small.")
+            elif kind == "response.cancel":
+                # Unrelated rejection: no active response to cancel (see
+                # tests/conformance/README.md's "response_cancel_not_active" contract).
+                await self._error(ws, "response_cancel_not_active", "response_id", event.get("event_id"),
+                                  "No active response to cancel.")
         return ws
 
     async def _error(self, ws, code, param, event_id, text) -> None:
@@ -484,18 +486,20 @@ class SessionUpdateFallbackTests(_RealtimeHarness):
         # swigerb/SonicAIDriveThru#31: conversation.item.delete is no longer
         # forwarded upstream at all -- it isn't in the browser->upstream
         # allow-list (the real frontend never sends it), so it can no longer
-        # serve as an "unrelated error" vehicle here. Two
-        # input_audio_buffer.commit frames (still allow-listed) stand in
-        # instead, each independently rejected by the fake.
-        await browser.send_json({"type": "input_audio_buffer.commit"})
-        await browser.send_json({"type": "input_audio_buffer.commit"})
+        # serve as an "unrelated error" vehicle here. PR #49 review round 2,
+        # "S1" also removed input_audio_buffer.commit from the allow-list (the
+        # real frontend never sends it either), so two response.cancel frames
+        # (still allow-listed) stand in instead, each rejected by the fake
+        # with "no active response to cancel" since nothing is streaming.
+        await browser.send_json({"type": "response.cancel"})
+        await browser.send_json({"type": "response.cancel"})
         await self._until(lambda: len(self.fake.errors) >= 2)
         events = await self._browser_events(browser)
 
         self.assertEqual(self._fallbacks(), [])
         self.assertEqual(len(self._session_updates()), 1)
         self.assertEqual(sorted(e["error"]["code"] for e in events if e["type"] == "error"),
-                         ["input_audio_buffer_commit_empty", "input_audio_buffer_commit_empty"])
+                         ["response_cancel_not_active", "response_cancel_not_active"])
         await browser.close()
 
 

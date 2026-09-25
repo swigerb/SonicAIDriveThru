@@ -23,8 +23,22 @@ public sealed record BackendProfile(string Name, IReadOnlyDictionary<string, str
 /// </summary>
 public static class BackendProfiles
 {
-    /// <summary>Hooks disabled — real production timing and wall-clock time. Used by most scenarios.</summary>
-    public static BackendProfile Default { get; } = new("Default", new Dictionary<string, string>());
+    /// <summary>
+    /// Real production timing and wall-clock time (every timer/clock override left unset) --
+    /// used by most scenarios. `CONFORMANCE_TEST_HOOKS` is still set to unlock the handful of
+    /// test-only *behaviours* (not timers) gated on it -- currently just the Python backend's
+    /// `response.create` client-allow-list entry (swigerb/SonicAIDriveThru#31 review round 2,
+    /// "S1"): the real frontend never sends it, so it's production-gated behind this flag, and
+    /// this suite's scenarios rely on sending it as a same-effect stand-in for a server-VAD
+    /// triggered turn. Setting ONLY this flag, with none of the `CONFORMANCE_*_SECONDS`/
+    /// `CONFORMANCE_FIXED_NOW` overrides below, has no effect on any timer or clock read --
+    /// `conformance_hooks.now()`/`seconds()` only change behaviour when the *specific* override
+    /// variable is ALSO set (app/backend/conformance_hooks.py's own module docstring).
+    /// </summary>
+    public static BackendProfile Default { get; } = new("Default", new Dictionary<string, string>
+    {
+        ["CONFORMANCE_TEST_HOOKS"] = "1",
+    });
 
     /// <summary>
     /// Hooks enabled with every timer shortened to about a second, so timer-driven scenarios

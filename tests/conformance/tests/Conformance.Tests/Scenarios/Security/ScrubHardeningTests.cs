@@ -62,9 +62,18 @@ public sealed class ScrubHardeningTests(ConformanceFixture fixture)
     /// `_scrub_session_for_client`, so each would have reached the browser completely unscrubbed
     /// the moment GA started echoing them back, exactly the gap `_client_session_echo`'s
     /// allow-list closes structurally rather than needing a deny-list update per new GA field.
-    /// Sets all four upstream via the browser's own `session.update` (accepted because they're
-    /// real GA top-level keys `_to_ga_session` doesn't drop) so the fake's `session.updated` echo
-    /// genuinely carries them, then asserts the *browser*-bound copy is exactly
+    ///
+    /// PR #49 review round 2 (M3) closed the *other* half of this: the browser can no longer set
+    /// these fields upstream itself via its own `session.update` (`_CLIENT_SESSION_KEYS` only
+    /// allows `turn_detection`/`input_audio_transcription`) -- so this test can no longer use the
+    /// browser's own `session.update` as the vehicle to get `prompt`/`tracing`/`include`/
+    /// `truncation` onto the fake's effective session; that would now just prove M3 works, not
+    /// exercise #45 at all. Instead it seeds them directly onto the fake connection's
+    /// <see cref="RealtimeSessionState.EffectiveSession"/> before the browser's session.update
+    /// round-trips, standing in for "GA independently echoes these fields regardless of what any
+    /// client requested" -- the exact same reasoning `HandleSessionUpdateAsync` already applies to
+    /// `id`/`object`/`model` (server-assigned, always present regardless of client input).
+    /// Then asserts the *browser*-bound copy is exactly
     /// <c>{type, event_id, session:{id, object, audio:{output:{voice}}}}</c> and nothing else --
     /// black-box proof of the exact contract documented in
     /// tests/conformance/README.md's "Session-echo allow-list" section.
@@ -75,18 +84,21 @@ public sealed class ScrubHardeningTests(ConformanceFixture fixture)
     {
         var ct = TestContext.Current.CancellationToken;
 
+        var connectionTask = fixture.Realtime.WaitForNextConnectionAsync(FrameTimeout, ct);
         await using var browser = await RealtimeBrowserClient.ConnectAsync(fixture.Backend!.BaseUri, cancellationToken: ct);
-        await browser.SendAsync(new JsonObject
-        {
-            ["type"] = "session.update",
-            ["session"] = new JsonObject
-            {
-                ["prompt"] = new JsonObject { ["id"] = "pmpt_secret" },
-                ["tracing"] = "auto",
-                ["include"] = new JsonArray("item.input_audio_transcription.logprobs"),
-                ["truncation"] = "auto",
-            },
-        }, ct);
+        var connection = await connectionTask;
+        Assert.True(connection is not null, "No upstream connection was accepted for the browser socket.");
+
+        // Seeded directly onto the fake's effective session -- not sent by the browser, which the
+        // M3 fix no longer permits for these keys (see summary above).
+        connection!.SessionState.EffectiveSession["prompt"] = new JsonObject { ["id"] = "pmpt_secret" };
+        connection.SessionState.EffectiveSession["tracing"] = "auto";
+        connection.SessionState.EffectiveSession["include"] = new JsonArray("item.input_audio_transcription.logprobs");
+        connection.SessionState.EffectiveSession["truncation"] = "auto";
+
+        // The browser's own (legitimate) session.update is what triggers the fake to re-emit
+        // session.updated with the now-seeded EffectiveSession folded in.
+        await browser.SendStartSessionAsync(cancellationToken: ct);
 
         var updated = await browser.ReceivedFrames.WaitForAsync(
             f => f.Sequence > 0 && f.Type == "session.updated", FrameTimeout, ct);

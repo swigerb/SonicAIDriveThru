@@ -23,7 +23,6 @@ from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 import conformance_hooks
 from audio_pipeline import (
     _GA_TO_LEGACY_EVENTS,
-    _PASSTHROUGH_CLIENT_TYPES,
     _PASSTHROUGH_SERVER_TYPES,
     _VERBOSE_GLOBAL,
     _VERBOSE_RESULT_TRUNCATE,
@@ -36,9 +35,7 @@ from audio_pipeline import (
     MARKER_END_SESSION as _MARKER_END_SESSION,
     MARKER_LOG_TO_FILE as _MARKER_LOG_TO_FILE,
     MARKER_RESPONSE_CANCEL as _MARKER_RESPONSE_CANCEL,
-    MARKER_RESPONSE_CREATE as _MARKER_RESPONSE_CREATE,
     MARKER_RESUME as _MARKER_RESUME,
-    MARKER_SESSION_UPDATE as _MARKER_SESSION_UPDATE,
     MARKER_SESSION_UPDATED as _MARKER_SESSION_UPDATED,
     MARKER_SET_VOICE as _MARKER_SET_VOICE,
     MARKER_SPEECH_STARTED as _MARKER_SPEECH_STARTED,
@@ -176,17 +173,16 @@ def _drop_from_client(item: dict) -> bool:
 # Every event type a browser is allowed to send upstream. Derived from what
 # `useRealtime.tsx` (the only frontend code that talks to this socket)
 # actually transmits: `session.update`, `input_audio_buffer.append`/`.clear`,
-# `response.cancel`, plus the legacy `input_audio_buffer.commit` (kept for
-# parity with `_PASSTHROUGH_CLIENT_TYPES`'s fast path -- a malformed/short
-# frame that misses that path's regex still reaches this slow-path check and
-# must still be allowed through). `response.create` is not sent by the real
-# frontend today, but is deliberately kept allow-listed: it is used across
-# many existing conformance scenarios (Ordering/BargeIn/Security) as a
-# same-effect stand-in for a server-VAD-triggered turn, so dropping it
-# outright would treat legitimate test/ops traffic as an attack. Any
-# `"response"` override object on it is still stripped in
-# `_filter_client_to_server` below, so no instruction/tool override can
-# reach upstream through it either way.
+# `response.cancel`. Neither the legacy `input_audio_buffer.commit` nor
+# `response.create` is sent by the real frontend (server VAD always
+# auto-triggers the model's turn) -- see PR #49 review round 2, "S1" -- so
+# both were removed from the *production* allow-list. `response.create` is
+# re-added, but ONLY when `conformance_hooks.hooks_enabled_now()` is true
+# (see `_CLIENT_TEST_ONLY_TYPES` below): many existing conformance scenarios
+# use it as a same-effect stand-in for a server-VAD-triggered turn, and that
+# module's own guard test (`tests/test_conformance_hooks.py::
+# TestNeverInInfraOrDockerfile`) ensures its enabling env var can never reach
+# a real deployment, so a genuine browser can never regain access to it.
 #
 # `extension.*` types are deliberately NOT listed here: they are fully
 # consumed by `_forward_messages`'s from-client-to-server loop (resume,
@@ -202,20 +198,69 @@ _CLIENT_ALLOWED_TYPES = frozenset({
     "session.update",
     "input_audio_buffer.append",
     "input_audio_buffer.clear",
-    "input_audio_buffer.commit",
     "response.cancel",
-    "response.create",
 })
+
+# Allowed only when conformance_hooks.hooks_enabled_now() (never in a real
+# deployment -- see the module docstring above and conformance_hooks.py's own
+# guard test). This deliberately calls the *live* re-check, not the frozen
+# `HOOKS_ENABLED` constant: the shared Python pytest process runs many test
+# files, and `test_conformance_hooks.py` intentionally `importlib.reload()`s
+# conformance_hooks to a disabled state as part of *its own* isolation,
+# leaving the frozen constant stuck at `False` for every test file that
+# happens to run afterward in the same process (see `hooks_enabled_now()`'s
+# docstring for the full explanation). `app/backend/tests/conftest.py` sets
+# the enabling env var for the Python unit-test process; tests/conformance's
+# BackendProfiles (Default, ShortTimers, FixedClock) all set it for the .NET
+# harness's spawned backend, so every existing conformance scenario that
+# relies on a browser-simulated `response.create` keeps working unchanged.
+_CLIENT_TEST_ONLY_TYPES = frozenset({"response.create"})
+
+
+# Per-type top-level key allow-list (PR #49 review round 2, "M2"): the
+# original #31 filter allow-listed the event *type* but then forwarded the
+# browser's original bytes/dict verbatim for every type except
+# `response.create`, so any extra top-level key riding along on an
+# otherwise-legitimate event (e.g. a forged `item` object smuggled onto
+# `input_audio_buffer.clear`) still reached upstream unfiltered. Every
+# forwarded event is now rebuilt from scratch (see `_filter_client_to_server`
+# and `_process_message_to_server`), keeping only these keys. This also
+# subsumes the old response.create-specific "strip the response override"
+# logic: `response.create`'s allowed set has no `response` key at all, so no
+# override object can ever survive regardless of what the browser attaches.
+_CLIENT_TOP_LEVEL_KEYS: dict[str, frozenset[str]] = {
+    "session.update": frozenset({"type", "event_id", "session"}),
+    "input_audio_buffer.append": frozenset({"type", "event_id", "audio"}),
+    "input_audio_buffer.clear": frozenset({"type", "event_id"}),
+    "response.cancel": frozenset({"type", "event_id", "response_id"}),
+    "response.create": frozenset({"type", "event_id"}),
+}
+
+# Session keys the browser may legitimately set (PR #49 review round 2,
+# "M3"): exactly what useRealtime.tsx's startSession() sends (see
+# `_BOOTSTRAP_CLIENT_SESSION` below, which mirrors the same two keys).
+# Everything else GA accepts at the session top level (`prompt`, `tracing`,
+# `include`, `truncation`, `model`, `output_modalities`, `instructions`,
+# `tools`, `tool_choice`, ...) is server-owned and must come only from
+# RTMiddleTier's own configuration. Filtering the browser's session object
+# down to this set BEFORE it reaches `_build_session` closes both halves of
+# M3 at once: extra GA keys can never arrive (nothing downstream has to
+# remember to strip them), and `instructions`'s previous "fail open when
+# self.system_message is None" gap is moot, since `instructions` is never
+# present in the filtered input for `_build_session` to fail to overwrite.
+_CLIENT_SESSION_KEYS = frozenset({"turn_detection", "input_audio_transcription"})
 
 
 def _filter_client_to_server(message: dict, session_id: str | None = None) -> dict | None:
-    """Allow-list and strip a browser→upstream event before
-    `_process_message_to_server` forwards it (swigerb/SonicAIDriveThru#31).
+    """Allow-list and rebuild a browser→upstream event before
+    `_process_message_to_server` forwards it (swigerb/SonicAIDriveThru#31,
+    hardened per PR #49 review round 2).
 
-    Before this filter, only `session.update` was recognised by name --
-    every other client event type, including ones the real frontend never
-    sends, fell through unmatched and was forwarded to the upstream socket
-    completely unchanged. A malicious/compromised browser could therefore:
+    Before the original #31 filter, only `session.update` was recognised by
+    name -- every other client event type, including ones the real frontend
+    never sends, fell through unmatched and was forwarded to the upstream
+    socket completely unchanged. A malicious/compromised browser could
+    therefore:
 
     1. Send `response.create` carrying a `response.instructions` /
        `response.tools` / `response.tool_choice` override, hijacking the
@@ -238,21 +283,61 @@ def _filter_client_to_server(message: dict, session_id: str | None = None) -> di
     frame on an otherwise-legitimate session is not itself proof of
     compromise, so we log once at WARNING and keep serving the session.
 
-    Returns the (possibly rewritten) message to forward, or `None` if the
-    whole event must be dropped.
+    The review round 2 "M2" finding closed the remaining hole: this now
+    ALWAYS returns a freshly rebuilt dict containing only the allowed
+    top-level keys for the event's type (`_CLIENT_TOP_LEVEL_KEYS`), never
+    the browser's original object -- so no extra/forged top-level key can
+    ride along on an otherwise-legitimate event either. Callers must not
+    assume the return value `is` (identical object to) the input.
+
+    `message["type"]` must already be a `str` -- callers are responsible for
+    validating that before calling this (see `_process_message_to_server`'s
+    "S2" handling of `{"type": ["x"]}`-shaped frames, which would otherwise
+    raise `TypeError` on the frozenset membership test below).
+
+    Returns the rebuilt message to forward, or `None` if the whole event
+    must be dropped.
     """
     msg_type = message.get("type", "")
 
-    if msg_type not in _CLIENT_ALLOWED_TYPES:
+    allowed = msg_type in _CLIENT_ALLOWED_TYPES or (
+        msg_type in _CLIENT_TEST_ONLY_TYPES and conformance_hooks.hooks_enabled_now())
+    if not allowed:
         logger.warning("Dropped disallowed client→server event type %r (session=%s)", msg_type, session_id)
         return None
 
-    if msg_type == "response.create" and "response" in message:
+    allowed_keys = _CLIENT_TOP_LEVEL_KEYS[msg_type]
+    dropped_keys = sorted(k for k in message if k not in allowed_keys)
+    if dropped_keys:
         logger.warning(
-            "Stripped response-level override from client response.create (session=%s)", session_id)
-        message = {k: v for k, v in message.items() if k != "response"}
+            "Stripped disallowed top-level key(s) %s from client %s (session=%s)",
+            dropped_keys, msg_type, session_id)
 
-    return message
+    return {k: v for k, v in message.items() if k in allowed_keys}
+
+
+# Exact-match fast path for the browser's mic-audio frame (PR #49 review
+# round 2, "M1"). `_process_message_to_server`'s previous fast path used
+# `audio_pipeline.TYPE_RE` -- an unanchored `"type":"..."` substring search --
+# and skipped JSON parsing/filtering entirely whenever the *first* such
+# substring anywhere in the raw frame happened to name a passthrough type.
+# Combined with `json.loads` keeping the *last* value for a repeated key,
+# that let a forged frame reach upstream completely unfiltered via: a
+# repeated top-level `"type"` key, a `"type"` substring nested inside an
+# arbitrary free-form sub-object (e.g. `response.metadata.type`), or the same
+# trick played on `session.update` specifically (which skips `_build_session`
+# -- letting server-owned session keys through -- if it takes the old fast
+# path). The fast path is now anchored to EXACTLY the one frame
+# `useRealtime.tsx`'s `addUserAudio()` sends -- confirmed byte-for-byte
+# against `JSON.stringify({type: "input_audio_buffer.append", audio:
+# base64Audio})`'s compact, key-order-stable output. Anything that doesn't
+# match this exactly -- extra whitespace, a different key order, extra
+# keys, a spoofed nested "type" -- falls through to the slow (parse +
+# filter) path below, which still allows a *genuine* append frame in any
+# other shape (see `_CLIENT_TOP_LEVEL_KEYS`), just at the cost of a full
+# parse instead of a regex match.
+_CLIENT_APPEND_FAST_PATH_RE = re.compile(
+    r'\{"type":"input_audio_buffer\.append","audio":"[A-Za-z0-9+/=]*"\}')
 
 
 class ToolResultDirection(Enum):
@@ -1133,51 +1218,91 @@ class RTMiddleTier:
         return updated_message
 
     async def _process_message_to_server(self, msg: str, ws: web.WebSocketResponse, verbose: bool = False, voice_locked: bool = False, guard: "_SessionUpdateGuard | None" = None) -> str | None:
+        """Validate and forward one browser→upstream frame, or drop it.
+
+        Returns the exact string to forward, or `None` if the frame must be
+        dropped -- never raises, and never closes the caller's socket (PR #49
+        review round 2, "S2": every malformed-frame shape below used to raise
+        an uncaught exception out of this coroutine, which propagated up
+        through `_forward_messages` and tore down that guest's own session).
+        Callers must not assume the return value `is` (identical object to)
+        `msg.data` -- see "M2" below.
+        """
         data = msg.data
 
-        # FAST PATH: input_audio_buffer.append is the most frequent client message
-        # (~10 per second). Skip JSON parse entirely — it never needs modification.
-        m = _TYPE_RE.search(data)
-        if m is not None and m.group(1) in _PASSTHROUGH_CLIENT_TYPES:
+        # FAST PATH (PR #49 review round 2, "M1"): skip JSON parsing entirely
+        # for the one exact frame shape useRealtime.tsx's addUserAudio() sends
+        # (~10 frames/sec). Anything that doesn't match this exactly --
+        # including a malformed/spoofed frame merely *resembling* an append --
+        # falls through to the slow path, which parses, validates and rebuilds
+        # it from scratch.
+        if _CLIENT_APPEND_FAST_PATH_RE.fullmatch(data):
             return data
 
-        message = json.loads(data)
         session_id = self._sessions.get_session_id(ws)
+
+        # S2: never let a malformed frame raise out of this coroutine. Drop
+        # with a WARNING and keep the socket open -- an unexpected frame on an
+        # otherwise-legitimate session is not itself proof of compromise.
+        try:
+            message = json.loads(data)
+        except (json.JSONDecodeError, ValueError):
+            logger.warning("Dropped unparseable client→server frame (session=%s)", session_id)
+            return None
+        if not isinstance(message, dict):
+            logger.warning(
+                "Dropped non-object client→server frame of type %s (session=%s)",
+                type(message).__name__, session_id)
+            return None
+        if not isinstance(message.get("type"), str):
+            # Also covers `{"type": ["x"]}`: an unhashable `type` would raise
+            # TypeError on _filter_client_to_server's frozenset membership
+            # test below if it weren't caught here first.
+            logger.warning(
+                "Dropped client→server frame with a non-string/missing type (session=%s)", session_id)
+            return None
+
         filtered = _filter_client_to_server(message, session_id=session_id)
         if filtered is None:
             return None
-        if filtered is not message:
-            data = json.dumps(filtered)
-        message = filtered
-        msg_type = message.get("type", "")
-        updated_message = data
-        if message is not None:
-            _vlog(verbose, "─── [Client → Server] %s ───", msg_type)
-            match msg_type:
-                case "session.update":
-                    session = self._build_session(message["session"], voice_locked=voice_locked)
-                    tool_names = [t.get("name", "?") for t in session["tools"]]
-                    message["session"] = session
-                    # Every session.update carries an event_id so a rejection can
-                    # be correlated and recovered (see _recover_rejected_session_update).
-                    if guard is not None:
-                        guard.stamp(message)
-                    else:
-                        message.setdefault("event_id", _new_event_id("sonic_su"))
-                    logger.info(
-                        "session.update: injected %d tools %s, tool_choice=%s, max_tokens=%s, reasoning=%s",
-                        len(session["tools"]), tool_names, session["tool_choice"],
-                        session.get("max_output_tokens"), session.get("reasoning"),
-                    )
-                    _vlog(verbose, "  Injected %d tools: %s, tool_choice=%s",
-                          len(session["tools"]), tool_names, session["tool_choice"])
-                    updated_message = json.dumps(message)
-                    # Track system message + tool schemas in context window
-                    ctx_monitor = self._sessions.get_context_monitor(session_id)
-                    if ctx_monitor:
-                        ctx_monitor.add_content(session.get("instructions", ""))
-                        for tool_schema in session.get("tools", []):
-                            ctx_monitor.add_content(json.dumps(tool_schema))
+        msg_type = filtered["type"]
+        # M2: always rebuilt from the allow-listed dict -- never the browser's
+        # original bytes/object -- so no extra top-level key can survive.
+        updated_message = json.dumps(filtered)
+        _vlog(verbose, "─── [Client → Server] %s ───", msg_type)
+
+        if msg_type == "session.update":
+            client_session = filtered.get("session")
+            if not isinstance(client_session, dict):
+                logger.warning(
+                    "Dropped session.update with a missing/invalid session object (session=%s)", session_id)
+                return None
+            # M3: keep only the session keys the frontend actually sends;
+            # everything server-owned is applied fresh by _build_session below.
+            session_in = {k: v for k, v in client_session.items() if k in _CLIENT_SESSION_KEYS}
+            session = self._build_session(session_in, voice_locked=voice_locked)
+            tool_names = [t.get("name", "?") for t in session["tools"]]
+            filtered["session"] = session
+            # Every session.update carries an event_id so a rejection can
+            # be correlated and recovered (see _recover_rejected_session_update).
+            if guard is not None:
+                guard.stamp(filtered)
+            else:
+                filtered.setdefault("event_id", _new_event_id("sonic_su"))
+            logger.info(
+                "session.update: injected %d tools %s, tool_choice=%s, max_tokens=%s, reasoning=%s",
+                len(session["tools"]), tool_names, session["tool_choice"],
+                session.get("max_output_tokens"), session.get("reasoning"),
+            )
+            _vlog(verbose, "  Injected %d tools: %s, tool_choice=%s",
+                  len(session["tools"]), tool_names, session["tool_choice"])
+            updated_message = json.dumps(filtered)
+            # Track system message + tool schemas in context window
+            ctx_monitor = self._sessions.get_context_monitor(session_id)
+            if ctx_monitor:
+                ctx_monitor.add_content(session.get("instructions", ""))
+                for tool_schema in session.get("tools", []):
+                    ctx_monitor.add_content(json.dumps(tool_schema))
 
         return updated_message
 
@@ -1414,17 +1539,13 @@ class RTMiddleTier:
                                 self._sessions.end_session(session_id, "guest ended the session")
                                 await ws.close(code=SESSION_ENDED_CLOSE_CODE, message=SESSION_ENDED_CLOSE_REASON.encode())
                                 break
-                            # Guest activity drives the idle clock. Mic frames stream
-                            # constantly (silence included), so they don't count; the
-                            # guest actually speaking does (speech_started/transcripts
-                            # from upstream).
-                            if session_id and _MARKER_AUDIO_APPEND not in msg.data:
-                                self._sessions.touch_activity(session_id)
                             # Intercept extension messages — don't forward to OpenAI
                             if _MARKER_VERBOSE_LOGGING in msg.data:
                                 try:
                                     ext_msg = json.loads(msg.data)
                                     if ext_msg.get("type") == "extension.set_verbose_logging":
+                                        if session_id:
+                                            self._sessions.touch_activity(session_id)
                                         verbose = bool(ext_msg.get("enabled", False))
                                         if verbose and not _VERBOSE_GLOBAL:
                                             vlogger.setLevel(logging.DEBUG)
@@ -1447,6 +1568,8 @@ class RTMiddleTier:
                                 try:
                                     ext_msg = json.loads(msg.data)
                                     if ext_msg.get("type") == "extension.set_log_to_file":
+                                        if session_id:
+                                            self._sessions.touch_activity(session_id)
                                         enabled = bool(ext_msg.get("enabled", False))
                                         if enabled and session_file_handler is None:
                                             vlogger.setLevel(logging.DEBUG)
@@ -1474,6 +1597,8 @@ class RTMiddleTier:
                                 try:
                                     ext_msg = json.loads(msg.data)
                                     if ext_msg.get("type") == "extension.set_voice":
+                                        if session_id:
+                                            self._sessions.touch_activity(session_id)
                                         new_voice = ext_msg.get("voice", "")
                                         if new_voice:
                                             self.voice_choice = new_voice
@@ -1497,16 +1622,41 @@ class RTMiddleTier:
                             # Barge-in: client sent response.cancel — user wants to speak.
                             if _MARKER_RESPONSE_CANCEL in msg.data:
                                 echo.on_barge_in(verbose)
-                            if _MARKER_RESPONSE_CREATE in msg.data:
+                            # Forward client message to OpenAI.
+                            new_msg = await self._process_message_to_server(msg, ws, verbose, voice_locked=assistant_audio_seen, guard=guard)
+                            # PR #49 review round 2, "F1": idle reset, nudge
+                            # cancel and the greeting trigger used to be keyed
+                            # on raw substring checks against msg.data,
+                            # evaluated before (or independently of) the
+                            # filter above -- so a frame the filter would drop
+                            # (e.g. one merely *containing* the substring
+                            # "response.cancel" or "session.update" somewhere,
+                            # without actually being that type) could still
+                            # trigger them. They're now keyed on `sent_type`,
+                            # parsed from the already-validated/rebuilt
+                            # `new_msg` this coroutine forwards -- never from
+                            # the browser's raw bytes -- so a dropped or
+                            # malformed frame triggers nothing.
+                            sent_type = None
+                            if new_msg is not None:
+                                await target_ws.send_str(new_msg)
+                                try:
+                                    sent_type = json.loads(new_msg).get("type")
+                                except (json.JSONDecodeError, AttributeError):
+                                    sent_type = None
+                            # Guest activity drives the idle clock. Mic frames
+                            # stream constantly (silence included), so they
+                            # don't count; the guest actually speaking does
+                            # (speech_started/transcripts from upstream, or any
+                            # other forwarded client event here).
+                            if session_id and sent_type is not None and sent_type != "input_audio_buffer.append":
+                                self._sessions.touch_activity(session_id)
+                            if sent_type == "response.create":
                                 if nudge_task is not None:
                                     cancel_nudge("guest-initiated response")
                                 recovery.on_external_response_create("browser")
-                            # Forward client message to OpenAI.
-                            new_msg = await self._process_message_to_server(msg, ws, verbose, voice_locked=assistant_audio_seen, guard=guard)
-                            if new_msg is not None:
-                                await target_ws.send_str(new_msg)
                             # The browser's session.update marks the start of a conversation.
-                            if not greeting_sent and _MARKER_SESSION_UPDATE in msg.data and _MARKER_SESSION_UPDATED not in msg.data:
+                            if not greeting_sent and sent_type == "session.update":
                                 logger.info("Client session.update forwarded — sending greeting")
                                 await send_greeting_once(trigger="client-session.update")
                         elif msg.type == aiohttp.WSMsgType.ERROR:
