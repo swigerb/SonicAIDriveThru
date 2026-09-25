@@ -2,9 +2,11 @@ import math
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
+import order_state as order_state_module
 from order_state import SessionIdentifiers, order_state_singleton
 
 
@@ -727,6 +729,23 @@ class OrderStateTests(unittest.TestCase):
         self.assertEqual(sizes_by_item["Cherry Limeade"], "route 44")
         self.assertEqual(sizes_by_item["Tots"], "xl")
         self.assertEqual(sizes_by_item["Onion Rings"], "medium")
+
+    def test_get_order_readback_reads_finalTotalDisplay_without_recomputing(self):
+        """PR #50 review follow-up: the get_order readback must reuse `summary.finalTotalDisplay`
+        instead of calling format_money(finalTotal) a second time -- there should be exactly one
+        format_money call per order mutation (inside OrderSummary construction), not one more per
+        readback request, so the readback text and the wire field can never independently drift."""
+        session_id = order_state_singleton.create_session()
+        order_state_singleton.handle_order_update(session_id, "add", "Tots", "medium", 1, 2.79)
+
+        with patch("order_state.format_money", wraps=order_state_module.format_money) as mock_format_money:
+            readback_one = order_state_singleton.get_grouped_order_for_readback(session_id)
+            readback_two = order_state_singleton.get_grouped_order_for_readback(session_id)
+
+        mock_format_money.assert_not_called()
+        summary = order_state_singleton.get_order_summary(session_id)
+        self.assertIn(summary.finalTotalDisplay, readback_one)
+        self.assertIn(summary.finalTotalDisplay, readback_two)
 
 
 if __name__ == "__main__":

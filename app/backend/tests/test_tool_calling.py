@@ -260,6 +260,19 @@ class UpdateOrderAddTests(unittest.TestCase):
         summary = order_state_singleton.get_order_summary(sid)
         self.assertEqual(len(summary.items), 1)
 
+    def test_delta_text_spoken_total_matches_finalTotalDisplay_exactly(self):
+        """PR #50 review follow-up: the delta text's spoken total must be the exact same string
+        as summary.finalTotalDisplay -- there is exactly one format_money() call per mutation
+        (inside OrderSummary), and every spoken surface downstream reads that string rather than
+        recomputing its own."""
+        sid = _make_session()
+        result = _run(update_order({
+            "action": "add", "item_name": "Tots",
+            "size": "medium", "quantity": 1, "price": 2.79,
+        }, sid))
+        summary = order_state_singleton.get_order_summary(sid)
+        self.assertIn(summary.finalTotalDisplay, result.text)
+
     def test_add_multiple_quantity(self):
         sid = _make_session()
         _run(update_order({

@@ -12,7 +12,6 @@ from azure.search.documents.models import VectorizableTextQuery
 
 from config_loader import get_config
 from menu_utils import infer_category as _infer_category, normalize_size
-from money_utils import format_money
 from order_state import is_happy_hour, order_state_singleton
 from rtmt import RTMiddleTier, Tool, ToolResult, ToolResultDirection
 
@@ -481,20 +480,20 @@ async def update_order(args, session_id: str) -> ToolResult:
     converted_from = result_info.get("combo_converted_from") if result_info else None
 
     if absorbed:
-        delta_text = f"{display_name} included with your combo — your total is {format_money(summary.finalTotal)}"
+        delta_text = f"{display_name} included with your combo — your total is {summary.finalTotalDisplay}"
     elif converted_from and action == "add":
         combo_display = display_name
         mods = result_info.get("mods_carried", "")
         if mods:
             combo_display = f"{display_name} {mods}"
-        delta_text = f"Upgraded to {combo_display} — your total is now {format_money(summary.finalTotal)}"
+        delta_text = f"Upgraded to {combo_display} — your total is now {summary.finalTotalDisplay}"
     elif _prompt_loader:
         tpl = _prompt_loader.get_delta_template(action)
-        delta_text = _prompt_loader.render_template(tpl, quantity=quantity, display_name=display_name, total=format_money(summary.finalTotal))
+        delta_text = _prompt_loader.render_template(tpl, quantity=quantity, display_name=display_name, total=summary.finalTotalDisplay)
     elif action == "add":
-        delta_text = f"Added {quantity} {display_name} — your total is now {format_money(summary.finalTotal)}"
+        delta_text = f"Added {quantity} {display_name} — your total is now {summary.finalTotalDisplay}"
     else:
-        delta_text = f"Removed {quantity} {display_name} — your total is now {format_money(summary.finalTotal)}"
+        delta_text = f"Removed {quantity} {display_name} — your total is now {summary.finalTotalDisplay}"
 
     # ── Combo validation: flag missing components ──
     validation = order_state_singleton.get_combo_requirements(session_id)

@@ -829,6 +829,14 @@ including for values that land precisely on a half cent (e.g. `5.265` → `$5.27
 previously `Skip`'d half-cent spoken-text assertions (`SpokenTotalHalfCentTests`, referencing #46)
 are un-skipped and green.
 
+**(PR #50 review follow-up, one source of truth)** `tools.py`'s delta text and `order_state.py`'s
+`get_grouped_order_for_readback` no longer call `format_money(summary.finalTotal)` a second time to
+build their own `"$0.00"` string — they read `summary.finalTotalDisplay` directly, the exact same
+string the wire's `finalTotalDisplay` field carries. There is now exactly one call to
+`format_money()` per order mutation (inside `OrderSummary`'s construction), and every spoken surface
+downstream of it is a plain string read, not a re-derivation, so the readback and the wire field can
+never independently drift out of sync with each other.
+
 ### `response.cancel` still emits the normal `.done`-shaped events (#8 follow-up)
 
 A question came up while re-checking `EchoSuppressionBargeInTests` (barge-in, #8): does GA skip the

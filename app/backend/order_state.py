@@ -373,8 +373,11 @@ class OrderState:
         else:
             summary_str = parts[0]
 
-        total = session["order_summary"].finalTotal
-        return f"I have {summary_str}. Your total is {format_money(total)}. "
+        # #47/PR #50 follow-up: read the already-computed finalTotalDisplay directly instead of
+        # re-deriving it with format_money(finalTotal) -- there must be exactly one place that
+        # turns the exact Decimal total into a "$0.00" string, so every spoken/displayed money
+        # surface can never drift out of sync with another.
+        return f"I have {summary_str}. Your total is {session['order_summary'].finalTotalDisplay}. "
 
     def reset_order(self, session_id: str):
         """Clears all items and per-session order state from the current session's order (#41)."""
