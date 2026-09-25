@@ -242,12 +242,25 @@ jobs:
     steps:
       - name: Check required jobs succeeded
         run: |
-          if [ "${{ contains(needs.*.result, 'failure') }}" = "true" ] || \
-             [ "${{ contains(needs.*.result, 'cancelled') }}" = "true" ]; then
-            echo "One or more required jobs failed or was cancelled:"
-            echo "  python-tests:    ${{ needs.python-tests.result }}"
-            echo "  frontend-tests:  ${{ needs.frontend-tests.result }}"
-            echo "  conformance:     ${{ needs.conformance.result }}"
+          # #28 M1 (Rick's review, PR #52): fail on ANY result that isn't exactly `success` --
+          # not just `failure`/`cancelled`. A `needs` result can also come back `skipped` (a
+          # job-level `if:`, a path filter, a hashFiles-gated leg, or a dependency added between
+          # jobs later), and the previous two-condition check silently let a skip through as
+          # green. The gate is meant to become the only required status check, so it must not
+          # go green when a required job never actually ran.
+          failed=0
+          for pair in "python-tests:${{ needs.python-tests.result }}" \
+                      "frontend-tests:${{ needs.frontend-tests.result }}" \
+                      "conformance:${{ needs.conformance.result }}"; do
+            name="${pair%%:*}"
+            result="${pair#*:}"
+            echo "  ${name}: ${result}"
+            if [ "${result}" != "success" ]; then
+              failed=1
+            fi
+          done
+          if [ "${failed}" = "1" ]; then
+            echo "One or more required jobs did not succeed (see results above)."
             exit 1
           fi
           echo "All required jobs passed."
