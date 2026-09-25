@@ -203,14 +203,27 @@ async def search(
 
     semantic_enabled = bool(use_semantic_ranker and semantic_configuration)
 
+    # #37: azure-search-documents' async SearchClient.search(...) is lazy -- it returns an
+    # async-iterable immediately without making any HTTP request. The request (and therefore any
+    # HttpResponseError, including the "Could not find a property named" 400 the fallback below
+    # exists to catch) only happens once the results are actually iterated. So the first-page
+    # fetch has to live INSIDE the try, not just the initial `search_client.search(...)` call --
+    # otherwise a field-mismatch 400 raised during iteration propagates unhandled and tears down
+    # the whole realtime connection instead of triggering the minimal-select retry.
+    async def _fetch_records(**search_kwargs) -> list[dict]:
+        search_results = await asyncio.wait_for(
+            search_client.search(**search_kwargs), timeout=_search_cfg.get("timeout_seconds", 10)
+        )
+        return [record async for record in search_results]
+
     try:
-        search_results = await asyncio.wait_for(search_client.search(
+        records = await _fetch_records(
             search_text=query,
             top=_top,
             vector_queries=vector_queries or None,
             select=select_fields,
             **_query_kwargs(semantic_enabled),
-        ), timeout=_search_cfg.get("timeout_seconds", 10))
+        )
     except TimeoutError:
         logger.error("Azure AI Search timed out for query '%s'", query)
         _err = _prompt_loader.render_error("search_service_unavailable") if _prompt_loader else "I'm having trouble reaching our menu right now — could you try that again?"
@@ -220,24 +233,34 @@ async def search(
         if "Could not find a property named" in str(exc):
             logger.warning("Retrying search with minimal fields after select mismatch: %s", exc)
             fallback_select = [identifier_field or "id", content_field or "description"]
-            search_results = await asyncio.wait_for(search_client.search(
-                search_text=query,
-                top=_top,
-                vector_queries=vector_queries or None,
-                select=[f for f in fallback_select if f],
-                **_query_kwargs(semantic_enabled),
-            ), timeout=_search_cfg.get("timeout_seconds", 10))
+            try:
+                records = await _fetch_records(
+                    search_text=query,
+                    top=_top,
+                    vector_queries=vector_queries or None,
+                    select=[f for f in fallback_select if f],
+                    **_query_kwargs(semantic_enabled),
+                )
+            except Exception as exc2:
+                logger.error("Search retry with minimal select also failed: %s", exc2)
+                _err = _prompt_loader.render_error("search_service_unavailable") if _prompt_loader else "I'm sorry, I can't reach our menu data right now."
+                return ToolResult(_err, ToolResultDirection.TO_SERVER)
         elif semantic_enabled and "semantic" in str(exc).lower():
             # Belt and braces: the service rejected the semantic query even though
             # configuration said it was available (e.g. the SKU was changed after
             # deployment). Retry without the ranker rather than failing the lookup.
             logger.warning("Semantic ranker unavailable, retrying without it: %s", exc)
-            search_results = await asyncio.wait_for(search_client.search(
-                search_text=query,
-                top=_top,
-                vector_queries=vector_queries or None,
-                select=select_fields,
-            ), timeout=_search_cfg.get("timeout_seconds", 10))
+            try:
+                records = await _fetch_records(
+                    search_text=query,
+                    top=_top,
+                    vector_queries=vector_queries or None,
+                    select=select_fields,
+                )
+            except Exception as exc2:
+                logger.error("Search retry without semantic ranker also failed: %s", exc2)
+                _err = _prompt_loader.render_error("search_service_unavailable") if _prompt_loader else "I'm sorry, I can't reach our menu data right now."
+                return ToolResult(_err, ToolResultDirection.TO_SERVER)
         else:
             logger.error("Azure AI Search request failed: %s", exc)
             _err = _prompt_loader.render_error("search_service_unavailable") if _prompt_loader else "I'm sorry, I can't reach our menu data right now."
@@ -248,7 +271,7 @@ async def search(
         return ToolResult(_err, ToolResultDirection.TO_SERVER)
 
     results = []
-    async for record in search_results:
+    for record in records:
         identifier = record.get(identifier_field) or record.get("id", "unknown")
 
         # Format sizes into human-readable list so the Realtime API can speak them naturally
