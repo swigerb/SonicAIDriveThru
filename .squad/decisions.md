@@ -466,6 +466,11 @@
   regex was already word-boundary and is unchanged. Every on-menu item still resolves via
   `MENU_CATEGORY_MAP` directly (proven by a test that patches both fallback functions to raise) —
   these fallbacks only ever see genuinely off-menu names.
+- **Customised sundaes pin Brian's #39 decision under customization too, not just the plain
+  case.** `"Hot Fudge Sundae (Extra Fudge)"` in a combo is charged in full (never fills the drink
+  slot, kills Rick's Z2) and stays full price at happy hour (kills Z3) — added as two new
+  `CustomisedItemMenuLookupTests.cs` Facts, alongside the plain-sundae case already pinned in
+  `GoldenMenuComboSlotTheoryTests`/`test_menu_utils.py`.
 - **Explicitly out of scope (Rick will file separately):** the Python conformance-suite money
   tolerance change, and the `menuItems.json` schema redesign referenced in the correction on entry 38
   above.

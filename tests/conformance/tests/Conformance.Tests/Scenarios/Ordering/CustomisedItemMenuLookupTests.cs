@@ -194,6 +194,38 @@ public sealed class CustomisedItemMenuLookupTests
                     $"'{item}' must not match the bare substring 'tea' inside 'steak' and silently fill the combo drink slot.");
                 Assert.Equal(2, OrderScenarioHelpers.GetOrderItemCount(result.ToolResultJson!));
             });
+
+        /// <summary>Rick's Z2: a customised sundae must not silently fill a combo's drink slot
+        /// even though "Shakes & Ice Cream" (its JSON category) is otherwise a combo-drink
+        /// category -- Brian's #39 decision (sundaes aren't a drink) must survive customization,
+        /// exactly like the plain-sundae case already pinned in
+        /// <see cref="InferComboComponentGoldenCategoryTests"/> (Python) /
+        /// <c>GoldenMenuComboSlotTheoryTests</c> (C#).</summary>
+        [Fact]
+        public Task Customised_sundae_is_charged_in_full_alongside_a_combo_not_absorbed_into_the_drink_slot() =>
+            fixture.RunAsync(async () =>
+            {
+                var ct = TestContext.Current.CancellationToken;
+                const string item = "Hot Fudge Sundae (Extra Fudge)";
+                const decimal unitPrice = 3.19m; // app/frontend/src/data/menuItems.json, "Hot Fudge Sundae"
+
+                var (browser, connection, roundTripIndex) = await OrderScenarioHelpers.ConnectAndGreetAsync(fixture, ct);
+                await using var _ = browser;
+
+                var result = await OrderScenarioHelpers.RunOrderStepsAsync(
+                    connection, browser,
+                    [
+                        ("add", BaseComboName, BaseComboSize, 1, BaseComboPrice),
+                        ("add", item, "standard", 1, unitPrice),
+                    ],
+                    roundTripIndex, ct);
+
+                OrderScenarioHelpers.AssertMoneyEqual(
+                    BaseComboPrice + unitPrice,
+                    OrderScenarioHelpers.GetOrderTotal(result.ToolResultJson!),
+                    "A customised sundae must never fill a combo's drink slot -- Brian's #39 decision survives customization.");
+                Assert.Equal(2, OrderScenarioHelpers.GetOrderItemCount(result.ToolResultJson!));
+            });
     }
 
     [Collection(HappyHourAtOpenCollection.Name)]
@@ -247,6 +279,33 @@ public sealed class CustomisedItemMenuLookupTests
                 var rules = GoldenOrderPricingData.Load(RepoPaths.FindRepoRoot()).BusinessRules;
                 var expectedTotal = unitPrice * rules.HappyHourDiscount * (1 + rules.TaxRate);
                 OrderScenarioHelpers.AssertMoneyEqual(expectedTotal, OrderScenarioHelpers.GetOrderFinalTotal(result.ToolResultJson!));
+            });
+
+        /// <summary>Rick's Z3: a customised sundae must never be happy-hour discounted, exactly
+        /// like the plain sundae -- Brian's #39 decision (sundaes are full price during happy
+        /// hour) must survive customization too, not just the on-menu, uncustomised case.</summary>
+        [Fact]
+        public Task Customised_sundae_is_not_happy_hour_discounted() =>
+            fixture.RunAsync(async () =>
+            {
+                var ct = TestContext.Current.CancellationToken;
+                const string item = "Hot Fudge Sundae (Extra Fudge)";
+                const decimal unitPrice = 3.19m; // app/frontend/src/data/menuItems.json, "Hot Fudge Sundae"
+
+                var (browser, connection, roundTripIndex) = await OrderScenarioHelpers.ConnectAndGreetAsync(fixture, ct);
+                await using var _ = browser;
+
+                var result = await OrderScenarioHelpers.RunOrderStepsAsync(
+                    connection, browser,
+                    [("add", item, "standard", 1, unitPrice)],
+                    roundTripIndex, ct);
+
+                var rules = GoldenOrderPricingData.Load(RepoPaths.FindRepoRoot()).BusinessRules;
+                var expectedTotal = unitPrice * (1 + rules.TaxRate); // NOT multiplied by HappyHourDiscount
+                OrderScenarioHelpers.AssertMoneyEqual(
+                    expectedTotal,
+                    OrderScenarioHelpers.GetOrderFinalTotal(result.ToolResultJson!),
+                    "A customised sundae must stay full price during happy hour -- Brian's #39 decision survives customization.");
             });
     }
 }
