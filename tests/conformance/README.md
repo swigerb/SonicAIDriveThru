@@ -499,6 +499,40 @@ building — not merely overwritten afterwards, which previously left a fail-ope
 was only overwritten when the backend had its own `system_message` configured, so a backend with none
 configured would forward the browser's `instructions` unchanged.
 
+Being an allowed top-level *key* is not the same as trusting every value inside it — being GA's
+own name for the fields is not a safety guarantee either (review round 3, sub-key hardening):
+
+- **`turn_detection` sub-keys** (`_sanitize_turn_detection` in `rtmt.py`): allow-listed down to
+  exactly `type`, `threshold`, `prefix_padding_ms`, `silence_duration_ms` — the four sub-keys
+  `useRealtime.tsx` ever sends. `type` must be the literal `"server_vad"`; any other value (or a
+  missing `type`, or a non-dict `turn_detection`) rejects the WHOLE object rather than partially
+  filtering it, falling back to the server's own known-good default
+  (`_BOOTSTRAP_CLIENT_SESSION["turn_detection"]`). Each numeric sub-key is bounds-checked and
+  dropped *individually* if out of range or the wrong type (`bool` included — Python's `bool` is
+  an `int` subclass, but `true`/`false` is never legitimate here): `threshold` ∈ `[0, 1]`;
+  `prefix_padding_ms`/`silence_duration_ms` ∈ `[0, 5000]`. Real GA `server_vad` also accepts
+  `create_response`, `interrupt_response`, and `idle_timeout_ms` — none of which the frontend ever
+  sends, and none of which are safe to take from the browser (`create_response: false` can
+  silence the assistant entirely); they are simply never in the allow-list, regardless of value.
+- **`input_audio_transcription` is fully server-owned**: the whole object is rebuilt from
+  `self.transcription_model` (`_build_session` in `rtmt.py`) — never merged with whatever the
+  browser sent. If a transcription model is configured, the outgoing object is exactly
+  `{"model": <server's model>}`; if none is configured, no `input_audio_transcription` key is
+  sent at all. Previously this only overwrote the `model` sub-key while merging in the rest of the
+  browser's dict (so a smuggled sub-key, e.g. a Whisper `prompt`, could ride along unfiltered),
+  and if no model was configured the browser's object — `model` included — was forwarded
+  completely unchanged, a fail-open gap.
+
+Exercised black-box by `Scenarios/Security/ClientToServerAllowListTests.cs`'s
+`Turn_detection_and_transcription_sub_keys_are_sanitized_or_server_owned` (forges
+`create_response`/`interrupt_response`/`idle_timeout_ms` and a smuggled `input_audio_transcription`
+`model`/`prompt`; asserts the fake upstream sees only the allow-listed `turn_detection` sub-keys
+and the server's own transcription model, nothing else) and
+`Turn_detection_with_invalid_type_falls_back_to_the_servers_own_default` (a wrong/missing `type`
+falls back to the server's default rather than partially surviving). Unit-tested at the Python
+level in `test_rtmt.py`'s `_sanitize_turn_detection` tests (allow-list, bounds, bool-rejection,
+wrong-type-rejection) and `ProcessMessageToServerTests`'s integration-path tests for both fields.
+
 **Anything else — including, explicitly, `conversation.item.create` (a browser has no legitimate
 reason to author a conversation item; this is also how `role: "system"`/`"developer"` injection is
 blocked, by rejecting the whole event type rather than filtering the role field),

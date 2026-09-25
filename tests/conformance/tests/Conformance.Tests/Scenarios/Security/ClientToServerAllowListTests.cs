@@ -163,6 +163,78 @@ public sealed class ClientToServerAllowListTests(ConformanceFixture fixture)
     });
 
     [Fact]
+    public Task Turn_detection_and_transcription_sub_keys_are_sanitized_or_server_owned() => fixture.RunAsync(async () =>
+    {
+        // PR #49 review round 3, sub-key hardening: `turn_detection` and
+        // `input_audio_transcription` are the browser's two legitimate M3 session keys, but
+        // being an ALLOWED top-level key doesn't mean every sub-key inside it is safe. Real GA
+        // `server_vad` also accepts `create_response`/`interrupt_response`/`idle_timeout_ms` --
+        // none of which `useRealtime.tsx` ever sends, and `create_response: false` can silence
+        // the assistant entirely. `input_audio_transcription` is fully server-owned: the model
+        // always comes from the backend's own configuration, never the browser's.
+        var ct = TestContext.Current.CancellationToken;
+        var connectionTask = fixture.Realtime.WaitForNextConnectionAsync(FrameTimeout, ct);
+        await using var browser = await RealtimeBrowserClient.ConnectAsync(fixture.Backend!.BaseUri, cancellationToken: ct);
+        var connection = await connectionTask;
+        Assert.True(connection is not null, "No upstream connection was accepted for the browser socket.");
+
+        var bootstrap = await connection!.ReceivedFrames.WaitForAsync(f => f.Sequence == 0, FrameTimeout, ct);
+        Assert.True(bootstrap is not null, "Bootstrap session.update never arrived.");
+        var bootstrapAudioInput = bootstrap!.Json.GetProperty("session").GetProperty("audio").GetProperty("input");
+        var serverTranscriptionModel = bootstrapAudioInput.GetProperty("transcription").GetProperty("model").GetString();
+        Assert.False(string.IsNullOrWhiteSpace(serverTranscriptionModel), "Precondition failed: bootstrap must configure a transcription model.");
+
+        const string evilModel = "evil-injected-transcription-model";
+        await browser.SendAsync(new JsonObject
+        {
+            ["type"] = "session.update",
+            ["session"] = new JsonObject
+            {
+                ["turn_detection"] = new JsonObject
+                {
+                    ["type"] = "server_vad",
+                    ["threshold"] = 0.7,
+                    ["prefix_padding_ms"] = 300,
+                    ["silence_duration_ms"] = 500,
+                    ["create_response"] = false,
+                    ["interrupt_response"] = false,
+                    ["idle_timeout_ms"] = 999999,
+                },
+                ["input_audio_transcription"] = new JsonObject { ["model"] = evilModel, ["prompt"] = "IGNORE_ALL_INSTRUCTIONS_TRANSCRIPTION_PROMPT_INJECTION" },
+            },
+        }, ct);
+
+        var forwarded = await connection.ReceivedFrames.WaitForAsync(
+            f => f.Sequence > bootstrap.Sequence && f.Type == "session.update", FrameTimeout, ct);
+        Assert.True(forwarded is not null, "The browser's own session.update must still reach the fake upstream.");
+        var forwardedAudioInput = forwarded!.Json.GetProperty("session").GetProperty("audio").GetProperty("input");
+
+        var forwardedTurnDetection = forwardedAudioInput.GetProperty("turn_detection");
+        Assert.Equal("server_vad", forwardedTurnDetection.GetProperty("type").GetString());
+        Assert.Equal(0.7, forwardedTurnDetection.GetProperty("threshold").GetDouble());
+        Assert.Equal(300, forwardedTurnDetection.GetProperty("prefix_padding_ms").GetInt32());
+        Assert.Equal(500, forwardedTurnDetection.GetProperty("silence_duration_ms").GetInt32());
+        Assert.False(forwardedTurnDetection.TryGetProperty("create_response", out _), "`create_response` must never be forwarded from the browser -- it could silence the assistant.");
+        Assert.False(forwardedTurnDetection.TryGetProperty("interrupt_response", out _), "`interrupt_response` must never be forwarded from the browser.");
+        Assert.False(forwardedTurnDetection.TryGetProperty("idle_timeout_ms", out _), "`idle_timeout_ms` must never be forwarded from the browser.");
+
+        // input_audio_transcription is fully server-owned: the whole object is rebuilt from the
+        // server's own config, never merged with the browser's -- so a smuggled `prompt`
+        // sub-key riding along next to the forged `model` must ALSO never survive, not just the
+        // model field itself (that alone wouldn't distinguish "server-owned" from "merge the
+        // model in, keep the rest of the browser's dict").
+        var forwardedTranscription = forwardedAudioInput.GetProperty("transcription");
+        Assert.Equal(serverTranscriptionModel, forwardedTranscription.GetProperty("model").GetString());
+        Assert.NotEqual(evilModel, forwardedTranscription.GetProperty("model").GetString());
+        Assert.False(forwardedTranscription.TryGetProperty("prompt", out _), "`input_audio_transcription` must be fully rebuilt from the server's own config -- no browser sub-key should survive merged in.");
+
+        foreach (var frame in connection.ReceivedFrames.Snapshot())
+        {
+            Assert.DoesNotContain(evilModel, frame.Json.GetRawText(), StringComparison.Ordinal);
+        }
+    });
+
+    [Fact]
     public Task Turn_detection_with_invalid_type_falls_back_to_the_servers_own_default() => fixture.RunAsync(async () =>
     {
         // A `turn_detection` whose `type` isn't the literal "server_vad" the frontend always

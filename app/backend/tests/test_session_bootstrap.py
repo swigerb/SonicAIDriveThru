@@ -155,6 +155,9 @@ class _RealtimeHarness(unittest.IsolatedAsyncioTestCase):
         )
         self.rtmt.system_message = SYSTEM_PROMPT
         self.rtmt.max_tokens = 4096
+        # Matches the shipped config.yaml default (never unset in a real
+        # deployment) -- see input_audio_transcription server-ownership.
+        self.rtmt.transcription_model = "whisper-1"
         for name in TOOL_NAMES:
             self.rtmt.tools[name] = Tool(target=MagicMock(), schema={"type": "function", "name": name})
 

@@ -836,12 +836,18 @@ class RTMiddleTier:
             session["voice"] = self.voice_choice
         session["tool_choice"] = "auto" if len(self.tools) > 0 else "none"
         session["tools"] = [tool.schema for tool in self.tools.values()]
+        # Server-owned (PR #49 review round 3, sub-key hardening): the model
+        # always comes from RTMiddleTier's own configuration, never merged
+        # with whatever the browser sent. Previously this only overwrote the
+        # `model` sub-key while merging in the rest of the browser's dict, so
+        # a browser could still smuggle other sub-keys (e.g. a Whisper
+        # `prompt`) through unfiltered; and if `self.transcription_model` was
+        # falsy, the browser's `input_audio_transcription` (model included)
+        # was forwarded completely unchanged -- a fail-open gap.
         if self.transcription_model:
-            transcription = session.get("input_audio_transcription")
-            session["input_audio_transcription"] = {
-                **(transcription if isinstance(transcription, dict) else {}),
-                "model": self.transcription_model,
-            }
+            session["input_audio_transcription"] = {"model": self.transcription_model}
+        else:
+            session.pop("input_audio_transcription", None)
         # Server-owned: never trust a client-supplied value for these, since
         # an unsupported one takes the tools down with it.
         session.pop("reasoning", None)
