@@ -34,6 +34,7 @@ from audio_pipeline import (
 )
 from order_state import order_state_singleton
 from rtmt import (
+    _BACKGROUND_TASKS,
     _BOOTSTRAP_CLIENT_SESSION,
     _CLIENT_ALLOWED_TYPES,
     _CLIENT_APPEND_FAST_PATH_RE,
@@ -54,6 +55,7 @@ from rtmt import (
     _sanitize_turn_detection,
     _sanitize_voice,
     _SessionUpdateGuard,
+    _spawn,
     _to_ga_session,
     _ToolFailureTracker,
     create_hmac_token,
@@ -728,6 +730,35 @@ class EchoSuppressorTests(unittest.TestCase):
         fake_handle.cancel.assert_called_once()
         self.assertIsNone(echo._flush_handle)
 
+    def test_close_is_terminal_a_later_on_audio_done_does_not_re_arm_the_flush(self):
+        """PR #58 re-review "F1": close() must be a one-way transition -- a
+        call to on_audio_done() arriving AFTER close() (e.g. a leftover
+        response.done racing the connection's own teardown) must not spawn a
+        new flush send or schedule a new delayed-flush timer.
+        """
+        echo = EchoSuppressor()
+        loop = MagicMock()
+        loop.time.return_value = 100.0
+        fake_handle = MagicMock()
+        loop.call_later.return_value = fake_handle
+        target_ws = MagicMock()
+        spawned = []
+
+        def spy_spawn(coro):
+            spawned.append(coro)
+            coro.close()  # avoid "coroutine was never awaited"
+            return MagicMock()
+
+        echo.on_audio_done(loop, target_ws, spawn=spy_spawn)
+        self.assertEqual(len(spawned), 1)  # the pre-close call still flushes normally
+        echo.close()
+
+        echo.on_audio_done(loop, target_ws, spawn=spy_spawn)
+        self.assertEqual(len(spawned), 1, "on_audio_done() after close() must not spawn a flush send.")
+        # call_later was used once (for the pre-close call); a second,
+        # post-close call must not schedule another delayed-flush timer.
+        self.assertEqual(loop.call_later.call_count, 1)
+
 
 class BestEffortSendTests(unittest.TestCase):
     """swigerb/SonicAIDriveThru#59: `_best_effort_send()` is the shared helper
@@ -769,6 +800,69 @@ class BestEffortSendTests(unittest.TestCase):
             ws.send_str = AsyncMock()
             await _best_effort_send(ws, "msg")
             ws.send_str.assert_called_once_with("msg")
+        asyncio.run(_run())
+
+
+class SpawnTests(unittest.TestCase):
+    """PR #58 re-review "F1" (#59 completeness): `_spawn`'s own done-callback
+    must retrieve (not just discard-from-the-tracking-set) any exception a
+    background task raises, or asyncio logs it as an unretrieved "Task
+    exception was never retrieved" ERROR -- the exact noisy-log shape #59
+    fixed for the echo flush specifically, generalised here to every task
+    `_spawn` is used for (nudge_task, deadline_task, and any future caller).
+    """
+
+    def test_spawned_task_exception_is_retrieved_not_left_unretrieved(self):
+        async def _run():
+            loop = asyncio.get_running_loop()
+            captured_contexts = []
+            loop.set_exception_handler(lambda loop, context: captured_contexts.append(context))
+
+            async def _boom():
+                raise RuntimeError("background task failure")
+
+            try:
+                task = _spawn(_boom())
+                # Let the task run to completion and its done callback fire.
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+                self.assertTrue(task.done())
+                # Drop the last strong reference to the task before forcing
+                # GC -- asyncio's "exception was never retrieved" detection
+                # only fires when the Task object itself is actually
+                # collected, so holding `task` alive here would make this
+                # assertion vacuously true regardless of whether the
+                # exception was ever retrieved.
+                del task
+                import gc
+                gc.collect()
+            finally:
+                loop.set_exception_handler(None)
+            self.assertEqual(captured_contexts, [])
+        asyncio.run(_run())
+
+    def test_spawned_task_is_discarded_from_the_background_set_when_done(self):
+        async def _run():
+            async def _noop():
+                return None
+
+            task = _spawn(_noop())
+            self.assertIn(task, _BACKGROUND_TASKS)
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            self.assertNotIn(task, _BACKGROUND_TASKS)
+        asyncio.run(_run())
+
+    def test_cancelled_spawned_task_does_not_raise_retrieving_exception(self):
+        async def _run():
+            async def _sleep_forever():
+                await asyncio.sleep(100)
+
+            task = _spawn(_sleep_forever())
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            self.assertNotIn(task, _BACKGROUND_TASKS)
         asyncio.run(_run())
 
 

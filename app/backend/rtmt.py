@@ -716,8 +716,25 @@ _BACKGROUND_TASKS: set[asyncio.Task] = set()
 def _spawn(coro) -> asyncio.Task:
     task = asyncio.ensure_future(coro)
     _BACKGROUND_TASKS.add(task)
-    task.add_done_callback(_BACKGROUND_TASKS.discard)
+    task.add_done_callback(_on_background_task_done)
     return task
+
+
+def _on_background_task_done(task: asyncio.Task) -> None:
+    # swigerb/SonicAIDriveThru#59 (PR #58 re-review, "F1" completeness): a
+    # done callback that only discards from the tracking set still leaves
+    # any exception the task raised unretrieved -- asyncio logs those as
+    # "Task exception was never retrieved" at ERROR, the exact noisy-log
+    # shape #59 fixed for the echo flush specifically. Retrieving it here
+    # (even just to log it at DEBUG and drop it) is what actually silences
+    # that for every task spawned via `_spawn`, not just the two echo-flush
+    # sends #59 originally covered.
+    _BACKGROUND_TASKS.discard(task)
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.debug("Background task raised (retrieved, not re-raised): %r", exc)
 
 
 async def _close_superseded(stale_ws: web.WebSocketResponse) -> None:
@@ -1894,7 +1911,7 @@ class RTMiddleTier:
                     logger.info("Resumed session %s rehydrated (%d recent turns); greeting suppressed",
                                 session_id, len(self._sessions.recent_turns(session_id)))
                     if self._sessions.nudge_after_seconds > 0:
-                        nudge_task = asyncio.ensure_future(nudge_after_silence())
+                        nudge_task = _spawn(nudge_after_silence())
 
                 async def reject_late_resume(data: str):
                     nonlocal announced
@@ -2184,7 +2201,7 @@ class RTMiddleTier:
                         elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSING, aiohttp.WSMsgType.CLOSED):
                             break
 
-                deadline_task = asyncio.ensure_future(first_frame_deadline())
+                deadline_task = _spawn(first_frame_deadline())
                 try:
                     await asyncio.gather(from_client_to_server(), from_server_to_client())
                 except ConnectionResetError:

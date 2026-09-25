@@ -200,6 +200,7 @@ class EchoSuppressor:
         "_flush_handle",
         "_greeting_awaiting_retry",
         "_greeting_audio_seen",
+        "_closed",
     )
 
     def __init__(self):
@@ -211,6 +212,12 @@ class EchoSuppressor:
         # instead of letting it fire (and attempt a send) after the
         # connection has already gone away.
         self._flush_handle: asyncio.TimerHandle | None = None
+        # swigerb/SonicAIDriveThru#59 (PR #58 re-review, "F1"): once True,
+        # close() is terminal -- on_audio_done() must not re-arm the flush
+        # (spawn a send, or schedule a new delayed-flush timer) even if it's
+        # called again afterwards (e.g. a leftover response.done racing the
+        # connection's own finally block during teardown).
+        self._closed = False
         # swigerb/SonicAIDriveThru#48 (PR #58 re-review, "M1"): set by
         # on_response_done() when a greeting's response.done arrives with no
         # audio ever rendered -- the rate-limit ladder (RateLimitRecovery)
@@ -276,6 +283,14 @@ class EchoSuppressor:
         the existing unit tests) doesn't pass one.
         """
         spawn = spawn or asyncio.ensure_future
+        if self._closed:
+            # swigerb/SonicAIDriveThru#59 (PR #58 re-review, "F1"): close()
+            # is terminal -- once the connection's teardown has run, a
+            # later on_audio_done() call (e.g. a leftover response.done
+            # racing the connection's own finally block) must not re-arm
+            # the flush by spawning a send or scheduling a fresh
+            # delayed-flush timer.
+            return
         self.ai_speaking = False
         if self.greeting_in_progress:
             actual_cooldown = ECHO_COOLDOWN_SEC * 2
@@ -302,7 +317,7 @@ class EchoSuppressor:
         self._flush_handle = loop.call_later(actual_cooldown, _make_delayed_flush)
 
     def close(self) -> None:
-        """Cancel any delayed echo flush still pending.
+        """Cancel any delayed echo flush still pending, and become terminal.
 
         swigerb/SonicAIDriveThru#59: called from the connection's teardown
         (rtmt.py `_forward_messages`'s `finally`) so a timer scheduled by
@@ -311,7 +326,13 @@ class EchoSuppressor:
         no-op/catch cleanly if this were skipped, but cancelling the timer
         closes the race window outright instead of relying on that as the
         only backstop.
+
+        PR #58 re-review "F1": also marks this suppressor closed so any
+        LATER call to `on_audio_done()` is a no-op instead of re-arming the
+        flush it just cancelled -- `close()` must be a one-way, terminal
+        transition, not just a one-time timer cancellation.
         """
+        self._closed = True
         if self._flush_handle is not None:
             self._flush_handle.cancel()
             self._flush_handle = None

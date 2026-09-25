@@ -1654,6 +1654,63 @@ server, the session survives (a further round trip / tool call still works), and
    first assertion (`function_call_output is not null`) fails — confirming the scenario actually
    exercises layer 1 and isn't vacuously true.
 
+### Background-task exception retrieval and a terminal `EchoSuppressor.close()` (PR #58 review round 2, F1; #59 completeness)
+
+Two Python-only implementation-detail fixes, neither of which has (or needs) a wire-level
+conformance scenario:
+
+1. **`_spawn`'s done callback now retrieves exceptions, not just discards the task.** #59 fixed
+   `EchoSuppressor`'s two fire-and-forget echo-clear sends specifically (untracked
+   `asyncio.ensure_future(...)` calls whose exceptions were never retrieved, producing noisy
+   `asyncio:Task exception was never retrieved` ERROR logs on ordinary disconnect races). F1 closes
+   the same gap for *every* task spawned via `rtmt.py`'s shared `_spawn()` helper (not just the two
+   #59 covered): the done callback (renamed `_on_background_task_done`, previously a bare
+   `_BACKGROUND_TASKS.discard` bound method) now also calls `task.exception()` — skipping cancelled
+   tasks — and logs any non-cancelled exception at DEBUG (retrieved and dropped, never re-raised).
+   `nudge_task` (the idle-nudge-after-silence timer) and `deadline_task` (the first-frame deadline
+   timer) were previously spawned with a raw `asyncio.ensure_future(...)` that bypassed `_spawn`
+   entirely (and its done-callback); both now go through `_spawn(...)` like every other background
+   task, so a future exception in either no longer surfaces as an unretrieved-exception log line.
+   Pytest: `SpawnTests.test_spawned_task_exception_is_retrieved_not_left_unretrieved` (uses
+   `loop.set_exception_handler` to capture what asyncio would otherwise log, forces `gc.collect()`
+   after `del`-ing the local `task` reference — see the note below on why the `del` is required for
+   soundness — and asserts nothing was captured),
+   `test_spawned_task_is_discarded_from_the_background_set_when_done`, and
+   `test_cancelled_spawned_task_does_not_raise_retrieving_exception`. Mutation: disabling the
+   `task.exception()` call turns the first test red (the mutated build reproduces the exact
+   `asyncio:Task exception was never retrieved` warning the fix is meant to suppress); the other two
+   are unaffected by that specific mutation, as expected.
+
+   **A mutation-check soundness pitfall worth recording:** the first version of
+   `test_spawned_task_exception_is_retrieved_not_left_unretrieved` held a local `task` variable across
+   the `gc.collect()` call (kept for a later assertion). That reference alone keeps the `Task` object
+   reachable, so CPython's GC never actually collects it — and asyncio only emits its
+   "exception was never retrieved" warning from a `Task.__del__` that runs on collection. The test
+   therefore passed identically whether or not the fix was in place: a vacuously true assertion, not a
+   real regression guard. The fix was to `del task` immediately before `gc.collect()`; re-running the
+   mutation afterwards showed the test correctly go red. Any future test in this style (asserting on
+   GC-triggered behaviour) must `del` its last local reference to the object under test before forcing
+   collection, and must be re-verified red-under-mutation after doing so — a passing test alone is not
+   evidence the check is sound.
+
+2. **`EchoSuppressor.close()` is now a one-way terminal transition.** Previously `close()` only
+   cancelled the pending delayed-flush `TimerHandle`; a *later* call to `on_audio_done()` on the same
+   (already-closed) `EchoSuppressor` would still schedule a brand-new flush send and a brand-new
+   `loop.call_later(...)`, undoing the point of closing it during connection teardown. `close()` now
+   also sets a `_closed` flag, and `on_audio_done()` checks it first and no-ops (no spawn, no
+   `call_later`) if set. Pytest:
+   `EchoSuppressorTests.test_close_is_terminal_a_later_on_audio_done_does_not_re_arm_the_flush`.
+   Mutation: bypassing the `_closed` check in `on_audio_done()` turns this test red (a second flush
+   send is spawned after `close()`), confirming the guard is load-bearing.
+
+Neither change has an observable wire-level effect distinguishable from the pre-fix behaviour in the
+happy path (a spawned task that never raises, or a suppressor that's never called again after
+`close()`, behave identically either way) — the whole point is what happens in the *unhappy* path
+(a background task raising, or a stray post-close call), which is exactly the kind of internal
+robustness property the "Backend logging is not a wire contract" reasoning above applies to. Both are
+therefore Python-unit-only contracts; a C# port only needs to reproduce the same *outcome*
+(no unretrieved-exception noise; no post-close resource use), not this specific mechanism.
+
 ## Client-controlled server logging must be gated off in production (#53)
 
 `extension.set_verbose_logging` and `extension.set_log_to_file` are two browser-sent extension
