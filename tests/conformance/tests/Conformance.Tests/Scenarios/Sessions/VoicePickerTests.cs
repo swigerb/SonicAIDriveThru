@@ -182,16 +182,75 @@ public sealed class VoicePickerTests(VoicePickerConformanceFixture fixture)
     });
 
     /// <summary>
-    /// The Python bug behind the process-wide leak (issue #43, filed by Rick from this suite's
-    /// PR #42 review): two concurrent guests share the same `voice_choice`, so picking a voice as
-    /// guest A also changes guest B's in-flight conversation. This is real, reproducible behaviour
-    /// of app/backend/rtmt.py today -- not a fake/harness defect -- so it is written and Skipped
-    /// here rather than fixed: this conformance suite documents rtmt.py's behaviour (including its
-    /// bugs) for the C# backend to reproduce faithfully, and #43 explicitly is NOT something the
-    /// C# backend should copy. Un-skip once #43 is fixed.
+    /// PR #49 review round 5, Must (M1): extension.set_voice used to trust any non-empty string
+    /// the browser sent. A forged voice name must now be dropped entirely -- it must not reach
+    /// upstream on the sender's own connection (immediate-pick path, no assistant audio yet), and
+    /// it must not become the new default for a later, unrelated guest's bootstrap either.
     /// </summary>
-    [Fact(Skip = "Known Python bug #43 (voice picker is process-wide across concurrent guests) -- not to be reproduced in the C# backend. Un-skip once #43 is fixed.",
-        SkipWhen = nameof(BackendUnderTest.IsPython), SkipType = typeof(BackendUnderTest))]
+    [Fact]
+    public Task Unknown_voice_is_rejected_and_never_reaches_upstream_or_a_new_guests_bootstrap() => fixture.RunAsync(async () =>
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var noneOpen = await fixture.Realtime.WaitForNoOpenConnectionsAsync(FrameTimeout, ct);
+        Assert.True(noneOpen, $"Expected no open upstream connections at test start, but " +
+            $"{fixture.Realtime.OpenConnectionCount} are still open — a previous test leaked a connection.");
+
+        const string forgedVoice = "rick_probe_voice";
+
+        var guestAConnectionTask = fixture.Realtime.WaitForNextConnectionAsync(FrameTimeout, ct);
+        await using (var guestA = await RealtimeBrowserClient.ConnectAsync(fixture.Backend!.BaseUri, cancellationToken: ct))
+        {
+            var guestAConnection = await guestAConnectionTask;
+            Assert.True(guestAConnection is not null, $"No upstream connection was accepted within {FrameTimeout}.");
+
+            var bootstrap = await guestAConnection!.ReceivedFrames.WaitForAsync(f => f.Sequence == 0, FrameTimeout, ct);
+            Assert.True(bootstrap is not null, "Bootstrap session.update never arrived.");
+            var voiceBeforePick = bootstrap!.Json.GetProperty("session").GetProperty("audio")
+                .GetProperty("output").GetProperty("voice").GetString();
+            Assert.NotEqual(forgedVoice, voiceBeforePick);
+
+            var watermarkA = guestAConnection.ReceivedFrames.Snapshot().Count;
+            await guestA.SendExtensionSetVoiceAsync(forgedVoice, cancellationToken: ct);
+
+            // No assistant audio has been seen yet, so a legitimate pick would forward
+            // immediately (see Voice_picker_updates_immediately_before_any_assistant_audio_has_been_sent)
+            // -- a bounded absence window here proves the forged voice was dropped, not merely
+            // deferred.
+            var spuriousUpdateOnA = await guestAConnection.ReceivedFrames.WaitForAsync(
+                f => f.Sequence >= watermarkA && f.Type == "session.update", TimeSpan.FromSeconds(2), ct);
+            Assert.True(spuriousUpdateOnA is null,
+                $"A forged voice ({forgedVoice}) must never reach upstream, but a session.update arrived: " +
+                $"{spuriousUpdateOnA?.Json}");
+
+            await guestA.CloseAsync(WebSocketCloseStatus.NormalClosure, "forged voice attempted, moving to next guest", ct);
+            await guestA.WaitForCloseAsync(FrameTimeout, ct);
+        }
+
+        var firstClosed = await fixture.Realtime.WaitForNoOpenConnectionsAsync(FrameTimeout, ct);
+        Assert.True(firstClosed, "Expected guest A's upstream socket to close before starting the next guest.");
+
+        var guestBConnectionTask = fixture.Realtime.WaitForNextConnectionAsync(FrameTimeout, ct);
+        await using var guestB = await RealtimeBrowserClient.ConnectAsync(fixture.Backend!.BaseUri, cancellationToken: ct);
+        var guestBConnection = await guestBConnectionTask;
+        Assert.True(guestBConnection is not null, $"No upstream connection was accepted within {FrameTimeout}.");
+
+        var guestBBootstrap = await guestBConnection!.ReceivedFrames.WaitForAsync(f => f.Sequence == 0, FrameTimeout, ct);
+        Assert.True(guestBBootstrap is not null, "Bootstrap session.update never arrived for guest B.");
+        var guestBVoice = guestBBootstrap!.Json.GetProperty("session").GetProperty("audio")
+            .GetProperty("output").GetProperty("voice").GetString();
+        Assert.NotEqual(forgedVoice, guestBVoice);
+    });
+
+    /// <summary>
+    /// #43 (filed by Rick from this suite's PR #42 review, fixed in PR #49 review round 5,
+    /// "S1"): two concurrent guests share the same `voice_choice`, so picking a voice as
+    /// guest A also changed guest B's in-flight conversation. Un-skipped now that #43 is fixed:
+    /// `self.voice_choice` (the config-level default) is never mutated after construction, and a
+    /// picker's choice lands in `self._voice_override` (the sticky default for future NEW
+    /// connections only) plus this connection's own frozen `voice` local -- never re-read by an
+    /// already-open, unrelated connection.
+    /// </summary>
+    [Fact]
     public Task Two_concurrent_guests_voice_choices_do_not_leak_into_each_other() => fixture.RunAsync(async () =>
     {
         var ct = TestContext.Current.CancellationToken;

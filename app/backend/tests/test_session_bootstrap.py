@@ -240,12 +240,15 @@ class SessionBootstrapTests(_RealtimeHarness):
         await browser.close()
 
     async def test_session_update_after_assistant_audio_is_not_rejected_for_voice(self):
-        """voice_choice is process-wide, so another tab can change it mid-call.
-        A re-sent session.update (mic re-toggle) must not carry a new voice."""
+        """#43 fix (PR #49 review round 5, "S1"): self._voice_override is the
+        sticky default for future NEW connections only -- even if another
+        tab/guest's pick changes it mid-call, THIS connection's own frozen
+        voice is unaffected, so a re-sent session.update (mic re-toggle)
+        still must not carry a new voice."""
         browser = await self.client.ws_connect("/realtime")
         await browser.send_json(BROWSER_SESSION_UPDATE)
         await self._response_done(browser)          # greeting -> assistant audio present
-        self.rtmt.voice_choice = "coral"
+        self.rtmt._voice_override = "coral"          # simulates another tab/guest picking a voice
         await browser.send_json(BROWSER_SESSION_UPDATE)
         await self._until(lambda: len(self._session_updates()) >= 3)
         await asyncio.sleep(0.1)
@@ -266,7 +269,10 @@ class SessionBootstrapTests(_RealtimeHarness):
 
         self.assertEqual(len(self._session_updates()), before, "voice change was sent and would be rejected")
         self.assertEqual(self.fake.errors, [])
-        self.assertEqual(self.rtmt.voice_choice, "coral")
+        # #43 fix: self.voice_choice (config default) is never mutated; the
+        # pick lands in self._voice_override (sticky default for future NEW
+        # connections only).
+        self.assertEqual(self.rtmt._voice_override, "coral")
         await browser.close()
 
     async def test_voice_picker_before_assistant_audio_is_applied(self):
@@ -297,6 +303,62 @@ class SessionBootstrapTests(_RealtimeHarness):
                           "an unknown voice must never be forwarded upstream")
         self.assertNotEqual(self.fake.session.get("voice"), "rick_probe_voice")
         await browser.close()
+
+    async def test_two_concurrent_guests_voice_picks_do_not_leak_into_an_already_open_connection(self):
+        """#43 fix (PR #49 review round 5, "S1"): the process-wide
+        `self.voice_choice` mutation used to mean guest A picking a voice
+        also changed guest B's in-flight conversation, even though B was
+        already connected and B's socket has nothing to do with A's pick.
+        Mirrors the C# conformance scenario of the same name."""
+        guest_a = await self.client.ws_connect("/realtime")
+        await guest_a.send_json(BROWSER_SESSION_UPDATE)
+        await self._response_done(guest_a)   # A's greeting -> A's voice is locked
+
+        guest_b = await self.client.ws_connect("/realtime")
+        await guest_b.send_json(BROWSER_SESSION_UPDATE)
+        await self._response_done(guest_b)   # B's greeting -> B's voice is locked
+
+        # Guest A picks a voice mid-conversation (locked, so it's deferred to
+        # A's own next conversation) -- this must have NO effect on guest B,
+        # who is still active right now.
+        watermark = len(self._session_updates())
+        await guest_a.send_json({"type": "extension.set_voice", "voice": "coral"})
+        await asyncio.sleep(0.2)
+
+        self.assertEqual(len(self._session_updates()), watermark,
+                          "guest A's deferred voice pick must not produce any upstream session.update at all")
+        self.assertEqual(self.rtmt._voice_override, "coral")
+
+        # Guest B's own connection is unaffected: a re-sent session.update
+        # (mic re-toggle) on B must still omit voice (still locked on B's
+        # ORIGINAL voice), never pick up A's pending override.
+        await guest_b.send_json(BROWSER_SESSION_UPDATE)
+        await self._until(lambda: len(self._session_updates()) > watermark)
+        latest = self._session_updates()[-1]["session"]
+        self.assertNotIn("voice", (latest.get("audio") or {}).get("output", {}),
+                          "guest B's re-sent session.update must not carry guest A's pending voice pick")
+
+        await guest_a.close()
+        await guest_b.close()
+
+    async def test_voice_picked_after_lock_carries_to_a_brand_new_connections_bootstrap(self):
+        """The flip side of the leak fix: a voice picked (and deferred) on a
+        locked connection must still apply to the NEXT, brand-new
+        conversation's bootstrap -- #43 must not throw away the legitimate
+        "carries forward" behaviour while fixing the leak."""
+        first = await self.client.ws_connect("/realtime")
+        await first.send_json(BROWSER_SESSION_UPDATE)
+        await self._response_done(first)   # greeting -> voice locked
+        await first.send_json({"type": "extension.set_voice", "voice": "verse"})
+        await asyncio.sleep(0.2)
+        await first.close()
+
+        watermark = len(self._session_updates())
+        second = await self.client.ws_connect("/realtime")
+        await self._until(lambda: len(self._session_updates()) > watermark)
+        bootstrap = [e for e in self._session_updates() if str(e.get("event_id", "")).startswith("sonic_bootstrap")][-1]
+        self.assertEqual(bootstrap["session"]["audio"]["output"]["voice"], "verse")
+        await second.close()
 
     async def test_bootstrap_does_not_trigger_an_unprompted_greeting(self):
         """Greeting belongs to the browser's session.update (mic pressed), not to

@@ -400,6 +400,17 @@ def _sanitize_voice(candidate: Any, allowed_voices: frozenset[str]) -> str | Non
     return None
 
 
+# Sentinel default for the `voice` keyword threaded through `_build_session`
+# and everything downstream of it (PR #49 review round 5, "S1"/#43). Plain
+# `None` already means something ("send no voice at all" -- see
+# `_build_session`), so a distinct sentinel marks "caller didn't pass one" and
+# falls back to `self.voice_choice`, the pre-#43 behaviour every existing
+# caller (production and tests) still relies on. `_forward_messages` is the
+# only caller that ever passes an explicit voice -- this connection's own
+# frozen value, per #43.
+_VOICE_UNSET = object()
+
+
 # Exact-match fast path for the browser's mic-audio frame (PR #49 review
 # round 2, "M1"). `_process_message_to_server`'s previous fast path used
 # `audio_pipeline.TYPE_RE` -- an unanchored `"type":"..."` substring search --
@@ -795,6 +806,13 @@ class RTMiddleTier:
         self.endpoint = endpoint
         self.deployment = deployment
         self.voice_choice = voice_choice
+        # #43 fix (PR #49 review round 5, "S1"): self.voice_choice above is the
+        # config-level default and is NEVER mutated again after this point --
+        # a validated extension.set_voice pick instead updates this field,
+        # which is only ever read at a NEW connection's bootstrap (see
+        # `_forward_messages`), so it can never leak into an already-open
+        # guest's in-flight conversation.
+        self._voice_override: str | None = None
         self.tools = {}
         self._token_provider = None
         self._cached_token: str | None = None
@@ -844,7 +862,7 @@ class RTMiddleTier:
         """Whether `reasoning` will be sent upstream."""
         return normalize_reasoning_effort(self.reasoning_effort) is not None and self._reasoning_model()
 
-    def _build_session(self, session: dict, voice_locked: bool = False) -> dict:
+    def _build_session(self, session: dict, voice_locked: bool = False, voice: str | None = _VOICE_UNSET) -> dict:
         """Overlay the server-owned configuration onto a legacy-shaped session
         and translate it to the GA shape.
 
@@ -853,6 +871,10 @@ class RTMiddleTier:
         differs from the current one with `cannot_update_voice` -- and it
         rejects the WHOLE event, so tools, tool_choice and instructions are
         silently lost along with the voice.
+
+        `voice`: the voice to apply, or omit for `self.voice_choice` (the
+        config-level default) -- see `_VOICE_UNSET`. `_forward_messages`
+        always passes this connection's own frozen voice explicitly (#43).
         """
         if self.system_message is not None:
             session["instructions"] = self.system_message
@@ -862,8 +884,9 @@ class RTMiddleTier:
             session["max_response_output_tokens"] = self.max_tokens
         if self.disable_audio is not None:
             session["disable_audio"] = self.disable_audio
-        if self.voice_choice is not None:
-            session["voice"] = self.voice_choice
+        effective_voice = self.voice_choice if voice is _VOICE_UNSET else voice
+        if effective_voice is not None:
+            session["voice"] = effective_voice
         session["tool_choice"] = "auto" if len(self.tools) > 0 else "none"
         session["tools"] = [tool.schema for tool in self.tools.values()]
         # Server-owned (PR #49 review round 3, sub-key hardening): the model
@@ -896,7 +919,7 @@ class RTMiddleTier:
             logger.info("session.update: assistant audio already present — omitting voice so the update is not rejected")
         return ga_session
 
-    def build_bootstrap_session_update(self, event_id: str | None = None) -> str:
+    def build_bootstrap_session_update(self, event_id: str | None = None, voice: str | None = _VOICE_UNSET) -> str:
         """Serialise the session.update the middle tier sends as the very first
         frame on every upstream socket, before any browser traffic is relayed.
 
@@ -906,23 +929,23 @@ class RTMiddleTier:
         voice locks and every later session.update carrying our voice is
         rejected, so tools are never registered for that conversation.
         """
-        session = self._build_session(copy.deepcopy(_BOOTSTRAP_CLIENT_SESSION))
+        session = self._build_session(copy.deepcopy(_BOOTSTRAP_CLIENT_SESSION), voice=voice)
         return json.dumps({"type": "session.update", "event_id": event_id or _new_event_id("sonic_bootstrap"),
                            "session": session})
 
-    def build_fallback_session_update(self, event_id: str | None = None) -> str:
+    def build_fallback_session_update(self, event_id: str | None = None, voice: str | None = _VOICE_UNSET) -> str:
         """Serialise the minimal session.update sent when GA rejects one of ours.
 
         Only `type`, `instructions`, `tools` and `tool_choice` -- whatever field
         got the original rejected, the carhop keeps its tools and persona.
         """
-        full = self._build_session({}, voice_locked=True)
+        full = self._build_session({}, voice_locked=True, voice=voice)
         session = {key: full[key] for key in _FALLBACK_SESSION_KEYS if key in full}
         return json.dumps({"type": "session.update", "event_id": event_id or _new_event_id("sonic_fallback"),
                            "session": session})
 
     async def _recover_rejected_session_update(self, message: dict, server_ws, guard: "_SessionUpdateGuard | None",
-                                               session_id: str | None) -> bool:
+                                               session_id: str | None, voice: str | None = _VOICE_UNSET) -> bool:
         """Handle an upstream `error` that rejects one of our session.updates.
 
         Returns True if the error was consumed (a fallback was sent), False if
@@ -953,7 +976,7 @@ class RTMiddleTier:
             logger.error("Deployment %s rejected reasoning-model options; no longer sending `reasoning` / "
                          "`parallel_tool_calls` from this process. Set model.reasoning_effort to \"\" for this "
                          "deployment.", getattr(self, "deployment", "?"))
-        fallback = guard.track(self.build_fallback_session_update(), fallback_of=event_id)
+        fallback = guard.track(self.build_fallback_session_update(voice=voice), fallback_of=event_id)
         await server_ws.send_str(fallback)
         return True
 
@@ -989,7 +1012,7 @@ class RTMiddleTier:
             self._token_refresh_task.cancel()
         self._sessions.stop_idle_checker()
 
-    def _client_session_echo(self, message: dict) -> dict:
+    def _client_session_echo(self, message: dict, voice: str | None = _VOICE_UNSET) -> dict:
         """Build the minimal allow-listed browser-bound copy of a GA
         `session.created`/`session.updated` echo (swigerb/SonicAIDriveThru#45).
 
@@ -1021,19 +1044,25 @@ class RTMiddleTier:
         unexpected frame missing it is passed through unchanged instead (see
         the `session.updated` case below) rather than echoed as this shape
         with every field null.
+
+        `voice`: the voice this echo reports, or omit for `self.voice_choice`
+        -- see `_VOICE_UNSET`. #43: `_forward_messages` always passes this
+        connection's own frozen voice so a pick made on ANOTHER, already-open
+        guest's connection never appears in this one's echo.
         """
         session = message["session"]
+        effective_voice = self.voice_choice if voice is _VOICE_UNSET else voice
         return {
             "type": message.get("type"),
             "event_id": message.get("event_id"),
             "session": {
                 "id": session.get("id"),
                 "object": session.get("object"),
-                "audio": {"output": {"voice": self.voice_choice}},
+                "audio": {"output": {"voice": effective_voice}},
             },
         }
 
-    async def _process_message_to_client(self, msg: str, client_ws: web.WebSocketResponse, server_ws: web.WebSocketResponse, tools_pending: dict[str, RTToolCall], verbose: bool = False, guard: "_SessionUpdateGuard | None" = None, on_session_created: Callable[[], Awaitable[None]] | None = None, recovery: RateLimitRecovery | None = None) -> str | None:
+    async def _process_message_to_client(self, msg: str, client_ws: web.WebSocketResponse, server_ws: web.WebSocketResponse, tools_pending: dict[str, RTToolCall], verbose: bool = False, guard: "_SessionUpdateGuard | None" = None, on_session_created: Callable[[], Awaitable[None]] | None = None, recovery: RateLimitRecovery | None = None, voice: str | None = _VOICE_UNSET) -> str | None:
         data = msg.data
 
         # FAST PATH: extract type via regex without full JSON parse.
@@ -1078,7 +1107,7 @@ class RTMiddleTier:
                 case "error":
                     # A rejected session.update of ours is recovered here (minimal
                     # fallback) instead of surfacing as a user-facing failure.
-                    if await self._recover_rejected_session_update(message, server_ws, guard, session_id):
+                    if await self._recover_rejected_session_update(message, server_ws, guard, session_id, voice=voice):
                         _vlog(verbose, "  ⚠ session.update rejected — fallback sent: %s", json.dumps(message, default=str)[:500])
                         return None
                     # A rate-limited response is retried (see rate_limit.py), not surfaced.
@@ -1100,7 +1129,7 @@ class RTMiddleTier:
                 case "session.created":
                     session = message["session"]
                     _vlog(verbose, "  Session ID: %s", session.get("id", "?"))
-                    updated_message = json.dumps(self._client_session_echo(message))
+                    updated_message = json.dumps(self._client_session_echo(message, voice=voice))
                     if on_session_created is not None:
                         # The forwarder announces the session (metadata or resume)
                         # once it knows whether this socket is resuming.
@@ -1122,7 +1151,7 @@ class RTMiddleTier:
                     # browser's) and echoes the full session object right
                     # back -- instructions/tools/max-tokens included.
                     if message.get("session") is not None:
-                        updated_message = json.dumps(self._client_session_echo(message))
+                        updated_message = json.dumps(self._client_session_echo(message, voice=voice))
 
                 case "response.created":
                     if recovery is not None:
@@ -1310,7 +1339,7 @@ class RTMiddleTier:
 
         return updated_message
 
-    async def _process_message_to_server(self, msg: str, ws: web.WebSocketResponse, verbose: bool = False, voice_locked: bool = False, guard: "_SessionUpdateGuard | None" = None) -> str | None:
+    async def _process_message_to_server(self, msg: str, ws: web.WebSocketResponse, verbose: bool = False, voice_locked: bool = False, guard: "_SessionUpdateGuard | None" = None, voice: str | None = _VOICE_UNSET) -> str | None:
         """Validate and forward one browser→upstream frame, or drop it.
 
         Returns the exact string to forward, or `None` if the frame must be
@@ -1381,7 +1410,7 @@ class RTMiddleTier:
                         "to the server's own default (session=%s)", session_id)
                     sanitized_td = copy.deepcopy(_BOOTSTRAP_CLIENT_SESSION["turn_detection"])
                 session_in["turn_detection"] = sanitized_td
-            session = self._build_session(session_in, voice_locked=voice_locked)
+            session = self._build_session(session_in, voice_locked=voice_locked, voice=voice)
             tool_names = [t.get("name", "?") for t in session["tools"]]
             filtered["session"] = session
             # Every session.update carries an event_id so a rejection can
@@ -1462,6 +1491,19 @@ class RTMiddleTier:
                 # Silent-guest nudge after a resume (once per resume).
                 nudge_task: asyncio.Task | None = None
 
+                # #43 fix (PR #49 review round 5, "S1"): freeze THIS connection's
+                # own voice ONCE, before any traffic (browser or upstream) is
+                # relayed. self._voice_override (mutated by extension.set_voice
+                # on ANOTHER, already-open connection) is read only here, at
+                # connection start -- so a pick made on guest A's socket can
+                # only ever change what a NEW connection's bootstrap uses, and
+                # never guest B's already-open, in-flight conversation. Every
+                # later use of "voice" in this coroutine (bootstrap, session.
+                # update rebuilding, echo) reads this frozen local, never the
+                # shared fields again -- self.voice_choice (the config default)
+                # is never mutated after __init__.
+                voice = self._voice_override if self._voice_override is not None else self.voice_choice
+
                 _vlog(verbose, "\n═══ [SESSION] Connected ═══\n"
                                "Session ID: %s\n"
                                "═══════════════════════════", session_id or "?")
@@ -1469,7 +1511,7 @@ class RTMiddleTier:
                 # Configure the upstream session BEFORE relaying a single browser
                 # frame. Events are processed in order, so nothing the browser
                 # sends (mic audio included) can reach an unconfigured session.
-                await target_ws.send_str(guard.track(self.build_bootstrap_session_update()))
+                await target_ws.send_str(guard.track(self.build_bootstrap_session_update(voice=voice)))
                 logger.info("Upstream session bootstrapped with %d tools before relaying client traffic "
                             "(reasoning=%s, session=%s)", len(self.tools),
                             normalize_reasoning_effort(self.reasoning_effort) if self.reasoning_enabled() else "off",
@@ -1620,7 +1662,7 @@ class RTMiddleTier:
                         await announce_fresh()
 
                 async def from_client_to_server():
-                    nonlocal verbose, audio_frame_count, session_file_handler, first_frame_pending
+                    nonlocal verbose, audio_frame_count, session_file_handler, first_frame_pending, voice
                     async for msg in ws:
                         if msg.type == aiohttp.WSMsgType.TEXT:
                             # Resume handshake: only the very first client frame may resume.
@@ -1710,7 +1752,17 @@ class RTMiddleTier:
                                                 "Dropped extension.set_voice with an unknown/invalid voice %r (session=%s)",
                                                 ext_msg.get("voice"), session_id)
                                         else:
-                                            self.voice_choice = new_voice
+                                            # #43 (PR #49 review round 5, "S1"): self.voice_choice
+                                            # (the config-level default) is never mutated again.
+                                            # self._voice_override is the sticky default for
+                                            # future NEW connections only -- an ALREADY-OPEN other
+                                            # guest's connection keeps its own frozen `voice` local
+                                            # and never re-reads this shared field. This
+                                            # connection's own `voice` is updated too, so ITS
+                                            # subsequent session.update rebuilding / echo reflect
+                                            # the pick immediately, same as before #43.
+                                            self._voice_override = new_voice
+                                            voice = new_voice
                                             logger.info("Voice changed to %s for session %s", new_voice, session_id)
                                             if assistant_audio_seen:
                                                 # GA would reject this with cannot_update_voice.
@@ -1732,7 +1784,7 @@ class RTMiddleTier:
                             if _MARKER_RESPONSE_CANCEL in msg.data:
                                 echo.on_barge_in(verbose)
                             # Forward client message to OpenAI.
-                            new_msg = await self._process_message_to_server(msg, ws, verbose, voice_locked=assistant_audio_seen, guard=guard)
+                            new_msg = await self._process_message_to_server(msg, ws, verbose, voice_locked=assistant_audio_seen, guard=guard, voice=voice)
                             # PR #49 review round 2, "F1": idle reset, nudge
                             # cancel and the greeting trigger used to be keyed
                             # on raw substring checks against msg.data,
@@ -1829,7 +1881,7 @@ class RTMiddleTier:
 
                             new_msg = await self._process_message_to_client(msg, ws, target_ws, tools_pending, verbose, guard=guard,
                                                                             on_session_created=on_session_created,
-                                                                            recovery=recovery)
+                                                                            recovery=recovery, voice=voice)
                             if new_msg is not None:
                                 await ws.send_str(new_msg)
                         elif msg.type == aiohttp.WSMsgType.ERROR:
