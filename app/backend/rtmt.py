@@ -311,7 +311,9 @@ _TURN_DETECTION_NUMERIC_BOUNDS = {
 _TURN_DETECTION_INT_ONLY_KEYS = frozenset({"prefix_padding_ms", "silence_duration_ms"})
 
 
-def _sanitize_turn_detection(value: Any, session_id: str | None = None) -> dict | None:
+def _sanitize_turn_detection(
+        value: Any, session_id: str | None = None,
+        limiter: "_ClientFrameDropWarningLimiter | None" = None) -> dict | None:
     """Allow-list a browser-sent `turn_detection` object down to exactly the
     four sub-keys `useRealtime.tsx`'s `startSession()` ever sends
     (`type`, `threshold`, `prefix_padding_ms`, `silence_duration_ms`).
@@ -352,13 +354,84 @@ def _sanitize_turn_detection(value: Any, session_id: str | None = None) -> dict 
             dropped.append(key)
     extra = sorted(k for k in value if k not in _TURN_DETECTION_ALLOWED_KEYS)
     if dropped or extra:
-        logger.warning(
+        _warn_dropped_frame(
+            limiter,
             "Sanitized client turn_detection: dropped out-of-bounds/invalid sub-key(s) %s and "
             "disallowed sub-key(s) %s (session=%s)", dropped, extra, session_id)
     return sanitized
 
 
-def _filter_client_to_server(message: dict, session_id: str | None = None) -> dict | None:
+def _truncate_for_log(value: Any, max_len: int = 64) -> str:
+    """Render a browser-supplied value for a log line, truncated to at most
+    `max_len` characters of its `repr()` (PR #58 review round 2, "F2").
+
+    A forged frame can put an arbitrarily large value in a field that ends
+    up quoted in a WARNING line -- e.g. a multi-megabyte `type` string on a
+    disallowed-type probe, or a long `voice` string on a forged
+    `extension.set_voice` -- turning one bad frame into a multi-megabyte log
+    line. `repr()` is computed first (so the output still looks like the
+    `%r` callers previously used -- quoted and escaped) and only the
+    resulting text is truncated; `repr()` is never called on anything after
+    truncation, since that could reintroduce the same unbounded cost for a
+    sufficiently pathological `__repr__`.
+    """
+    text = repr(value)
+    if len(text) <= max_len:
+        return text
+    return f"{text[:max_len]}...(truncated, {len(text)} chars total)"
+
+
+class _ClientFrameDropWarningLimiter:
+    """Rate-limits the per-frame WARNING logs emitted while validating one
+    browser→upstream frame or extension message (PR #58 review round 2, "F2").
+
+    A misbehaving or actively probing browser client can otherwise flood the
+    backend's logs with one WARNING line per bad frame -- `input_audio_buffer
+    .append` alone is ~10 frames/sec, so a client that trips a validation
+    failure on every frame (accidentally or deliberately) produces the same
+    log volume as legitimate traffic. The signal that matters ("this
+    connection is sending something the allow-list rejects") is already
+    established by the first few lines; every one after that adds noise, not
+    new information.
+
+    Logs the first `LOG_LIMIT` per-frame warnings verbatim (each still names
+    its own specific reason), then one summary line, then stays silent for
+    the rest of this connection's lifetime. One instance is created per
+    connection (alongside `_SessionUpdateGuard`, at the same scope) and
+    threaded through `_filter_client_to_server` / `_sanitize_turn_detection`
+    / `_process_message_to_server` and the extension-message handlers.
+    Passing `None` (the default everywhere) disables rate limiting
+    entirely -- every existing unit test that calls `_filter_client_to_server`
+    directly, with no per-connection context, keeps logging every warning.
+    """
+
+    LOG_LIMIT = 5
+
+    def __init__(self) -> None:
+        self._count = 0
+
+    def warning(self, msg: str, *args: Any) -> None:
+        self._count += 1
+        if self._count <= self.LOG_LIMIT:
+            logger.warning(msg, *args)
+        elif self._count == self.LOG_LIMIT + 1:
+            logger.warning(
+                "Suppressing further per-frame drop/strip warnings on this connection "
+                "after the first %d (this connection is still being served normally)",
+                self.LOG_LIMIT)
+
+
+def _warn_dropped_frame(limiter: "_ClientFrameDropWarningLimiter | None", msg: str, *args: Any) -> None:
+    """Log a per-frame validation WARNING, rate-limited if `limiter` is given."""
+    if limiter is None:
+        logger.warning(msg, *args)
+    else:
+        limiter.warning(msg, *args)
+
+
+def _filter_client_to_server(
+        message: dict, session_id: str | None = None,
+        limiter: "_ClientFrameDropWarningLimiter | None" = None) -> dict | None:
     """Allow-list and rebuild a browser→upstream event before
     `_process_message_to_server` forwards it (swigerb/SonicAIDriveThru#31,
     hardened per PR #49 review round 2).
@@ -423,38 +496,44 @@ def _filter_client_to_server(message: dict, session_id: str | None = None) -> di
     allowed = msg_type in _CLIENT_ALLOWED_TYPES or (
         msg_type in _CLIENT_TEST_ONLY_TYPES and conformance_hooks.hooks_enabled_now())
     if not allowed:
-        logger.warning("Dropped disallowed client→server event type %r (session=%s)", msg_type, session_id)
+        _warn_dropped_frame(
+            limiter, "Dropped disallowed client→server event type %s (session=%s)",
+            _truncate_for_log(msg_type), session_id)
         return None
 
     allowed_keys = _CLIENT_TOP_LEVEL_KEYS[msg_type]
     dropped_keys = sorted(k for k in message if k not in allowed_keys)
     if dropped_keys:
-        logger.warning(
-            "Stripped disallowed top-level key(s) %s from client %s (session=%s)",
+        _warn_dropped_frame(
+            limiter, "Stripped disallowed top-level key(s) %s from client %s (session=%s)",
             dropped_keys, msg_type, session_id)
 
     filtered = {k: v for k, v in message.items() if k in allowed_keys}
 
     if "audio" in filtered and not (
             isinstance(filtered["audio"], str) and _CLIENT_BASE64_RE.fullmatch(filtered["audio"])):
-        logger.warning(
+        _warn_dropped_frame(
+            limiter,
             "Dropped input_audio_buffer.append with a non-base64-alphabet audio value (session=%s)", session_id)
         return None
 
     if "event_id" in filtered and not (
             isinstance(filtered["event_id"], str) and _CLIENT_EVENT_ID_RE.fullmatch(filtered["event_id"])):
-        logger.warning("Stripped an invalid client event_id (session=%s)", session_id)
+        _warn_dropped_frame(limiter, "Stripped an invalid client event_id (session=%s)", session_id)
         del filtered["event_id"]
 
     if "response_id" in filtered and not (
             isinstance(filtered["response_id"], str) and _CLIENT_EVENT_ID_RE.fullmatch(filtered["response_id"])):
-        logger.warning("Dropped response.cancel with an invalid response_id (session=%s)", session_id)
+        _warn_dropped_frame(
+            limiter, "Dropped response.cancel with an invalid response_id (session=%s)", session_id)
         return None
 
     return filtered
 
 
-def _dump_client_to_server(payload: dict, session_id: str | None = None) -> str | None:
+def _dump_client_to_server(
+        payload: dict, session_id: str | None = None,
+        limiter: "_ClientFrameDropWarningLimiter | None" = None) -> str | None:
     """Serialise an already-filtered client→server payload, or return `None`
     if it can't be serialised safely (PR #49 review round 5, "S3").
 
@@ -473,7 +552,8 @@ def _dump_client_to_server(payload: dict, session_id: str | None = None) -> str 
     try:
         return json.dumps(payload, allow_nan=False)
     except ValueError:
-        logger.warning(
+        _warn_dropped_frame(
+            limiter,
             "Dropped client→server frame that failed to re-serialise (NaN/Infinity) (session=%s)", session_id)
         return None
 
@@ -1567,7 +1647,7 @@ class RTMiddleTier:
 
         return updated_message
 
-    async def _process_message_to_server(self, msg: str, ws: web.WebSocketResponse, verbose: bool = False, voice_locked: bool = False, guard: "_SessionUpdateGuard | None" = None, voice: str | None = _VOICE_UNSET) -> "tuple[str | None, str | None]":
+    async def _process_message_to_server(self, msg: str, ws: web.WebSocketResponse, verbose: bool = False, voice_locked: bool = False, guard: "_SessionUpdateGuard | None" = None, voice: str | None = _VOICE_UNSET, limiter: "_ClientFrameDropWarningLimiter | None" = None) -> "tuple[str | None, str | None]":
         """Validate and forward one browser→upstream frame, or drop it.
 
         Returns `(forwarded, sent_type)`: `forwarded` is the exact string to
@@ -1582,6 +1662,10 @@ class RTMiddleTier:
         re-`json.loads`-ing `forwarded` themselves (PR #49 review round 5,
         "F4"). Callers must not assume `forwarded` `is` (identical object to)
         `msg.data` -- see "M2" below.
+
+        `limiter`, if given, rate-limits this call's own per-frame drop/strip
+        WARNING logs (PR #58 review round 2, "F2") -- see
+        `_ClientFrameDropWarningLimiter`.
         """
         data = msg.data
 
@@ -1602,28 +1686,28 @@ class RTMiddleTier:
         try:
             message = json.loads(data)
         except (json.JSONDecodeError, ValueError):
-            logger.warning("Dropped unparseable client→server frame (session=%s)", session_id)
+            _warn_dropped_frame(limiter, "Dropped unparseable client→server frame (session=%s)", session_id)
             return None, None
         if not isinstance(message, dict):
-            logger.warning(
-                "Dropped non-object client→server frame of type %s (session=%s)",
+            _warn_dropped_frame(
+                limiter, "Dropped non-object client→server frame of type %s (session=%s)",
                 type(message).__name__, session_id)
             return None, None
         if not isinstance(message.get("type"), str):
             # Also covers `{"type": ["x"]}`: an unhashable `type` would raise
             # TypeError on _filter_client_to_server's frozenset membership
             # test below if it weren't caught here first.
-            logger.warning(
-                "Dropped client→server frame with a non-string/missing type (session=%s)", session_id)
+            _warn_dropped_frame(
+                limiter, "Dropped client→server frame with a non-string/missing type (session=%s)", session_id)
             return None, None
 
-        filtered = _filter_client_to_server(message, session_id=session_id)
+        filtered = _filter_client_to_server(message, session_id=session_id, limiter=limiter)
         if filtered is None:
             return None, None
         msg_type = filtered["type"]
         # M2: always rebuilt from the allow-listed dict -- never the browser's
         # original bytes/object -- so no extra top-level key can survive.
-        updated_message = _dump_client_to_server(filtered, session_id)
+        updated_message = _dump_client_to_server(filtered, session_id, limiter=limiter)
         if updated_message is None:
             return None, None
         _vlog(verbose, "─── [Client → Server] %s ───", msg_type)
@@ -1631,16 +1715,17 @@ class RTMiddleTier:
         if msg_type == "session.update":
             client_session = filtered.get("session")
             if not isinstance(client_session, dict):
-                logger.warning(
-                    "Dropped session.update with a missing/invalid session object (session=%s)", session_id)
+                _warn_dropped_frame(
+                    limiter, "Dropped session.update with a missing/invalid session object (session=%s)", session_id)
                 return None, None
             # M3: keep only the session keys the frontend actually sends;
             # everything server-owned is applied fresh by _build_session below.
             session_in = {k: v for k, v in client_session.items() if k in _CLIENT_SESSION_KEYS}
             if "turn_detection" in client_session:
-                sanitized_td = _sanitize_turn_detection(client_session["turn_detection"], session_id=session_id)
+                sanitized_td = _sanitize_turn_detection(client_session["turn_detection"], session_id=session_id, limiter=limiter)
                 if sanitized_td is None:
-                    logger.warning(
+                    _warn_dropped_frame(
+                        limiter,
                         "Rejected browser turn_detection (missing/invalid type=server_vad) — falling back "
                         "to the server's own default (session=%s)", session_id)
                     sanitized_td = copy.deepcopy(_BOOTSTRAP_CLIENT_SESSION["turn_detection"])
@@ -1715,6 +1800,11 @@ class RTMiddleTier:
                 assistant_audio_seen = False
                 session_configured = asyncio.Event()
                 guard = _SessionUpdateGuard()
+                # F2: one rate-limiter per connection, shared across the
+                # client→server validation path and the extension-message
+                # handlers below (both log per-frame WARNINGs a probing/
+                # misbehaving client could otherwise flood).
+                drop_limiter = _ClientFrameDropWarningLimiter()
                 recovery = RateLimitRecovery(self.rate_limit_settings, target_ws.send_str, ws.send_json,
                                              sleep=self._rate_limit_sleep, session_id=session_id)
 
@@ -1959,7 +2049,8 @@ class RTMiddleTier:
                                             # single connection's call to make in production
                                             # -- drop silently (from the guest's perspective)
                                             # and just log a WARNING server-side.
-                                            logger.warning(
+                                            _warn_dropped_frame(
+                                                drop_limiter,
                                                 "Dropped extension.set_verbose_logging from session %s "
                                                 "(client log control is disabled in this deployment)",
                                                 session_id)
@@ -1994,7 +2085,8 @@ class RTMiddleTier:
                                             # the disk and writing guest data to disk, so this
                                             # must never be a single connection's call in
                                             # production.
-                                            logger.warning(
+                                            _warn_dropped_frame(
+                                                drop_limiter,
                                                 "Dropped extension.set_log_to_file from session %s "
                                                 "(client log control is disabled in this deployment)",
                                                 session_id)
@@ -2036,9 +2128,10 @@ class RTMiddleTier:
                                         # upstream and not adopted anywhere.
                                         new_voice = _sanitize_voice(ext_msg.get("voice"), self.allowed_voices)
                                         if new_voice is None:
-                                            logger.warning(
-                                                "Dropped extension.set_voice with an unknown/invalid voice %r (session=%s)",
-                                                ext_msg.get("voice"), session_id)
+                                            _warn_dropped_frame(
+                                                drop_limiter,
+                                                "Dropped extension.set_voice with an unknown/invalid voice %s (session=%s)",
+                                                _truncate_for_log(ext_msg.get("voice")), session_id)
                                         else:
                                             # #43 (PR #49 review round 6, "S1"): persist the
                                             # pick on THIS session (self._sessions), never on
@@ -2070,7 +2163,7 @@ class RTMiddleTier:
                                 if (verbose or _VERBOSE_GLOBAL) and audio_frame_count % 50 == 0:
                                     _vlog(verbose, "─── [Client → Server] Audio frame #%d ───", audio_frame_count)
                             # Forward client message to OpenAI.
-                            new_msg, sent_type = await self._process_message_to_server(msg, ws, verbose, voice_locked=assistant_audio_seen, guard=guard, voice=voice)
+                            new_msg, sent_type = await self._process_message_to_server(msg, ws, verbose, voice_locked=assistant_audio_seen, guard=guard, voice=voice, limiter=drop_limiter)
                             # PR #49 review round 2, "F1": idle reset, nudge
                             # cancel and the greeting trigger used to be keyed
                             # on raw substring checks against msg.data,

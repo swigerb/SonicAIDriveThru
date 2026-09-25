@@ -1502,8 +1502,13 @@ cooldown is finally forwarded.
 
 Wired in `rtmt.py`'s `from_server_to_client` dispatch on a new `MARKER_RESPONSE_DONE` (`'"response.done"'`)
 raw-substring check, alongside the existing audio/speech markers (same substring-based dispatch
-style as the rest of that loop; the fragility of substring dispatch itself is tracked separately as
-#53's follow-up "F2", not addressed here).
+style as the rest of that loop; the fragility of substring dispatch itself was flagged as PR #49
+review round 6's "F2" and left as an explicit follow-up ("Leave F2 (server→client regex) for a
+follow-up issue"). That follow-up has not been filed as its own tracked issue — #53 turned out to
+be a different, unrelated finding (gating `extension.set_log_to_file`/`extension.set_verbose_logging`
+behind server config, now fixed; see "Client-controlled server logging must be gated off in
+production" below) — so the server→client substring-dispatch fragility remains outstanding and
+un-numbered, not addressed here.
 
 `GreetingWithoutAudioUnmutesTests` is the direct, unassisted regression proof: it scripts the
 greeting with a bare `DoneEvent()` (no `AudioDeltaEvent` at all, immediate completion, no `Pace`),
@@ -1710,6 +1715,45 @@ happy path (a spawned task that never raises, or a suppressor that's never calle
 robustness property the "Backend logging is not a wire contract" reasoning above applies to. Both are
 therefore Python-unit-only contracts; a C# port only needs to reproduce the same *outcome*
 (no unretrieved-exception noise; no post-close resource use), not this specific mechanism.
+
+### Truncating and rate-limiting browser-triggered log volume (PR #58 review round 2, F2)
+
+Every per-frame validation WARNING logged while processing a browser→upstream frame (or an
+`extension.*` message) can, in the worst case, be triggered by every single frame on a connection —
+`input_audio_buffer.append` alone is ~10 frames/sec, so a client that (accidentally, or as an active
+probe) trips a validation failure on every frame can produce the same log volume as a busy connection
+serving normally. Two independent, narrowly-scoped fixes:
+
+1. **Value truncation (`_truncate_for_log`).** Any browser-supplied value quoted into a WARNING line
+   (previously via Python's `%r`) is rendered through `_truncate_for_log(value, max_len=64)` first:
+   `repr()` is computed, then truncated to at most 64 characters with a `"...(truncated, N chars
+   total)"` marker if longer. This closes the two spots Rick called out specifically —
+   `_filter_client_to_server`'s "Dropped disallowed client→server event type" line (the forged `type`
+   value) and the `extension.set_voice` handler's "unknown/invalid voice" line (the forged `voice`
+   value) — plus every other per-frame WARNING that echoes a browser-supplied value verbatim, so a
+   single forged multi-megabyte `type` or `voice` string can't turn one bad frame into a
+   multi-megabyte log line. `repr()` is always computed on the *original* value and only the
+   resulting text is truncated — truncating first and reprint-ing after would let a pathological
+   `__repr__` reintroduce the same unbounded cost.
+2. **Per-connection rate limiting (`_ClientFrameDropWarningLimiter`).** One instance is created per
+   connection (alongside `_SessionUpdateGuard`, same scope, same lifetime) and threaded through
+   `_filter_client_to_server`, `_sanitize_turn_detection`, `_dump_client_to_server`,
+   `_process_message_to_server`'s own drop paths, and the `extension.set_verbose_logging` /
+   `extension.set_log_to_file` / `extension.set_voice` handlers. It logs the first 5 per-frame
+   WARNINGs on a connection verbatim (each still names its own specific reason), then one summary
+   line ("Suppressing further per-frame drop/strip warnings on this connection after the first
+   5..."), then stays silent for the rest of that connection's lifetime — the underlying signal
+   ("this connection is sending something the allow-list rejects") is already established by the
+   first few lines. Passing `limiter=None` (the default everywhere, including every existing unit
+   test that calls `_filter_client_to_server` directly with no per-connection context) disables rate
+   limiting entirely, so those tests keep asserting on every individual warning unaffected.
+
+Both are Python-unit-only contracts (`TruncateForLogTests`, `ClientFrameDropWarningLimiterTests` in
+`test_rtmt.py`) with no wire-level conformance scenario: neither changes what's forwarded to the
+upstream or the browser, only how much (and how large) the backend's own log output is — the same
+"internal robustness, not a wire contract" reasoning as the "Backend logging is not a wire contract"
+note above. A C# port should reproduce the same outcome (bounded per-value log length; bounded
+per-connection per-frame-drop log volume), not this exact mechanism.
 
 ## Client-controlled server logging must be gated off in production (#53)
 

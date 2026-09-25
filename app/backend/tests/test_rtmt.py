@@ -48,6 +48,7 @@ from rtmt import (
     ToolResult,
     ToolResultDirection,
     _client_log_control_allowed,
+    _ClientFrameDropWarningLimiter,
     _drop_from_client,
     _dump_client_to_server,
     _filter_client_to_server,
@@ -58,6 +59,7 @@ from rtmt import (
     _spawn,
     _to_ga_session,
     _ToolFailureTracker,
+    _truncate_for_log,
     create_hmac_token,
     validate_hmac_token,
 )
@@ -864,6 +866,65 @@ class SpawnTests(unittest.TestCase):
                 await task
             self.assertNotIn(task, _BACKGROUND_TASKS)
         asyncio.run(_run())
+
+
+class TruncateForLogTests(unittest.TestCase):
+    """PR #58 review round 2 ("F2"): browser-supplied values logged at
+    WARNING must be truncated so a forged, arbitrarily large value can't
+    turn one bad frame into a multi-megabyte log line.
+    """
+
+    def test_short_string_is_reprd_unchanged(self):
+        self.assertEqual(_truncate_for_log("hello"), "'hello'")
+
+    def test_long_string_is_truncated_with_marker(self):
+        long_value = "x" * 1000
+        rendered = _truncate_for_log(long_value, max_len=64)
+        self.assertLessEqual(len(rendered), 64 + len("...(truncated, 1000 chars total)"))
+        self.assertTrue(rendered.startswith("'xxxx"))
+        self.assertIn("truncated, 1002 chars total", rendered)  # 1000 chars + 2 quote chars from repr()
+
+    def test_non_string_value_is_reprd_then_truncated(self):
+        rendered = _truncate_for_log({"a": "b" * 1000})
+        self.assertIn("truncated", rendered)
+
+    def test_exactly_at_the_limit_is_not_marked_truncated(self):
+        # repr() of a 62-char string is 64 chars (two quote chars) -- exactly at max_len.
+        value = "y" * 62
+        rendered = _truncate_for_log(value, max_len=64)
+        self.assertNotIn("truncated", rendered)
+        self.assertEqual(rendered, repr(value))
+
+
+class ClientFrameDropWarningLimiterTests(unittest.TestCase):
+    """PR #58 review round 2 ("F2"): a per-connection rate limiter for the
+    per-frame drop/strip WARNING logs, so a probing/misbehaving client can't
+    flood the backend's logs with one line per bad frame.
+    """
+
+    def test_logs_the_first_five_individually_then_one_summary_then_silence(self):
+        limiter = _ClientFrameDropWarningLimiter()
+        with self.assertLogs("sonic-drive-in", level="WARNING") as log:
+            for i in range(10):
+                limiter.warning("drop #%d", i)
+        # 5 individual + 1 summary = 6 WARNING lines, not 10.
+        self.assertEqual(len(log.output), 6)
+        for i in range(5):
+            self.assertIn(f"drop #{i}", log.output[i])
+        self.assertIn("Suppressing further", log.output[5])
+        # An 11th call must not log anything further.
+        with self.assertRaises(AssertionError):
+            with self.assertLogs("sonic-drive-in", level="WARNING"):
+                limiter.warning("drop #10")
+
+    def test_none_limiter_disables_rate_limiting_entirely(self):
+        # _warn_dropped_frame(None, ...) must log every single call -- this
+        # is what every existing unit test calling _filter_client_to_server
+        # directly (with no per-connection context) relies on.
+        with self.assertLogs("sonic-drive-in", level="WARNING") as log:
+            for i in range(10):
+                _filter_client_to_server({"type": f"bogus.type.{i}"})
+        self.assertEqual(len(log.output), 10)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
