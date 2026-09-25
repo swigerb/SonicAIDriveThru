@@ -35,6 +35,18 @@ public static class WebSocketJson
     /// to still read null on Linux immediately after this call returns (CI run 35936172326). Callers
     /// that need to assert on the close status/description should capture it from here, not from the
     /// socket, to avoid that platform-dependent race.
+    ///
+    /// #28 flake hunt (post-#54-merge, run 16/25 on <c>ResumeRehydrationAndNudgeTests</c>): a
+    /// receive racing an abrupt <see cref="WebSocket.Abort"/> on the *same* socket -- e.g. a caller
+    /// simulating a client vanishing mid-flight -- can surface as any of three different .NET
+    /// exception shapes depending on exactly where the runtime was in servicing the in-flight
+    /// receive when the abort landed: <see cref="OperationCanceledException"/> (the receive's own
+    /// cancellation observing the abort), <see cref="WebSocketException"/> (the abort having already
+    /// flipped the socket to a faulted state the receive then observes), or -- the gap this fix
+    /// closes -- <see cref="ObjectDisposedException"/> (the abort's internal teardown having already
+    /// disposed the underlying connected socket by the time the receive tries to touch it). All
+    /// three are the same "the peer/abort raced us out from under this receive" outcome from a
+    /// caller's perspective, so all three are treated identically here.
     /// </summary>
     public static async Task<WebSocketMessageOrClose> ReceiveJsonOrCloseAsync(
         WebSocket socket, CancellationToken cancellationToken = default)
@@ -50,6 +62,12 @@ public static class WebSocketJson
             }
             catch (WebSocketException)
             {
+                return WebSocketMessageOrClose.Dropped;
+            }
+            catch (ObjectDisposedException)
+            {
+                // See the doc comment above -- the third of the three abort-race shapes. Same
+                // "dropped" outcome as the WebSocketException case just above.
                 return WebSocketMessageOrClose.Dropped;
             }
 
