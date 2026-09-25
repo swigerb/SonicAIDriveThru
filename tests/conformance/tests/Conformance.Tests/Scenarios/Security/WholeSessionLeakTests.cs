@@ -256,7 +256,13 @@ public sealed class WholeSessionLeakTests(ResumeMarginConformanceFixture fixture
             }
             catch (OperationCanceledException)
             {
-                // Expected once the wait below cancels the keepalive loop.
+                // Expected once the wait below cancels the keepalive loop. This also already
+                // covers the PR #52 CI follow-up round 2 finding (see RealtimeBrowserClient.
+                // CloseAsync's doc comment): a peer reset during a send can surface as
+                // OperationCanceledException rather than WebSocketException. keepAliveCts is
+                // this loop's own dedicated token, never the test's outer cancellation token, so
+                // swallowing any OperationCanceledException here can't mask a genuine caller
+                // cancel -- either source means this loop has nothing more useful to do.
             }
             catch (WebSocketException)
             {

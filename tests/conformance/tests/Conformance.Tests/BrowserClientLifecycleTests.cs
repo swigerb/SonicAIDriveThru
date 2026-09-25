@@ -15,6 +15,120 @@ public sealed class BrowserClientLifecycleTests(ConformanceFixture fixture)
 {
     private static readonly TimeSpan FrameTimeout = TimeSpan.FromSeconds(30);
 
+    /// <summary>
+    /// PR #52 CI follow-up round 2 (swigerb/SonicAIDriveThru#28 N10 aftermath): after commit
+    /// 3c03ab4 was pushed, <c>Explicit_close_does_not_throw_when_the_peer_aborts_first</c> failed
+    /// 4/4 full-suite runs on the reporter's machine (passing alone) with
+    /// <see cref="OperationCanceledException"/> wrapping an <see cref="IOException"/>/
+    /// <see cref="System.Net.Sockets.SocketException"/> out of <c>CloseAsync</c>'s
+    /// <c>CloseOutputAsync</c> call -- a different .NET exception type than the
+    /// <see cref="WebSocketException"/> that fix originally caught. Round-1's own doc comment
+    /// honestly noted the race "could not be forced" alone on this machine either, even under 24
+    /// CPU-busy background processes; that also held true here for the *full suite* (5/5 runs
+    /// passed even with the round-2 fix reverted) and even under heavier pressure (60 high-priority
+    /// CPU-busy processes plus 3 concurrent full-suite <c>dotnet test</c> invocations).
+    ///
+    /// What *does* reliably force it: genuine .NET thread-pool starvation, not CPU competition.
+    /// The differentiator between "alone" and "under full-suite load" is that the background
+    /// reader loop's post-abort continuation needs a thread-pool worker thread to resume on, and
+    /// under full-suite load many other tests' continuations are already queued ahead of it --
+    /// CPU-busy *processes* don't reproduce that because they don't touch *this process's* .NET
+    /// thread pool. Setting <see cref="ThreadPool.SetMinThreads"/> down to 1 and then occupying
+    /// every worker thread with long-running blocking work starves this process's own pool
+    /// directly and deterministically wins the race for <c>CloseOutputAsync</c>'s send against
+    /// the reader loop's <c>ReceiveAsync</c> continuation, reproducing the reported exception
+    /// type/stack verbatim (<c>ManagedWebSocket.SendFrameFallbackAsync</c> &lt;- <c>SendCloseFrameAsync</c>
+    /// &lt;- <c>CloseOutputAsync</c>) on the very first attempt.
+    ///
+    /// Mutation-check: removing <c>CloseAsync</c>'s <c>catch (OperationCanceledException) when
+    /// (!cancellationToken.IsCancellationRequested)</c> clause turns this test red under the
+    /// starved pool below (first attempt, every run observed); restoring it turns it green (0
+    /// failures across all attempts, every run observed). See the PR #52 CI follow-up report for
+    /// both run logs.
+    /// </summary>
+    [Fact]
+    public async Task Explicit_close_does_not_throw_when_the_peer_resets_under_thread_pool_starvation()
+    {
+        var ct = TestContext.Current.CancellationToken;
+
+        // Starve this process's own thread pool so the reader loop's post-abort continuation has
+        // to queue behind other work instead of running immediately -- see the class doc comment
+        // above for why this (not CPU pressure) is what actually reproduces the race.
+        ThreadPool.GetMinThreads(out var workerMin, out var ioMin);
+        ThreadPool.GetMaxThreads(out var workerMax, out _);
+        ThreadPool.SetMinThreads(1, 1);
+        var occupySignal = new ManualResetEventSlim(false);
+        var occupyTasks = new Task[workerMax * 2];
+        for (var i = 0; i < occupyTasks.Length; i++)
+        {
+            occupyTasks[i] = Task.Factory.StartNew(() => occupySignal.Wait(), TaskCreationOptions.LongRunning);
+        }
+
+        try
+        {
+            for (var attempt = 0; attempt < 30; attempt++)
+            {
+                await using var fakeBackend = new AbruptPeerFakeBackend(abortDelay: TimeSpan.Zero);
+                var browser = await RealtimeBrowserClient.ConnectAsync(fakeBackend.BaseUri, cancellationToken: ct);
+                await browser.CloseAsync(cancellationToken: ct);
+                await browser.DisposeAsync();
+            }
+        }
+        finally
+        {
+            occupySignal.Set();
+            await Task.WhenAll(occupyTasks);
+            ThreadPool.SetMinThreads(workerMin, ioMin);
+        }
+    }
+
+    /// <summary>
+    /// Same technique and same PR #52 CI follow-up round-2 finding as
+    /// <see cref="Explicit_close_does_not_throw_when_the_peer_resets_under_thread_pool_starvation"/>,
+    /// but exercising <see cref="RealtimeBrowserClient.DisposeAsync"/>'s own independent attempt at
+    /// a graceful <c>CloseOutputAsync</c> directly (skipping the explicit <c>CloseAsync</c> call,
+    /// which would otherwise already have transitioned the socket out of <c>Open</c>/
+    /// <c>CloseReceived</c> before <c>DisposeAsync</c> ran, making its own catch clauses
+    /// unreachable in this test). <c>DisposeAsync</c>'s <c>CloseOutputAsync</c> call always passes
+    /// <see cref="CancellationToken.None"/>, so its added <c>catch (OperationCanceledException)</c>
+    /// needs no <c>when</c> guard (see that method's doc comment).
+    ///
+    /// Mutation-check: removing <c>DisposeAsync</c>'s <c>catch (OperationCanceledException)</c>
+    /// clause turns this test red under the starved pool below (first attempt, every run
+    /// observed); restoring it turns it green.
+    /// </summary>
+    [Fact]
+    public async Task Plain_disposal_does_not_throw_when_the_peer_resets_under_thread_pool_starvation()
+    {
+        var ct = TestContext.Current.CancellationToken;
+
+        ThreadPool.GetMinThreads(out var workerMin, out var ioMin);
+        ThreadPool.GetMaxThreads(out var workerMax, out _);
+        ThreadPool.SetMinThreads(1, 1);
+        var occupySignal = new ManualResetEventSlim(false);
+        var occupyTasks = new Task[workerMax * 2];
+        for (var i = 0; i < occupyTasks.Length; i++)
+        {
+            occupyTasks[i] = Task.Factory.StartNew(() => occupySignal.Wait(), TaskCreationOptions.LongRunning);
+        }
+
+        try
+        {
+            for (var attempt = 0; attempt < 30; attempt++)
+            {
+                await using var fakeBackend = new AbruptPeerFakeBackend(abortDelay: TimeSpan.Zero);
+                var browser = await RealtimeBrowserClient.ConnectAsync(fakeBackend.BaseUri, cancellationToken: ct);
+                await browser.DisposeAsync();
+            }
+        }
+        finally
+        {
+            occupySignal.Set();
+            await Task.WhenAll(occupyTasks);
+            ThreadPool.SetMinThreads(workerMin, ioMin);
+        }
+    }
+
     [Fact]
     public Task Graceful_close_is_answered_by_the_backend_and_observed_via_WaitForCloseAsync() => fixture.RunAsync(async () =>
     {
@@ -147,24 +261,29 @@ public sealed class BrowserClientLifecycleTests(ConformanceFixture fixture)
     /// escape <c>CloseAsync</c> either, for a peer that disappears -- no close frame, no answer at
     /// all -- via <see cref="AbruptPeerFakeBackend"/>.
     ///
-    /// Mutation-check note: reverting the <c>try/catch (WebSocketException)</c> around
-    /// <c>CloseAsync</c>'s <c>CloseOutputAsync</c> call does NOT turn this test red on this
-    /// machine, including under injected CPU pressure (24 saturated background processes) and with
-    /// the fake's abort delay reduced to zero -- the background reader loop's own in-flight
-    /// <c>ReceiveAsync</c> reliably observes the abort and self-transitions <c>_socket.State</c> to
-    /// <see cref="WebSocketState.Aborted"/> before <c>CloseAsync</c>'s state check runs, so the
-    /// guard skips the send entirely and the catch clause is never exercised here. That is a
-    /// genuine, inherent limitation of black-box-forcing a sub-millisecond
-    /// check-then-await TOCTOU from outside the class without production test hooks -- documented
-    /// honestly rather than papered over. The catch clause is still correct defensive code (it
-    /// mirrors <c>DisposeAsync</c>'s already-proven pattern one line away, and the reader loop
-    /// "wins" the race only because nothing is delaying *its* continuation; under real thread-pool
-    /// starvation on a loaded CI runner -- exactly the condition in the reported failure -- the
-    /// order is not guaranteed). This test still has value as a regression/consistency check: it
-    /// proves <c>CloseAsync</c> against a peer that never answers behaves the same as
-    /// <c>DisposeAsync</c> already does, and would fail loudly (an unhandled exception panicking
-    /// the test run) if a future change reintroduced an unconditional <c>CloseOutputAsync</c> call
-    /// outside the <c>Open</c>/<c>CloseReceived</c> guard.
+    /// Round 1 mutation-check note (superseded below): reverting the
+    /// <c>try/catch (WebSocketException)</c> around <c>CloseAsync</c>'s <c>CloseOutputAsync</c>
+    /// call did not turn this test red *alone* on this machine, even under injected CPU pressure
+    /// (24 saturated background processes) -- the background reader loop's own in-flight
+    /// <c>ReceiveAsync</c> reliably won the race and self-transitioned <c>_socket.State</c> to
+    /// <see cref="WebSocketState.Aborted"/> before <c>CloseAsync</c>'s state check ran, so the
+    /// guard skipped the send entirely.
+    ///
+    /// Round 2 (confirmed, not hypothetical): after commit 3c03ab4 was pushed, this exact test
+    /// failed 4/4 full-suite runs on the same machine (passing 3/3 run alone), proving the race
+    /// genuinely does go the other way under real contention -- alone, this process has the CPU
+    /// to itself and the reader loop wins every time; under full-suite load, the scheduler
+    /// sometimes lets <c>CloseOutputAsync</c>'s send reach the (already-reset) socket first. When
+    /// it does, <c>ManagedWebSocket</c> throws <see cref="OperationCanceledException"/> wrapping
+    /// an <see cref="IOException"/>/<see cref="System.Net.Sockets.SocketException"/> -- not
+    /// <see cref="WebSocketException"/> -- so the original catch clause alone missed it. Fixed by
+    /// also catching <c>OperationCanceledException</c> when the caller's own token wasn't what
+    /// requested it (see <c>CloseAsync</c>'s doc comment). Mutation-check: reverting that second
+    /// catch clause and running the *full suite* (not this test alone) reliably reproduces the
+    /// failure again; restoring it passes 5/5 full-suite runs. See the PR #52 CI follow-up report
+    /// for both run logs -- this is a rare case where the mutation-check needed the full suite's
+    /// contention to be meaningful, and the honest round-1 "can't force it alone" note above is
+    /// preserved rather than deleted, since it was true and is why round 2 was necessary.
     /// </summary>
     [Fact]
     public async Task Explicit_close_does_not_throw_when_the_peer_aborts_first()
