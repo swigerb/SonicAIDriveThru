@@ -29,6 +29,7 @@ from tools import (
     _format_size_human_readable,
     _is_extra_item,
     _search_cache,
+    _search_cfg,
     _SearchCache,
     get_order,
     reset_order,
@@ -146,6 +147,27 @@ class SearchErrorHandlingTests(unittest.TestCase):
         result = _run(search(client, "cfg", "id", "description", "embedding", False, {"query": "item"}))
         self.assertEqual(call_count, 2)
         self.assertIn("[1]", result.text)
+
+    def test_timeout_bounds_the_iteration_not_just_the_initial_call(self):
+        """PR #50 review (should-fix 4): ``azure-search-documents``' async ``SearchClient.search``
+        is lazy -- calling it does no HTTP I/O; the real request only happens once the returned
+        async-iterable is actually iterated (see the comment above ``_fetch_records`` in
+        tools.py). A mock client whose ``search()`` call returns instantly but whose iteration
+        sleeps past the configured timeout reproduces exactly that shape: if
+        ``asyncio.wait_for`` only wrapped the (instant) ``search()`` call, this would never time
+        out. With the fix wrapping the whole collect, it must."""
+        async def _slow_iteration_search(**kwargs):
+            async def _iter():
+                await asyncio.sleep(0.2)
+                yield {"id": "1", "name": "Cherry Limeade", "category": "Slushes", "sizes": "N/A"}
+            return _iter()  # the call itself returns immediately -- the delay is in iterating
+
+        client = AsyncMock()
+        client.search = _slow_iteration_search
+        with patch.dict(_search_cfg, {"timeout_seconds": 0.05}):
+            result = _run(search(client, "cfg", "id", "description", "embedding", False, {"query": "limeade"}))
+        self.assertEqual(result.destination, ToolResultDirection.TO_SERVER)
+        self.assertTrue("try that again" in result.text.lower() or "trouble" in result.text.lower())
 
 
 class SearchCacheTests(unittest.TestCase):

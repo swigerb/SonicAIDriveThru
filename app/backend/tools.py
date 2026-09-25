@@ -211,11 +211,20 @@ async def search(
     # fetch has to live INSIDE the try, not just the initial `search_client.search(...)` call --
     # otherwise a field-mismatch 400 raised during iteration propagates unhandled and tears down
     # the whole realtime connection instead of triggering the minimal-select retry.
+    #
+    # PR #50 review (should-fix 4): `asyncio.wait_for` must wrap the ENTIRE collect -- the
+    # `await search_client.search(...)` call AND the `async for` iteration that triggers the real
+    # HTTP request -- not just the (non-blocking, no-HTTP-yet) initial call. Wrapping only the
+    # `await search_client.search(...)` bounded nothing useful, since that call does no network
+    # I/O per the comment above; the iteration below it (where the request actually happens) ran
+    # completely outside the timeout, so a slow/hanging search service could block indefinitely
+    # despite `timeout_seconds` being configured.
     async def _fetch_records(**search_kwargs) -> list[dict]:
-        search_results = await asyncio.wait_for(
-            search_client.search(**search_kwargs), timeout=_search_cfg.get("timeout_seconds", 10)
-        )
-        return [record async for record in search_results]
+        async def _search_and_collect() -> list[dict]:
+            search_results = await search_client.search(**search_kwargs)
+            return [record async for record in search_results]
+
+        return await asyncio.wait_for(_search_and_collect(), timeout=_search_cfg.get("timeout_seconds", 10))
 
     try:
         records = await _fetch_records(
