@@ -283,23 +283,32 @@ public sealed class BrowserClientLifecycleTests(ConformanceFixture fixture)
 
     /// <summary>
     /// PR #52 CI follow-up (swigerb/SonicAIDriveThru#28 N10 aftermath, CI runs 36085091969):
-    /// deterministic proof of the exact failure -- and exact fix -- for the two original resume
-    /// scenarios' keepalive loops (<see cref="ResumeRehydrationClientVisibilityTests"/>,
+    /// deterministic proof of the exact failure -- and exact fix -- for the resume scenarios'
+    /// keepalive loops (<see cref="ResumeRehydrationClientVisibilityTests"/>,
     /// <see cref="WholeSessionLeakTests"/>). <see cref="AbruptPeerFakeBackend"/> reliably confirms
     /// (see this test's own mutation-check below) that a send on a socket that has settled into
     /// <see cref="WebSocketState.Aborted"/> throws exactly a <see cref="WebSocketException"/> ("The
     /// WebSocket is in an invalid state ('Aborted') for this operation") -- the same exception type
     /// (if not the identical message) as CI's "closed without completing the close handshake",
-    /// and the type both scenarios' keepalive loops now also catch alongside
+    /// and the type <see cref="Conformance.Harness.KeepAlive.RunAsync"/> now also catches alongside
     /// <see cref="OperationCanceledException"/>. This reproduces that class of failure without
     /// needing the real Python backend's idle-sweep timing to cooperate (which, per
     /// <see cref="ResumeMarginRegressionTests"/>'s own doc comment, could not be forced reliably
     /// via wall-clock delay on this machine for a *send* specifically, only for the *resume
     /// rejection* Fix A addresses).
     ///
-    /// Mutation-check: removing the <c>catch (WebSocketException)</c> below turns this test red
-    /// with exactly the exception type above; restoring it (mirroring the two scenario files' own
-    /// keepalive fix) turns it green. See the PR #52 CI follow-up report for the run log.
+    /// Round 5 (Rick's PR #52 review, S2): this test, <see cref="ResumeRehydrationClientVisibilityTests"/>,
+    /// and <see cref="WholeSessionLeakTests"/> previously each had their own hand-copied keepalive
+    /// loop with its own <c>catch</c> clauses -- so this self-test's own copy passing proved
+    /// nothing about whether either scenario's *separate* copy still had the fix applied. Now all
+    /// three call the same <see cref="Conformance.Harness.KeepAlive.RunAsync"/> helper, so there is
+    /// exactly one place the fix can be removed from, and removing it fails every caller.
+    ///
+    /// Mutation-check: removing <c>KeepAlive.RunAsync</c>'s <c>catch (WebSocketException)</c> turns
+    /// this test red with exactly the exception type above, AND turns
+    /// <see cref="ResumeRehydrationClientVisibilityTests"/>/<see cref="WholeSessionLeakTests"/> red
+    /// too (their own idle-sweep-vs-nudge race depends on the same swallowed exception); restoring
+    /// it turns all three green again. See the PR #52 CI follow-up report for the run log.
     /// </summary>
     [Fact]
     public async Task Keepalive_style_loop_survives_the_peer_aborting_mid_loop()
@@ -308,21 +317,12 @@ public sealed class BrowserClientLifecycleTests(ConformanceFixture fixture)
         await using var fakeBackend = new AbruptPeerFakeBackend(abortDelay: TimeSpan.FromMilliseconds(150));
         var browser = await RealtimeBrowserClient.ConnectAsync(fakeBackend.BaseUri, cancellationToken: ct);
 
-        // Mirrors the two scenario files' keepalive loops: send on a fixed cadence for long enough
-        // to run both before and after the fake's abort lands partway through.
-        for (var i = 0; i < 10; i++)
-        {
-            try
-            {
-                await browser.SendExtensionSetVerboseLoggingAsync(false, ct);
-            }
-            catch (WebSocketException)
-            {
-                // The fix: see the class doc comment's mutation-check note.
-            }
-
-            await Task.Delay(TimeSpan.FromMilliseconds(50), ct);
-        }
+        // Mirrors the scenario files' own use of the shared helper: send on a fixed cadence for
+        // long enough to run both before and after the fake's abort lands partway through (10
+        // iterations at the old inline loop's 50ms cadence = ~500ms).
+        var keepAlive = KeepAlive.RunAsync(browser, TimeSpan.FromMilliseconds(50), ct);
+        await Task.Delay(TimeSpan.FromMilliseconds(500), ct);
+        await keepAlive.StopAsync();
 
         await browser.DisposeAsync();
     }

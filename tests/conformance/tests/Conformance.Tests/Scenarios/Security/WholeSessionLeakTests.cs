@@ -242,38 +242,11 @@ public sealed class WholeSessionLeakTests(ResumeMarginConformanceFixture fixture
         // ── Wait for the silence nudge (ResumeMargin's ~1s nudge timer) with a keepalive so the
         // idle sweep (which now has real margin, but the keepalive still resets it defensively)
         // doesn't close the session first -- same race and same fix as
-        // ResumeRehydrationClientVisibilityTests (PR #30 review "S3"). ──
-        using var keepAliveCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        var keepAliveTask = Task.Run(async () =>
-        {
-            try
-            {
-                while (!keepAliveCts.IsCancellationRequested)
-                {
-                    await second.SendExtensionSetVerboseLoggingAsync(false, keepAliveCts.Token);
-                    await Task.Delay(TimeSpan.FromMilliseconds(200), keepAliveCts.Token);
-                }
-            }
-            catch (OperationCanceledException)
-            {
-                // Expected once the wait below cancels the keepalive loop. This also already
-                // covers the PR #52 CI follow-up round 2 finding (see RealtimeBrowserClient.
-                // CloseAsync's doc comment): a peer reset during a send can surface as
-                // OperationCanceledException rather than WebSocketException. keepAliveCts is
-                // this loop's own dedicated token, never the test's outer cancellation token, so
-                // swallowing any OperationCanceledException here can't mask a genuine caller
-                // cancel -- either source means this loop has nothing more useful to do.
-            }
-            catch (WebSocketException)
-            {
-                // PR #52 CI follow-up (swigerb/SonicAIDriveThru#28 N10 aftermath): same race and
-                // same fix as ResumeRehydrationClientVisibilityTests -- this loop's only job is
-                // best-effort activity to stop the idle sweep beating the nudge, so a socket
-                // that's already gone (the backend closed/aborted it) has nothing left to keep
-                // alive. Swallowing it here lets the real assertions below report what actually
-                // happened instead of this unrelated send exception pre-empting them.
-            }
-        }, CancellationToken.None);
+        // ResumeRehydrationClientVisibilityTests (PR #30 review "S3"). Extracted into the shared
+        // KeepAlive helper (PR #52 CI follow-up round 5, Rick's review S2) so this scenario and
+        // ResumeRehydrationClientVisibilityTests can't silently diverge from what the self-test in
+        // BrowserClientLifecycleTests actually exercises. ──
+        var keepAlive = KeepAlive.RunAsync(second, TimeSpan.FromMilliseconds(200), ct);
 
         var nudgeItem = await secondConnection.ReceivedFrames.WaitForAsync(
             f => f.Type == "conversation.item.create" &&
@@ -286,8 +259,7 @@ public sealed class WholeSessionLeakTests(ResumeMarginConformanceFixture fixture
         var nudgeResponseCreated = await second.ReceivedFrames.WaitForAsync(
             f => f.Type == "response.created", FrameTimeout, ct);
 
-        keepAliveCts.Cancel();
-        await keepAliveTask;
+        await keepAlive.StopAsync();
 
         Assert.True(nudgeItem is not null, "Expected the silence nudge item to reach the fake upstream.");
         Assert.True(nudgeResponseCreated is not null,
