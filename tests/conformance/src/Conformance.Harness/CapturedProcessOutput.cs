@@ -161,6 +161,144 @@ public sealed class CapturedProcessOutput
         }
     }
 
+    /// <summary>
+    /// Same incident-counting contract and state machine as <see cref="CountUnhandledErrors()"/>
+    /// (deliberately kept as an independent, self-contained implementation rather than a shared
+    /// helper, so that method's own diff stays untouched -- one ERROR:/Traceback pairing is one
+    /// incident -- but an incident whose full captured text (every content line from its header
+    /// through its last frame/summary line, in order) satisfies <paramref name="isBenignIncident"/>
+    /// is skipped entirely instead of counted. Added for issue #10/#26's Browser scenarios -- see
+    /// <see cref="Conformance.Tests.Scenarios.Browser.BrowserConformanceFixture"/>'s own doc
+    /// comment for the one signature it actually filters and why. This overload never changes what
+    /// <see cref="CountUnhandledErrors()"/> itself returns for any existing caller, and re-scans
+    /// <see cref="_lines"/> directly rather than sharing #28 N13's incremental <see cref="ScanLine"/>
+    /// state -- unlike that state, this overload's result is allowed to miss incidents that have
+    /// already scrolled out of the bounded ring buffer, because it's only ever used for a single
+    /// end-of-run assertion, not the monotonic-delta contract <see cref="CountUnhandledErrors()"/>
+    /// has to uphold.
+    /// </summary>
+    public int CountUnhandledErrors(Func<IReadOnlyList<string>, bool> isBenignIncident)
+    {
+        var count = 0;
+        var state = ErrorScanState.Idle;
+        var incident = new List<string>();
+
+        void FinishIncident()
+        {
+            if (incident.Count > 0 && !isBenignIncident(incident))
+            {
+                count++;
+            }
+            incident.Clear();
+        }
+
+        foreach (var line in _lines)
+        {
+            if (!TryGetStderrContent(line, out var content))
+            {
+                FinishIncident();
+                state = ErrorScanState.Idle;
+                continue;
+            }
+
+            var isIndented = content.Length > 0 && char.IsWhiteSpace(content[0]);
+            var isTracebackHeader = content is "Traceback (most recent call last):";
+            var isErrorHeader = content.StartsWith("ERROR:", StringComparison.Ordinal);
+
+            switch (state)
+            {
+                case ErrorScanState.Idle:
+                    if (isErrorHeader)
+                    {
+                        incident.Add(content);
+                        state = ErrorScanState.AfterErrorHeader;
+                    }
+                    else if (isTracebackHeader)
+                    {
+                        incident.Add(content);
+                        state = ErrorScanState.InTracebackBody;
+                    }
+                    break;
+
+                case ErrorScanState.AfterErrorHeader:
+                    if (isTracebackHeader || isIndented)
+                    {
+                        // Same incident: the ERROR: line was logger.exception(...)'s message, this
+                        // is its attached traceback -- don't count it again.
+                        incident.Add(content);
+                        state = ErrorScanState.InTracebackBody;
+                    }
+                    else if (isErrorHeader)
+                    {
+                        FinishIncident();
+                        incident.Add(content);
+                        state = ErrorScanState.AfterErrorHeader;
+                    }
+                    else
+                    {
+                        // The ERROR: line had no attached traceback -- already counted, done.
+                        FinishIncident();
+                        state = ErrorScanState.Idle;
+                    }
+                    break;
+
+                case ErrorScanState.InTracebackBody:
+                    if (isIndented)
+                    {
+                        // A `File "...", line N, in ...` / source-line frame -- still this incident.
+                        incident.Add(content);
+                        break;
+                    }
+                    if (isErrorHeader)
+                    {
+                        FinishIncident();
+                        incident.Add(content);
+                        state = ErrorScanState.AfterErrorHeader;
+                    }
+                    else if (isTracebackHeader)
+                    {
+                        FinishIncident();
+                        incident.Add(content);
+                        state = ErrorScanState.InTracebackBody;
+                    }
+                    else
+                    {
+                        // The un-indented "ExceptionType: message" summary line that always
+                        // terminates a Python traceback -- still this incident, now finished.
+                        incident.Add(content);
+                        FinishIncident();
+                        state = ErrorScanState.Idle;
+                    }
+                    break;
+            }
+        }
+
+        // A capture that ends mid-incident (state != Idle at EOF, e.g. the process was killed
+        // while a traceback was still printing) must still count that incident -- same as the
+        // original algorithm, which had already incremented count at the incident's *start* and
+        // never needed a closing step at all.
+        FinishIncident();
+        return count;
+    }
+
+    /// <summary>Extracts the original line's content when it was captured from stderr (tagged
+    /// "ERR" by <see cref="Attach"/>); returns false for stdout ("OUT") lines.</summary>
+    private static bool TryGetStderrContent(string capturedLine, out string content)
+    {
+        // Lines are "[HH:mm:ss.fff ERR] <original>" / "[HH:mm:ss.fff OUT] <original>" — the
+        // timestamp format is fixed-width, but searching for the "] " delimiter rather than
+        // hard-coding offsets keeps this robust to that formatting ever changing.
+        var closeBracket = capturedLine.IndexOf("] ", StringComparison.Ordinal);
+        if (closeBracket < 0 || !capturedLine.Contains(" ERR]", StringComparison.Ordinal))
+        {
+            content = "";
+            return false;
+        }
+
+        content = capturedLine[(closeBracket + 2)..];
+        return true;
+    }
+
     private enum ErrorScanState
     {
         Idle,

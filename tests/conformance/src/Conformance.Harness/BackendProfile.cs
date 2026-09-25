@@ -63,6 +63,108 @@ public static class BackendProfiles
     });
 
     /// <summary>
+    /// Hooks enabled for real-browser scenarios: real page navigation, a real ARIA-role button
+    /// click, real getUserMedia/AudioWorklet warm-up, and the fake device's first audio chunk all
+    /// need genuine wall-clock headroom that ShortTimers' 1-second idle budget can't provide --
+    /// session_manager.py's idle clock is driven solely by *guest* activity (touch_activity, only
+    /// called for detected speech/transcripts, never by a bare resume) and never resets across a
+    /// resume, so it must stay comfortably longer than the slowest realistic pre-first-activity
+    /// gap this suite can hit. Mirrors scripts/e2e_order_resume.py's own approach of leaving
+    /// idle/grace at safe, generous values and only shortening nudge_after_seconds (there, by
+    /// mutating the in-process SessionManager directly; here, via the same env var ShortTimers
+    /// uses) so the nudge scenario still finishes in seconds.
+    /// </summary>
+    public static BackendProfile BrowserTimers { get; } = new("BrowserTimers", new Dictionary<string, string>
+    {
+        ["CONFORMANCE_TEST_HOOKS"] = "1",
+        ["CONFORMANCE_IDLE_TIMEOUT_SECONDS"] = "10",
+        ["CONFORMANCE_GRACE_SECONDS"] = "10",
+        ["CONFORMANCE_NUDGE_AFTER_SECONDS"] = "2",
+        ["CONFORMANCE_FIRST_FRAME_TIMEOUT_SECONDS"] = "3",
+        ["CONFORMANCE_GREETING_TIMEOUT_SECONDS"] = "5",
+        ["CONFORMANCE_RATE_LIMIT_RETRY_DELAY_SECONDS"] = "0.2",
+        ["CONFORMANCE_RATE_LIMIT_SECOND_RETRY_DELAY_SECONDS"] = "0.4",
+        ["CONFORMANCE_SWEEP_INTERVAL_SECONDS"] = "0.2",
+    });
+
+    /// <summary>
+    /// Hooks enabled with generous idle/grace/nudge budgets (like <see cref="BrowserTimers"/>) but
+    /// for a specific plain-WebSocket reason: app/backend/audio_pipeline.py's EchoSuppressor
+    /// treats every fresh (non-resumed) connection's greeting as real AI speech -- AutoRespond's
+    /// default script always answers the greeting's own response.create with an audio delta, so
+    /// echo.on_audio_done() always fires and starts a `greeting_in_progress`-doubled cooldown
+    /// (config.yaml's audio.echo_cooldown_seconds=1.5, doubled to 3.0s) during which
+    /// rtmt.py's from_client_to_server loop silently `continue`s past *every*
+    /// input_audio_buffer.append -- it never reaches the fake upstream at all. This is a genuine
+    /// anti-echo production safety feature, not a bug, but it means any scenario proving a real
+    /// guest-speech signal is observably acted upon (e.g. RateLimitRecovery cancelling a pending
+    /// retry) must wait out that cooldown before sending its synthetic append, and ShortTimers'
+    /// 1-second idle budget / 1-second nudge would fire (closing the socket, or injecting an
+    /// unrelated nudge response.create) long before a ~3s wait could complete. There is no
+    /// CONFORMANCE_* hook for echo_cooldown_seconds itself (unlike the timers below), so the test
+    /// must actually wait out the fixed 3.0s window in real wall-clock time.
+    /// </summary>
+    public static BackendProfile RateLimitTimers { get; } = new("RateLimitTimers", new Dictionary<string, string>
+    {
+        ["CONFORMANCE_TEST_HOOKS"] = "1",
+        ["CONFORMANCE_IDLE_TIMEOUT_SECONDS"] = "10",
+        ["CONFORMANCE_GRACE_SECONDS"] = "10",
+        ["CONFORMANCE_NUDGE_AFTER_SECONDS"] = "10",
+        ["CONFORMANCE_FIRST_FRAME_TIMEOUT_SECONDS"] = "3",
+        ["CONFORMANCE_GREETING_TIMEOUT_SECONDS"] = "5",
+        ["CONFORMANCE_RATE_LIMIT_RETRY_DELAY_SECONDS"] = "0.2",
+        ["CONFORMANCE_RATE_LIMIT_SECOND_RETRY_DELAY_SECONDS"] = "0.4",
+        ["CONFORMANCE_SWEEP_INTERVAL_SECONDS"] = "0.2",
+    });
+
+    /// <summary>
+    /// Hooks enabled like <see cref="ShortTimers"/> (same short first-frame-timeout, nudge, and
+    /// rate-limit-delay values) but with an 8-second idle/grace budget instead of ShortTimers'
+    /// 1-second one. The resume-handshake scenarios (Scenarios/Sessions/ResumeHandshakeTests.cs,
+    /// ResumeRehydrationAndNudgeTests.cs) aren't testing idle behaviour at all -- that's
+    /// IdleTimeoutTests' and RateLimitRecoveryTests' job -- but several of them are several
+    /// WebSocket round-trips deep (send resume, await rejection, await a fresh re-announce, then
+    /// prove the socket *doesn't* close in the next 500ms) before their final assertion, and
+    /// none of those round-trip frames are guest activity that would reset
+    /// session_manager.py's idle clock. Under normal load that easily finishes inside ShortTimers'
+    /// 1-second budget with room to spare, but under this suite's own heavy concurrent load
+    /// (many collections' Python backends and, in the same run, several real Playwright browser
+    /// processes) it can occasionally lose that race to a *genuine* idle-close that has nothing
+    /// to do with the behaviour under test -- observed directly on this dev box. Widening the
+    /// budget here removes that coincidental race without changing what any of these scenarios
+    /// actually assert (nudge timing and rate-limit delays are untouched). PR #54 review: also
+    /// raised CONFORMANCE_FIRST_FRAME_TIMEOUT_SECONDS from 0.5s to 2s (production's own default,
+    /// per README's config table) -- the 0.5s value left ResumeHandshakeTests'
+    /// WellUnderFirstFrameTimeout bound (400ms) only ~100ms of margin under the same load, which
+    /// is exactly the kind of thin-margin flake this profile already exists to eliminate.
+    ///
+    /// PR #52 review ("reconcile ResumeTimers with ResumeMargin"): <see cref="ResumeMargin"/>
+    /// below addresses the same root cause (session-setup scheduling slowness racing a short
+    /// idle/grace budget) for a different, non-overlapping set of scenarios
+    /// (<c>ResumeRehydrationClientVisibilityTests</c>, <c>WholeSessionLeakTests</c>' resume case)
+    /// that don't exercise first-frame-timeout or rate-limit-retry timing at all. This profile
+    /// is kept separate rather than folded into <see cref="ResumeMargin"/> because its consumers
+    /// *do* need FIRST_FRAME_TIMEOUT and the two RATE_LIMIT_RETRY_DELAY vars held short (they're
+    /// asserted on directly) -- adopting ResumeMargin's narrower env-var set (idle/grace/nudge/
+    /// sweep only, everything else at production defaults) here would silently put those
+    /// assertions back on multi-second production timers. Conversely, widening ResumeMargin to
+    /// this profile's full var set would give its own consumers timers they never asked for and
+    /// don't need, without fixing anything for them.
+    /// </summary>
+    public static BackendProfile ResumeTimers { get; } = new("ResumeTimers", new Dictionary<string, string>
+    {
+        ["CONFORMANCE_TEST_HOOKS"] = "1",
+        ["CONFORMANCE_IDLE_TIMEOUT_SECONDS"] = "8",
+        ["CONFORMANCE_GRACE_SECONDS"] = "8",
+        ["CONFORMANCE_NUDGE_AFTER_SECONDS"] = "1",
+        ["CONFORMANCE_FIRST_FRAME_TIMEOUT_SECONDS"] = "2",
+        ["CONFORMANCE_GREETING_TIMEOUT_SECONDS"] = "1",
+        ["CONFORMANCE_RATE_LIMIT_RETRY_DELAY_SECONDS"] = "0.2",
+        ["CONFORMANCE_RATE_LIMIT_SECOND_RETRY_DELAY_SECONDS"] = "0.4",
+        ["CONFORMANCE_SWEEP_INTERVAL_SECONDS"] = "0.2",
+    });
+
+    /// <summary>
     /// PR #52 CI follow-up (swigerb/SonicAIDriveThru#28 N10 aftermath): <see cref="ShortTimers"/>'s
     /// equal 1s idle timeout and 1s grace both being genuinely tight enough to encounter under
     /// realistic wall-clock work is exactly the point for the scenarios that use it today (the
@@ -84,6 +186,9 @@ public static class BackendProfiles
     /// <c>WholeSessionLeakTests</c>' resume scenario, both via their own dedicated collection so
     /// this doesn't touch <see cref="ShortTimers"/>'s existing ~1s guarantees for its other
     /// scenarios (the idle-close and greeting-timeout tests).
+    ///
+    /// See <see cref="ResumeTimers"/>'s own doc comment for why that (older, #10/#26) profile
+    /// stays separate rather than being unified with this one.
     /// </summary>
     public static BackendProfile ResumeMargin { get; } = new("ResumeMargin", new Dictionary<string, string>
     {
@@ -93,6 +198,42 @@ public static class BackendProfiles
         ["CONFORMANCE_NUDGE_AFTER_SECONDS"] = "1",
         ["CONFORMANCE_SWEEP_INTERVAL_SECONDS"] = "0.2",
     });
+
+    /// <summary>
+    /// PR #54 review follow-up (Rick, post-merge): dedicated profile for
+    /// <c>A_retry_is_not_guest_activity_the_idle_clock_still_closes_the_socket_on_schedule</c>,
+    /// replacing its previous home on <see cref="ShortTimers"/>. That test measures the *gap*
+    /// between two hypotheses (idle clock correctly ignores retries vs. a retry wrongly touching
+    /// it) via wall-clock elapsed time, so its ceiling assertion's margin is exactly the distance
+    /// between "latest realistic correct-code close" and "earliest possible mutant close" --
+    /// unlike every other timer-driven scenario in this suite, widening the *budget itself* here
+    /// (not just idle/grace) directly widens that margin, because both hypotheses' predicted
+    /// close times scale with CONFORMANCE_IDLE_TIMEOUT_SECONDS while only the mutant's also
+    /// depends on the two retry-delay values. ShortTimers' 1s idle_timeout against 0.2s/0.4s
+    /// retry delays measured a correct-code close at 1.013-1.207s (idle_timeout=1s plus at most
+    /// one 0.2s sweep pass) against a would-be mutant close no earlier than ~1.6s (0.2s+0.4s=0.6s
+    /// of retry delay resetting last_activity, plus the 1s idle_timeout from there) -- a 1.4s
+    /// ceiling left only ~190ms of headroom on the correct-code side, tight enough to flake under
+    /// this suite's own heavy concurrent load. Widening idle_timeout to 2s and the retry delays to
+    /// 0.3s/1.2s scales both predictions apart much further: correct code closes by ~2.0-2.2s
+    /// (idle_timeout=2s plus at most one sweep pass), while the mutant can't close before ~3.5s
+    /// (0.3s+1.2s=1.5s of reset last_activity, plus 2s idle_timeout from there) -- a 2.8s ceiling
+    /// now sits almost exactly halfway between the two, leaving ~0.6s of margin on either side
+    /// instead of ~190ms.
+    /// </summary>
+    public static BackendProfile RateLimitIdleInteractionTimers { get; } = new(
+        "RateLimitIdleInteractionTimers", new Dictionary<string, string>
+        {
+            ["CONFORMANCE_TEST_HOOKS"] = "1",
+            ["CONFORMANCE_IDLE_TIMEOUT_SECONDS"] = "2",
+            ["CONFORMANCE_GRACE_SECONDS"] = "2",
+            ["CONFORMANCE_NUDGE_AFTER_SECONDS"] = "2",
+            ["CONFORMANCE_FIRST_FRAME_TIMEOUT_SECONDS"] = "2",
+            ["CONFORMANCE_GREETING_TIMEOUT_SECONDS"] = "2",
+            ["CONFORMANCE_RATE_LIMIT_RETRY_DELAY_SECONDS"] = "0.3",
+            ["CONFORMANCE_RATE_LIMIT_SECOND_RETRY_DELAY_SECONDS"] = "1.2",
+            ["CONFORMANCE_SWEEP_INTERVAL_SECONDS"] = "0.2",
+        });
 
     /// <summary>
     /// Hooks enabled with the clock frozen at <paramref name="instant"/>, for time-based business

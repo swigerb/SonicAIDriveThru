@@ -19,4 +19,19 @@ public interface IBackendUnderTest : IAsyncDisposable
     /// structured logs instead. Zero for an externally-provided backend (nothing is captured).
     /// </summary>
     int UnhandledErrorCount();
+
+    /// <summary>
+    /// Same contract as <see cref="UnhandledErrorCount()"/>, but an unhandled-error incident whose
+    /// full text satisfies <paramref name="isBenignIncident"/> is excluded from the count. Added
+    /// for issue #10/#26's Browser scenarios (see
+    /// <see cref="Conformance.Tests.Scenarios.Browser.BrowserConformanceFixture"/>) to recognise
+    /// one narrow, well-known, Windows-only CPython event-loop teardown race by its exact logged
+    /// content — never by count alone — without weakening <see cref="UnhandledErrorCount()"/>'s
+    /// own zero-tolerance default for every other scenario. Default-implemented as a passthrough
+    /// (ignoring the filter) so <see cref="ExternalBackend"/> and any future non-Python
+    /// <see cref="IBackendUnderTest"/> — neither of which can ever emit a Python-shaped traceback
+    /// for the filter to match against in the first place — need no changes at all; only
+    /// <see cref="ProcessBackend"/> overrides this meaningfully.
+    /// </summary>
+    int UnhandledErrorCount(Func<IReadOnlyList<string>, bool> isBenignIncident) => UnhandledErrorCount();
 }

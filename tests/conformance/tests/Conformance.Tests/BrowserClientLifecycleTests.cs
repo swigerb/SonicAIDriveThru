@@ -320,7 +320,7 @@ public sealed class BrowserClientLifecycleTests(ConformanceFixture fixture)
         // Mirrors the scenario files' own use of the shared helper: send on a fixed cadence for
         // long enough to run both before and after the fake's abort lands partway through (10
         // iterations at the old inline loop's 50ms cadence = ~500ms).
-        var keepAlive = KeepAlive.RunAsync(browser, TimeSpan.FromMilliseconds(50), ct);
+        await using var keepAlive = KeepAlive.RunAsync(browser, TimeSpan.FromMilliseconds(50), ct);
         await Task.Delay(TimeSpan.FromMilliseconds(500), ct);
         await keepAlive.StopAsync();
 

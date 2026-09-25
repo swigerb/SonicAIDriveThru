@@ -14,5 +14,9 @@
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.10.0" />
     <PackageVersion Include="xunit.runner.visualstudio" Version="4.0.0" />
     <PackageVersion Include="xunit.v3.mtp-off" Version="4.0.1" />
+    <!-- Real-browser scenarios (issue #26 / #10): Playwright for .NET. Version verified
+         to restore through packagefeedproxy.microsoft.io and run against net11.0 in this
+         environment before being pinned here. -->
+    <PackageVersion Include="Microsoft.Playwright" Version="1.63.0" />
   </ItemGroup>
 </Project>

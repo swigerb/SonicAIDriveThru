@@ -269,7 +269,7 @@ public sealed class WholeSessionLeakTests(ResumeMarginConformanceFixture fixture
         // KeepAlive helper (PR #52 CI follow-up round 5, Rick's review S2) so this scenario and
         // ResumeRehydrationClientVisibilityTests can't silently diverge from what the self-test in
         // BrowserClientLifecycleTests actually exercises. ──
-        var keepAlive = KeepAlive.RunAsync(second, TimeSpan.FromMilliseconds(200), ct);
+        await using var keepAlive = KeepAlive.RunAsync(second, TimeSpan.FromMilliseconds(200), ct);
 
         var nudgeItem = await secondConnection.ReceivedFrames.WaitForAsync(
             f => f.Type == "conversation.item.create" &&

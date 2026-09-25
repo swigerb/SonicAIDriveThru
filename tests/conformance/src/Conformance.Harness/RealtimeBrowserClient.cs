@@ -36,6 +36,22 @@ public sealed class RealtimeBrowserClient : IAsyncDisposable
     private readonly WebSocket _socket;
     private readonly CancellationTokenSource _readerCts = new();
     private readonly TaskCompletionSource _closed = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    /// <summary>
+    /// #28 N28 (corrected per PR #54 review F4): <see cref="ClientWebSocket"/>'s underlying
+    /// <c>ManagedWebSocket</c> already serializes concurrent <c>SendAsync</c> calls internally (an
+    /// internal send lock queues them so no caller sees an exception or corrupted frame from a
+    /// second concurrent send) -- so <see cref="_sendLock"/> is not preventing an otherwise-thrown
+    /// error. Its actual job is ordering whole *logical* messages: without it, two callers racing
+    /// to send (e.g. <see cref="KeepAlive.RunAsync"/>'s background loop and a test's own explicit
+    /// send on the same client) could each still complete their own frame intact, but the two
+    /// messages could land on the wire interleaved in whichever order the runtime happened to
+    /// service them, not the order the callers issued them in -- which matters to a test asserting
+    /// on frame sequence. Every send this class exposes (<see cref="SendAsync(JsonNode,
+    /// CancellationToken)"/> and <see cref="SendRawTextAsync"/>) goes through this lock so
+    /// concurrent callers get their whole messages ordered without each needing to know why.
+    /// </summary>
+    private readonly SemaphoreSlim _sendLock = new(1, 1);
     private Task? _readerTask;
     private WebSocketCloseStatus? _observedCloseStatus;
     private string? _observedCloseStatusDescription;
@@ -197,8 +213,25 @@ public sealed class RealtimeBrowserClient : IAsyncDisposable
     public Task SendResponseCreateAsync(CancellationToken cancellationToken = default) =>
         SendAsync(new JsonObject { ["type"] = "response.create" }, cancellationToken);
 
-    public Task SendAsync(JsonNode command, CancellationToken cancellationToken = default) =>
-        WebSocketJson.SendAsync(_socket, JsonSerializer.SerializeToElement(command), cancellationToken);
+    /// <summary>
+    /// Sends one JSON frame. Serialized via <see cref="_sendLock"/> (#28 N28) so concurrent callers
+    /// -- e.g. a <see cref="KeepAlive"/> loop and the test's own explicit sends on the same client
+    /// -- get their whole messages ordered on the wire instead of interleaved (see
+    /// <see cref="_sendLock"/>'s doc comment for why ordering, not corruption, is what this guards).
+    /// </summary>
+    public async Task SendAsync(JsonNode command, CancellationToken cancellationToken = default)
+    {
+        var payload = JsonSerializer.SerializeToElement(command);
+        await _sendLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await WebSocketJson.SendAsync(_socket, payload, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _sendLock.Release();
+        }
+    }
 
     /// <summary>
     /// Sends the given bytes exactly as-is, over a Text frame, bypassing all JSON
@@ -207,12 +240,22 @@ public sealed class RealtimeBrowserClient : IAsyncDisposable
     /// substring reproductions, S2's malformed-frame-doesn't-crash-the-socket reproductions) that
     /// need to construct frames no <see cref="JsonNode"/> tree could represent (e.g. a duplicate
     /// top-level `type` key, or a non-JSON payload) -- something the real frontend never sends,
-    /// but a compromised/malicious same-origin script could.
+    /// but a compromised/malicious same-origin script could. Routed through the same
+    /// <see cref="_sendLock"/> as <see cref="SendAsync(JsonNode, CancellationToken)"/> (#54 review
+    /// F4) so a raw send races no differently than a JSON one.
     /// </summary>
-    public Task SendRawTextAsync(string rawText, CancellationToken cancellationToken = default)
+    public async Task SendRawTextAsync(string rawText, CancellationToken cancellationToken = default)
     {
         var bytes = Encoding.UTF8.GetBytes(rawText);
-        return _socket.SendAsync(bytes, WebSocketMessageType.Text, endOfMessage: true, cancellationToken);
+        await _sendLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await _socket.SendAsync(bytes, WebSocketMessageType.Text, endOfMessage: true, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _sendLock.Release();
+        }
     }
 
     /// <summary>The negotiated `Sec-WebSocket-Extensions` response header, or null if none was granted.</summary>
@@ -492,6 +535,7 @@ public sealed class RealtimeBrowserClient : IAsyncDisposable
 
         _socket.Dispose();
         _readerCts.Dispose();
+        _sendLock.Dispose();
     }
 }
 
