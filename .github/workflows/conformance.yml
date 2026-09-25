@@ -209,6 +209,7 @@ jobs:
           set -o pipefail
           dotnet test Conformance.slnx \
             --no-restore \
+            --filter "Category!=Browser" \
             --logger "trx;LogFileName=conformance.trx" \
             --logger "console;verbosity=detailed" \
             --results-directory TestResults \
@@ -219,6 +220,12 @@ jobs:
           # Python backend wedged and never answering /health) must produce a crash/hang dump and
           # fail the job well before the job-level timeout-minutes kill, instead of silently
           # eating the whole 20-minute budget with no diagnostic artifact at all.
+          #
+          # PR #54 review (blocker B2): without --filter "Category!=Browser", this job ran the
+          # Category=Browser scenarios too (its own dotnet test has no filter), directly
+          # contradicting conformance-browser's rationale below that a real-browser
+          # failure/timeout "can never block or slow down the fast black-box … scenarios" -- the
+          # CI log for run 36107586429 showed all 5 OrderResumeBrowserTests running in both jobs.
 
       - name: Upload conformance test results on failure
         if: failure()
@@ -230,44 +237,150 @@ jobs:
             tests/conformance/conformance-output.log
           retention-days: 7
 
-  # Issue #24: single aggregate required-status-check. Today branch protection still pins the
-  # three job names above directly (python-tests / frontend-tests / conformance's matrix name),
-  # so this job intentionally changes nothing about what merges are blocked on right now -- it
-  # only gives the coordinator one stable name to switch branch protection to later. Once that
-  # switch happens, growing the "conformance" matrix (e.g. adding backend: dotnet in S2) or adding
-  # a new job to `needs:` below never requires another branch-protection edit.
+  # Issues #10 / #26: the Category=Browser real-browser subset of the conformance suite
+  # (tests/conformance/tests/Conformance.Tests/Scenarios/Browser), kept as its own job -- not
+  # folded into the `conformance` matrix above -- so a real-browser failure/timeout can never
+  # block or slow down the fast black-box HTTP/WebSocket-only scenarios (see the main job's own
+  # --filter "Category!=Browser", added in the PR #54 review), and so its runner-provided-browser
+  # dependency stays isolated. ubuntu-latest ships Google Chrome stable (see actions/runner-images),
+  # which Conformance.Harness.BrowserChannelPolicy auto-detects at /usr/bin/google-chrome --
+  # Playwright launches it by channel ("chrome"), so this job never downloads a browser.
+  # Microsoft.Playwright's own Node driver ships inside the NuGet package restored below, from
+  # this runner's default NuGet feed -- the same as every other job in this workflow (there is no
+  # repo-level nuget.config or .npmrc pinning a proxy feed; enforcing one is tracked separately as
+  # part of the #52 infra work). Per this suite's binding rules, if the driver ever stopped
+  # shipping inside the package, this job must fail loudly rather than silently reach out for a
+  # separate download.
+  conformance-browser:
+    name: Conformance suite (Category=Browser)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: app/backend/requirements.txt
+
+      - name: Create Python venv for the backend under test
+        # PythonBackendLauncher (tests/conformance/src/Conformance.Harness)
+        # expects a .venv at the repo root with the backend's runtime deps
+        # installed -- exactly what a developer's local checkout has.
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/python -m pip install -r app/backend/requirements.txt
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/frontend/package-lock.json
+
+      - name: Build frontend (app/backend/static is gitignored and required by app.py's add_static)
+        working-directory: app/frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Set up .NET ${{ env.DOTNET_VERSION }}
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Cache NuGet packages
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('tests/conformance/Directory.Packages.props', 'tests/conformance/**/*.csproj', 'tests/conformance/**/packages.lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
+      - name: dotnet restore tests/conformance (locked mode)
+        working-directory: tests/conformance
+        # Same rationale as the `conformance` job's identically-named step: every project restores
+        # RestorePackagesWithLockFile=true (Directory.Build.props), including Conformance.Tests'
+        # Microsoft.Playwright reference, so --locked-mode fails loudly instead of silently
+        # re-resolving if the committed lock file and Directory.Packages.props/*.csproj ever
+        # disagree.
+        run: dotnet restore Conformance.slnx --locked-mode
+
+      - name: Verify a supported browser channel is installed (never downloaded by this job)
+        run: |
+          if command -v google-chrome-stable >/dev/null 2>&1 || command -v google-chrome >/dev/null 2>&1 || command -v microsoft-edge-stable >/dev/null 2>&1 || command -v microsoft-edge >/dev/null 2>&1; then
+            echo "Found an installed browser channel."
+          else
+            echo "::error::No installed msedge/chrome channel found on this runner -- Conformance.Harness.BrowserChannelPolicy fails the Category=Browser suite loudly in CI rather than skip it silently (see the runner-image regression note in this job's own comment)." >&2
+            exit 1
+          fi
+
+      - name: dotnet test tests/conformance --filter Category=Browser
+        working-directory: tests/conformance
+        env:
+          CONFORMANCE_BACKEND: python
+        run: |
+          set -o pipefail
+          dotnet test Conformance.slnx \
+            --no-restore \
+            --filter "Category=Browser" \
+            --logger "trx;LogFileName=conformance-browser.trx" \
+            --logger "console;verbosity=detailed" \
+            --results-directory TestResults \
+            --blame-hang --blame-hang-timeout 10min --blame-hang-dump-type mini \
+            --blame-crash --blame-crash-dump-type mini \
+            2>&1 | tee conformance-browser-output.log
+
+      - name: Upload browser conformance test results on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: conformance-results-browser
+          path: |
+            tests/conformance/TestResults
+            tests/conformance/conformance-browser-output.log
+          retention-days: 7
+
+  # Issue #24: single aggregate required-status-check. Branch protection now pins only this job's
+  # name, so growing the `conformance` matrix (e.g. adding backend: dotnet in S2) or adding a new
+  # job to `needs:` below never requires another branch-protection edit -- it's added to `needs`
+  # here and the success check (below) derives itself from `needs` rather than a second,
+  # independently-maintained job-name list (#28 N27: a duplicated list is exactly the kind of thing
+  # that silently drifts when a job like conformance-browser is added and this list isn't updated
+  # in lockstep).
   #
   # `if: always()` is required so this job still runs (and can fail) even when an upstream job
   # fails or is cancelled -- by default a failed dependency would skip this job instead, and a
   # required check that never ran is not the same as a required check that explicitly failed.
   conformance-gate:
     name: conformance-gate
-    needs: [python-tests, frontend-tests, conformance]
+    needs: [python-tests, frontend-tests, conformance, conformance-browser]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Check required jobs succeeded
+        env:
+          NEEDS_CONTEXT: ${{ toJSON(needs) }}
         run: |
           # #28 M1 (Rick's review, PR #52): fail on ANY result that isn't exactly `success` --
           # not just `failure`/`cancelled`. A `needs` result can also come back `skipped` (a
           # job-level `if:`, a path filter, a hashFiles-gated leg, or a dependency added between
-          # jobs later), and the previous two-condition check silently let a skip through as
-          # green. The gate is meant to become the only required status check, so it must not
-          # go green when a required job never actually ran.
-          failed=0
-          for pair in "python-tests:${{ needs.python-tests.result }}" \
-                      "frontend-tests:${{ needs.frontend-tests.result }}" \
-                      "conformance:${{ needs.conformance.result }}"; do
-            name="${pair%%:*}"
-            result="${pair#*:}"
-            echo "  ${name}: ${result}"
-            if [ "${result}" != "success" ]; then
-              failed=1
-            fi
-          done
-          if [ "${failed}" = "1" ]; then
+          # jobs later), and a naive two-condition check would silently let a skip through as
+          # green. The gate is meant to be the only required status check, so it must not go
+          # green when a required job never actually ran.
+          #
+          # #28 N27 (Rick's review, PR #54): derive the pass/fail decision from `toJSON(needs)`
+          # itself instead of a hand-maintained "name:result" pair list -- the `needs:` array
+          # above is the single source of truth for which jobs are required, so a job added there
+          # is automatically checked here with no second edit needed.
+          echo "${NEEDS_CONTEXT}" | jq -r 'to_entries[] | "  \(.key): \(.value.result)"'
+          echo "${NEEDS_CONTEXT}" | jq -e 'all(.[]; .result == "success")' >/dev/null || {
             echo "One or more required jobs did not succeed (see results above)."
             exit 1
-          fi
+          }
           echo "All required jobs passed."

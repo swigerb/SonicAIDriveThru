@@ -98,7 +98,7 @@ public sealed class ResumeSurvivesGraceWindowTests(ResumeMarginConformanceFixtur
         // resume() that leaves session_id in _detached will have the sweep end this session out
         // from under the resumed socket once real time reaches detachStartedAt + grace_seconds,
         // regardless of this activity, since detached_at is never refreshed. ──
-        var keepAlive = KeepAlive.RunAsync(second, TimeSpan.FromMilliseconds(300), ct);
+        await using var keepAlive = KeepAlive.RunAsync(second, TimeSpan.FromMilliseconds(300), ct);
         var remaining = PastGraceMargin - (DateTimeOffset.UtcNow - detachStartedAt);
         if (remaining > TimeSpan.Zero)
         {

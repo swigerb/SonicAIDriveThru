@@ -237,6 +237,9 @@ internal sealed class ProcessBackend(
 
     public int UnhandledErrorCount() => output.CountUnhandledErrors();
 
+    public int UnhandledErrorCount(Func<IReadOnlyList<string>, bool> isBenignIncident) =>
+        output.CountUnhandledErrors(isBenignIncident);
+
     public async ValueTask DisposeAsync()
     {
         if (processExitHandler is not null)

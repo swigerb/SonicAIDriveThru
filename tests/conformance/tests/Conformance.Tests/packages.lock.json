@@ -12,6 +12,15 @@
           "Microsoft.TestPlatform.TestHost": "18.10.0"
         }
       },
+      "Microsoft.Playwright": {
+        "type": "Direct",
+        "requested": "[1.63.0, )",
+        "resolved": "1.63.0",
+        "contentHash": "O9F45Tt5vjauIo7mTTgQtahigL7cfRLvBMpErLJfdvgCnQ14yue5BmRASNnfNBWRBni4Mqp2YiD1eFGIO4nUUw==",
+        "dependencies": {
+          "Microsoft.Bcl.AsyncInterfaces": "6.0.0"
+        }
+      },
       "xunit.runner.visualstudio": {
         "type": "Direct",
         "requested": "[4.0.0, )",
