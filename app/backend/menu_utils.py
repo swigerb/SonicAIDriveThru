@@ -303,7 +303,21 @@ _COMBO_SIDE_ITEMS = frozenset({"tots", "groovy fries"})
 # (the pre-existing "tot"/"tots" substring keyword fallback there already categorises every one
 # of these spoken variants as "sides" on its own) or happy-hour-discount eligibility (Tots was
 # never a drink, discounted or not).
-_TOTS_ALIASES = frozenset({"tot", "tots", "tater tot", "tater tots", "tator tot", "tator tots"})
+#
+# PR #61 review, must-fix 3: also accept the one-word forms ("tatertot(s)", "tatortot(s)") and
+# the hyphenated forms ("tater-tot(s)", "tator-tot(s)") explicitly. ``_menu_key`` does NOT collapse
+# a hyphen to a space -- a hyphen is not whitespace, so neither ``strip_modifiers``'s
+# ``.split()``/``" ".join(...)`` pass nor any of ``_menu_key``'s three symbol-replacements (``®``,
+# ``™``, curly apostrophe) touch it (confirmed: ``_menu_key("Tater-Tot") == "tater-tot"``, NOT
+# "tater tot"). So the hyphenated forms need their own keys here; they are not already covered by
+# the space-separated "tater tot"/"tator tot" entries. "Totts" (typo) and "Tater Tot's" (stray
+# apostrophe) are deliberately NOT included -- they stay charged in full.
+_TOTS_ALIASES = frozenset({
+    "tot", "tots",
+    "tater tot", "tater tots", "tator tot", "tator tots",
+    "tatertot", "tatertots", "tatortot", "tatortots",
+    "tater-tot", "tater-tots", "tator-tot", "tator-tots",
+})
 
 
 def _resolve_combo_side_alias(normalized: str) -> str:

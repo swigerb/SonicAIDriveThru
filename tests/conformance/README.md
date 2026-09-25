@@ -1182,7 +1182,8 @@ whitespace-collapsed), used everywhere a raw item name is turned into a lookup k
 standalone entree when its combo is added) — one implementation, so lookup and combo-conversion
 matching can never drift apart on how a customization suffix is stripped. A direct implication: an
 unknown/off-menu item (customised or not) **never** falls back into the combo side slot — only the
-literal, allow-listed `"tots"`/`"groovy fries"` names do (post-modifier-stripping); the drink
+literal, allow-listed `"tots"`/`"groovy fries"` names, plus any name that resolves through
+`_TOTS_ALIASES` to `"tots"` (below), do (post-modifier-stripping); the drink
 keyword fallback remains for genuinely off-menu fountain drinks (Dr Pepper, Coke, Sprite, root
 beer, ...) and for shakes/blasts/malts, but the latter obey
 `menu_utils._SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED` for the happy-hour-discount question exactly
@@ -1190,26 +1191,57 @@ like their on-menu counterparts do — that flag is the single switch for every 
 customised, on-menu or off. See `app/backend/tests/test_menu_utils.py::CustomisedItemMenuLookupTests`
 and `CustomisedItemMenuLookupTests.cs` in this suite.
 
-**Plain-Tots alias map for the combo side slot only (Brian's decision, 2026-09-25, #60)**: any
-spoken name-variant of plain Tots — `"Tot"`, `"Tots"`, `"Tater Tot"`, `"Tater Tots"`, and the
-common spoken misspelling `"Tator Tot"`/`"Tator Tots"` — fills the combo side slot exactly like
-the real `"Tots"` menuItems.json item does. This is `menu_utils._TOTS_ALIASES`, an explicit,
+**Plain-Tots alias map for the combo side slot only (Brian's decision, 2026-09-25, #60; extended PR
+#61 review, must-fix 3)**: any spoken name-variant of plain Tots fills the combo side slot exactly
+like the real `"Tots"` menuItems.json item does. This is `menu_utils._TOTS_ALIASES`, an explicit,
 case-normalised, exact-match set resolved by `_resolve_combo_side_alias()` and applied *after*
 `_menu_key()` normalisation (so a bracketed modifier, e.g. `"Tater Tots (Extra Crispy)"`, is
 already stripped before the exact-match lookup runs) and *before* the `_COMBO_SIDE_ITEMS`
-membership check — **never** a substring check. Scoped to combo-side-slot classification only:
-it does not change `infer_category` (the pre-existing `"tot"`/`"tots"` substring keyword fallback
-there already categorises every one of these spoken variants as `"sides"` on its own) or
+membership check — **never** a substring check. The contract is the exact set of post-`_menu_key()`
+lowercase keys in the alias set — no other spelling resolves:
+```
+tot, tots,
+tater tot, tater tots, tator tot, tator tots,
+tatertot, tatertots, tatortot, tatortots,
+tater-tot, tater-tots, tator-tot, tator-tots
+```
+**Hyphens are kept literally by `_menu_key()`, never collapsed to a space** — a hyphen is not
+whitespace, so neither `strip_modifiers()`'s `.split()`/`" ".join(...)` pass nor any of
+`_menu_key()`'s three symbol-replacements (`®`, `™`, curly apostrophe) touch it
+(`_menu_key("Tater-Tot") == "tater-tot"`, *not* `"tater tot"`). That is why the hyphenated forms
+(`"tater-tot(s)"`, `"tator-tot(s)"`) need their own explicit keys above — they are a distinct
+string from the space-separated `"tater tot(s)"`/`"tator tot(s)"` keys, not automatically covered
+by them. **Size words embedded in the name itself are not stripped** — only a bracketed `(...)`
+modifier is removed by `strip_modifiers()`; a word like `"Large"` sitting directly in the name text
+(not in parentheses) survives into the `_menu_key()` output and therefore breaks the exact-match
+against the alias set (see the size-word fail-safe below). Scoped to combo-side-slot classification
+only: it does not change `infer_category` (the pre-existing `"tot"`/`"tots"` substring keyword
+fallback there already categorises every one of these spoken variants as `"sides"` on its own) or
 happy-hour-discount eligibility (Tots was never a drink). Rick's revenue rule from the
 must-fix-2 paragraph above still applies unchanged: a real-but-different menuItems.json item
-(`"Chili Cheese Tots"`, `"Cheese Tots"`) and an off-menu near-miss (`"Loaded Tots Supreme"`, the
-misspelled `"chilli cheese tots"`) are none of them an exact match against the alias set, so all
-of them still fall through to charged-in-full. Pricing for a standalone alias-ordered item (e.g.
-a guest ordering just "Tater Tots") is unaffected either way — `update_order`'s unit price always
-comes from the tool-call argument, never from `menu_utils`, so the alias only ever changes
-combo-slot classification, never a standalone item's price. See
-`app/backend/tests/test_menu_utils.py::TotsAliasNormalisationTests` and the
-`Plain_tots_alias_absorbs_into_the_combo_side_slot` theory in `CustomisedItemMenuLookupTests.cs`.
+(`"Chili Cheese Tots"`, `"Cheese Tots"`), an off-menu near-miss (`"Loaded Tots Supreme"`, the
+misspelled `"chilli cheese tots"`), and a near-miss *spelling* of the alias itself (the doubled-T
+typo `"Totts"`, the stray apostrophe `"Tater Tot's"`) are none of them an exact match against the
+alias set, so all of them still fall through to charged-in-full. Pricing for a standalone
+alias-ordered item (e.g. a guest ordering just "Tater Tots") is unaffected either way —
+`update_order`'s unit price always comes from the tool-call argument, never from `menu_utils`, so
+the alias only ever changes combo-slot classification, never a standalone item's price. See
+`app/backend/tests/test_menu_utils.py::TotsAliasNormalisationTests`,
+`MoreTotsAliasFormsTests`, and the `Plain_tots_alias_absorbs_into_the_combo_side_slot` /
+`One_word_and_hyphenated_tots_alias_forms_absorb_into_the_combo_side_slot` /
+`Near_miss_tots_spellings_are_charged_in_full_alongside_a_combo_not_absorbed` theories in
+`CustomisedItemMenuLookupTests.cs`.
+
+**Size-word fail-safe (PR #61 review, must-fix 5 — no behaviour change, just a pinned contract)**:
+because size words in the name are not stripped (above), a size word placed *inside* the name text
+itself breaks the alias's exact match, while a size word placed as a *bracketed modifier* does not
+(it is removed by `strip_modifiers()` before the alias lookup, exactly like any other modifier).
+So `"Large Tater Tots"` (the size word is part of the name text) is **charged in full** — it does
+not match any `_TOTS_ALIASES` key — while `"Tater Tots (Large)"` (the size word is a bracketed
+modifier) **absorbs into the combo side slot** — `strip_modifiers()` removes `"(Large)"` first,
+leaving `"Tater Tots"`, which does match. Both are pinned as regression tests; see
+`test_menu_utils.py::SizeWordFailSafeTests` and `Size_word_in_the_name_vs_as_a_modifier` in
+`CustomisedItemMenuLookupTests.cs`.
 
 **The exact `_menu_key()` normalisation algorithm (PR #50 review, round 4 — state it precisely so
 C# does the same thing, not just "something similar")**, applied in this order to *every* raw

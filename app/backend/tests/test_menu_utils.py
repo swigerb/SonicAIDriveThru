@@ -256,6 +256,59 @@ class TotsAliasNormalisationTests(unittest.TestCase):
             self.assertFalse(is_happy_hour_discounted(name), name)
 
 
+class MoreTotsAliasFormsTests(unittest.TestCase):
+    """PR #61 review, must-fix 3: one-word forms ("tatertot(s)", "tatortot(s)") and hyphenated
+    forms ("tater-tot(s)", "tator-tot(s)"). ``_menu_key`` does NOT collapse a hyphen to a space
+    (confirmed via ``_menu_key("Tater-Tot") == "tater-tot"``, not "tater tot") -- a hyphen is not
+    whitespace and none of ``strip_modifiers``'s ``.split()``/``" ".join(...)`` pass, nor any of
+    ``_menu_key``'s three symbol-replacements, touch it. So the hyphenated forms need their OWN
+    keys in ``_TOTS_ALIASES``; they are not already covered by the "tater tot"/"tator tot" (space)
+    entries added for #60."""
+
+    def test_one_word_forms_fill_the_combo_side_slot(self):
+        for name in ("tatertot", "TaterTot", "tatertots", "TATERTOTS", "tatortot", "tatortots"):
+            self.assertEqual(infer_combo_component(name), "sides", name)
+
+    def test_hyphenated_forms_fill_the_combo_side_slot(self):
+        for name in ("tater-tot", "Tater-Tot", "tater-tots", "TATER-TOTS", "tator-tot", "tator-tots"):
+            self.assertEqual(infer_combo_component(name), "sides", name)
+
+    def test_customised_new_alias_forms_still_fill_the_combo_side_slot(self):
+        for name in ("Tater-Tots (Extra Crispy)", "TaterTots (Extra Crispy)"):
+            self.assertEqual(infer_combo_component(name), "sides", name)
+
+    def test_new_alias_forms_do_not_affect_category_or_happy_hour_discount(self):
+        for name in ("tatertots", "tater-tots"):
+            self.assertEqual(infer_category(name), "sides", name)
+            self.assertFalse(is_happy_hour_discounted(name), name)
+
+    def test_near_miss_spellings_still_charged_in_full(self):
+        """"Totts" (typo, doubled T) and "Tater Tot's" (stray apostrophe) are NOT in the alias
+        set -- they must stay charged in full exactly like any other off-menu near-miss (Rick's
+        PR #50 revenue rule)."""
+        for name in ("Totts", "Tater Tot's", "Tatertot's"):
+            self.assertEqual(infer_combo_component(name), "", name)
+
+
+class SizeWordFailSafeTests(unittest.TestCase):
+    """PR #61 review, must-fix 5 -- no behaviour change, a pinned fail-safe contract. Size words
+    embedded directly in the name text are NOT stripped by ``strip_modifiers`` (only a bracketed
+    ``(...)`` modifier is), so a size word inside the name breaks the alias's exact match, while
+    the same size word expressed as a bracketed modifier does not (it is stripped before the
+    alias lookup, exactly like any other modifier)."""
+
+    def test_size_word_in_the_name_text_is_charged_in_full(self):
+        """"Large Tater Tots" -- the size word is part of the name text, so it survives
+        ``_menu_key()`` and the resulting key ("large tater tots") is not in ``_TOTS_ALIASES``."""
+        self.assertEqual(infer_combo_component("Large Tater Tots"), "", "Large Tater Tots")
+
+    def test_size_word_as_a_bracketed_modifier_still_absorbs(self):
+        """"Tater Tots (Large)" -- the size word is a bracketed modifier, stripped by
+        ``strip_modifiers`` before the alias lookup runs, leaving "Tater Tots" which does
+        resolve via ``_TOTS_ALIASES``."""
+        self.assertEqual(infer_combo_component("Tater Tots (Large)"), "sides", "Tater Tots (Large)")
+
+
 class KeywordFallbackPrecedenceTests(unittest.TestCase):
     """PR #61 review (must-fix 1): ``_keyword_fallback_happy_hour_discounted`` checked the
     fountain-drink keywords BEFORE the shake/blast/malt keywords, so an off-menu name that

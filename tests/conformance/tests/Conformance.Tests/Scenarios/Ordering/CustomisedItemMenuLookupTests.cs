@@ -137,11 +137,114 @@ public sealed class CustomisedItemMenuLookupTests
                 Assert.Equal(1, OrderScenarioHelpers.GetOrderItemCount(result.ToolResultJson!));
             });
 
-        /// <summary>PR #50 review (third round): pins that an unrecognised/off-menu side-like
-        /// name NEVER fills the combo side slot -- this is the shared-suite gap Rick's mutation
-        /// (b) exposed. Reintroducing a substring fallback ("if 'tots' in name or 'fries' in
-        /// name: return 'sides'") ahead of/instead of the deleted one makes Python's own unit
-        /// test fail, but nothing in this C# suite noticed, because every existing conformance
+        /// <summary>PR #61 review, must-fix 3: the one-word ("tatertot(s)", "tatortot(s)") and
+        /// hyphenated ("tater-tot(s)", "tator-tot(s)") spoken forms are also aliases of plain
+        /// Tots -- <c>_menu_key</c> does not collapse a hyphen to a space, so these needed their
+        /// own explicit keys in <c>_TOTS_ALIASES</c>; they weren't already covered by the
+        /// space-separated forms above.</summary>
+        [Theory]
+        [InlineData("tatertot")]
+        [InlineData("tatertots")]
+        [InlineData("tatortot")]
+        [InlineData("tatortots")]
+        [InlineData("tater-tot")]
+        [InlineData("tater-tots")]
+        [InlineData("tator-tot")]
+        [InlineData("tator-tots")]
+        [InlineData("Tater-Tots (Extra Crispy)")] // customised -- modifier stripped before the alias lookup
+        public Task One_word_and_hyphenated_tots_alias_forms_absorb_into_the_combo_side_slot(string item) =>
+            fixture.RunAsync(async () =>
+            {
+                var ct = TestContext.Current.CancellationToken;
+                const decimal unitPrice = 2.79m; // arbitrary -- update_order's price is caller-supplied
+                                                  // and never menu-validated for an alias name; only
+                                                  // comboSlot behaviour is under test.
+
+                var (browser, connection, roundTripIndex) = await OrderScenarioHelpers.ConnectAndGreetAsync(fixture, ct);
+                await using var _ = browser;
+
+                var result = await OrderScenarioHelpers.RunOrderStepsAsync(
+                    connection, browser,
+                    [
+                        ("add", BaseComboName, BaseComboSize, 1, BaseComboPrice),
+                        ("add", item, "medium", 1, unitPrice),
+                    ],
+                    roundTripIndex, ct);
+
+                OrderScenarioHelpers.AssertMoneyEqual(
+                    BaseComboPrice,
+                    OrderScenarioHelpers.GetOrderTotal(result.ToolResultJson!),
+                    $"'{item}' is a spoken alias of plain Tots (PR #61 review) and must absorb into the combo side slot.");
+                Assert.Equal(1, OrderScenarioHelpers.GetOrderItemCount(result.ToolResultJson!));
+            });
+
+        /// <summary>PR #61 review, must-fix 3: "Totts" (doubled-T typo) and "Tater Tot's" (stray
+        /// apostrophe) are deliberately NOT in <c>_TOTS_ALIASES</c> -- they must stay charged in
+        /// full exactly like any other off-menu near-miss (Rick's PR #50 revenue rule).</summary>
+        [Theory]
+        [InlineData("Totts")]
+        [InlineData("Tater Tot's")]
+        public Task Near_miss_tots_spellings_are_charged_in_full_alongside_a_combo_not_absorbed(string item) =>
+            fixture.RunAsync(async () =>
+            {
+                var ct = TestContext.Current.CancellationToken;
+                const decimal unitPrice = 2.79m;
+
+                var (browser, connection, roundTripIndex) = await OrderScenarioHelpers.ConnectAndGreetAsync(fixture, ct);
+                await using var _ = browser;
+
+                var result = await OrderScenarioHelpers.RunOrderStepsAsync(
+                    connection, browser,
+                    [
+                        ("add", BaseComboName, BaseComboSize, 1, BaseComboPrice),
+                        ("add", item, "medium", 1, unitPrice),
+                    ],
+                    roundTripIndex, ct);
+
+                OrderScenarioHelpers.AssertMoneyEqual(
+                    BaseComboPrice + unitPrice,
+                    OrderScenarioHelpers.GetOrderTotal(result.ToolResultJson!),
+                    $"'{item}' is not an exact-match Tots alias and must be charged in full.");
+                Assert.Equal(2, OrderScenarioHelpers.GetOrderItemCount(result.ToolResultJson!));
+            });
+
+        /// <summary>PR #61 review, must-fix 5 -- no behaviour change, a pinned fail-safe
+        /// contract. Size words embedded directly in the name text are not stripped by
+        /// <c>strip_modifiers</c> (only a bracketed <c>(...)</c> modifier is), so "Large Tater
+        /// Tots" (size word in the name text) is charged in full, while "Tater Tots (Large)"
+        /// (size word as a bracketed modifier) still absorbs into the combo side slot -- the
+        /// modifier is stripped before the alias lookup runs, exactly like any other
+        /// modifier.</summary>
+        [Fact]
+        public Task Size_word_in_the_name_vs_as_a_modifier() =>
+            fixture.RunAsync(async () =>
+            {
+                var ct = TestContext.Current.CancellationToken;
+                const decimal unitPrice = 2.79m;
+
+                var (browser, connection, roundTripIndex) = await OrderScenarioHelpers.ConnectAndGreetAsync(fixture, ct);
+                await using var _ = browser;
+
+                var result = await OrderScenarioHelpers.RunOrderStepsAsync(
+                    connection, browser,
+                    [
+                        ("add", BaseComboName, BaseComboSize, 1, BaseComboPrice),
+                        ("add", "Large Tater Tots", "large", 1, unitPrice),
+                        ("add", "Tater Tots (Large)", "large", 1, unitPrice),
+                    ],
+                    roundTripIndex, ct);
+
+                // Combo (absorbs "Tater Tots (Large)" into its side slot) + "Large Tater Tots"
+                // charged in full = combo price + one unit price, not two.
+                OrderScenarioHelpers.AssertMoneyEqual(
+                    BaseComboPrice + unitPrice,
+                    OrderScenarioHelpers.GetOrderTotal(result.ToolResultJson!),
+                    "'Large Tater Tots' (size word in the name) is charged in full; " +
+                    "'Tater Tots (Large)' (size word as a modifier) absorbs into the combo side slot.");
+                Assert.Equal(2, OrderScenarioHelpers.GetOrderItemCount(result.ToolResultJson!));
+            });
+
+
         /// case here used either a real allow-listed side or a real non-side menu item -- never
         /// an off-menu name that merely LOOKS like a side. These three names are deliberately
         /// off-menu (not in menuItems.json at all, so category inference can't rescue them
