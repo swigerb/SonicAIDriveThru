@@ -43,6 +43,12 @@ public sealed class SpokenTotalTests(HappyHourJustBeforeOpenFixture fixture)
         OrderScenarioHelpers.AssertMoneyEqual(
             spokenCase.ExpectedFinalTotal, OrderScenarioHelpers.GetOrderFinalTotal(result.ToolResultJson!));
 
+        // PR #50 review (should-fix 1, Rick's X1): assert the *Display strings directly too, on an
+        // active (non-Skip'd) case, not only the decimal. subtotal 8.77, tax 8.77*0.08=0.7016.
+        Assert.Equal("$8.77", OrderScenarioHelpers.GetOrderTotalDisplay(result.ToolResultJson!));
+        Assert.Equal("$0.70", OrderScenarioHelpers.GetOrderTaxDisplay(result.ToolResultJson!));
+        Assert.Equal("$9.47", OrderScenarioHelpers.GetOrderFinalTotalDisplay(result.ToolResultJson!));
+
         Assert.Contains(spokenCase.ExpectedSpokenTotalText, result.FunctionCallOutputText, StringComparison.Ordinal);
     });
 
@@ -115,6 +121,16 @@ public sealed class SpokenTotalHalfCentTests(HappyHourAtOpenFixture fixture)
 
         OrderScenarioHelpers.AssertMoneyEqual(
             spokenCase.ExpectedFinalTotal, OrderScenarioHelpers.GetOrderFinalTotal(result.ToolResultJson!));
+
+        // PR #50 review (should-fix 1, Rick's X1): assert the three *Display strings on the
+        // half-cent case explicitly -- subtotal 4.875 -> $4.88, tax 0.39 (exact, no rounding
+        // needed), finalTotal 5.265 -> $5.27. This kills a ROUND_HALF_EVEN mutation: banker's
+        // rounding leaves totalDisplay unchanged (487.5 cents rounds to the even 488) but flips
+        // finalTotalDisplay to "$5.26" (526.5 cents rounds to the even 526, not up to 527) --
+        // invisible if only the raw JSON decimal (never rounded) is asserted.
+        Assert.Equal("$4.88", OrderScenarioHelpers.GetOrderTotalDisplay(result.ToolResultJson!));
+        Assert.Equal("$0.39", OrderScenarioHelpers.GetOrderTaxDisplay(result.ToolResultJson!));
+        Assert.Equal("$5.27", OrderScenarioHelpers.GetOrderFinalTotalDisplay(result.ToolResultJson!));
 
         Assert.Contains(spokenCase.ExpectedSpokenTotalText, result.FunctionCallOutputText, StringComparison.Ordinal);
     });
