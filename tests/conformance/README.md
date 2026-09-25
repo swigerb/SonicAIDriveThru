@@ -706,6 +706,64 @@ is confirmed still shows the default). Unit-tested at the Python level in
 `test_a_different_brand_new_session_still_gets_the_default`), and `test_rtmt.py`'s
 `ExtensionSetVoiceTests`/`SanitizeVoiceTests`.
 
+#### Issue #57 follow-ups to the voice contract
+
+- **FU1 (defense in depth, no observable behaviour change today)**: the resume voice-restore guard
+  (`handle_resume`) also checks `not assistant_audio_seen` before sending the restore
+  `session.update`. In practice `handle_resume` only ever runs on a connection's first frame
+  (`reject_late_resume` handles every later one), so `assistant_audio_seen` is always `False` at
+  this point and the guard changes nothing *today*. It is kept as a free, explicit safety net: were
+  a future refactor (a rebrand port, or the C# backend) to relax the "resume is first-frame-only"
+  invariant, sending a voice `session.update` after the upstream has voice-locked (assistant audio
+  already produced) would otherwise be silently rejected (`cannot_update_voice`; see
+  `SessionUpdateFallbackTests`). No new test was written for this guard specifically — it is
+  unreachable via any current code path, so a synthetic test would only assert on dead code. Any
+  future PR that removes the first-frame-only invariant must add one then.
+- **FU2 — allowed-voices config validation**: `configure_realtime_model()` now rejects a
+  non-`list` `model.allowed_voices` (e.g. a bare string, silently iterated character-by-character)
+  at startup with `ValueError`, and separately rejects a configured `default_voice` that is not a
+  member of the resulting allow-list. An omitted/empty `allowed_voices` falls back to the
+  10-voice default set (`app/frontend/src/lib/voices.ts`). Unit-tested in `test_session_bootstrap.py`
+  (`VoiceConfigValidationTests`): bare string rejected, dict rejected, list accepted, falls back to
+  the default set when empty/omitted, default-voice-not-in-list fails startup, default-voice-in-list
+  succeeds, `voice_choice=None` skips the membership check, and the shipped `config.yaml`'s default
+  voice is confirmed present in the default allow-list.
+- **FU3 — CI artifact upload on failure**: already satisfied by the existing
+  `.github/workflows/conformance.yml` (`if: failure()` upload-artifact step uploads
+  `tests/conformance/TestResults` — containing `conformance.trx` — and
+  `tests/conformance/conformance-output.log`). The "backend log" is not a separate file: on any
+  scenario failure `ConformanceFixture.RunAsync` embeds `Backend.DumpDiagnostics()` (the captured
+  backend stdout/stderr ring buffer) directly into the exception message, so it lands in both the
+  `.trx` and the detailed-console output log already uploaded. No workflow change was needed.
+- **Probes D/E/F** (`VoicePickerTests.cs`), extending the round-6 scenarios above:
+  - **D — object voice**: `Object_voice_is_rejected_and_never_reaches_upstream_or_a_new_guests_bootstrap`
+    sends `{"type":"extension.set_voice","voice":{"nested":"value"}}` (a non-string value, distinct
+    from the already-covered unknown-*string* case) and asserts it reaches neither the sender's own
+    upstream frames nor a fresh second guest's bootstrap.
+  - **E — restore ordering + a third guest**:
+    `Resumed_voice_restore_precedes_any_response_create_and_a_third_guest_still_gets_the_default`
+    extends the existing resume-restore scenario: after the resumed connection's restore
+    `session.update` is confirmed, it sends `response.create` and asserts the restore frame's
+    sequence number is strictly earlier than the `response.create` frame's — then connects a
+    **third**, entirely unrelated guest and asserts its bootstrap voice is still the server default.
+    (The restore-precedes-response.create ordering is additionally structurally guaranteed by
+    `_forward_messages`'s single-threaded per-connection message loop — `handle_resume` fully
+    `await`s its restore send before the loop advances to the next inbound frame — so no single-line
+    mutation can reorder it; this is documented rather than mutation-tested for that specific
+    sub-assertion.)
+  - **F — end_session clears the voice**:
+    `Ending_the_session_clears_the_voice_so_the_next_fresh_session_gets_the_default` has a guest pick
+    a non-default voice, end the session via `extension.end_session`, then connects a second guest
+    and asserts the default. **Known black-box limitation**: because every new connection gets a
+    brand-new `session_id`, this scenario cannot actually distinguish whether `end_session` popped
+    the voice or not (a new session was never in the voice map regardless), so it is inert against a
+    regression that removes `SessionManager.end_session`'s `self._voices.pop(session_id, None)`. The
+    real pin for that line is the companion Python white-box test
+    `test_order_resume.py::VoicePersistenceTests::test_end_session_clears_the_persisted_voice`, which
+    asserts `get_voice(session_id) is None` directly after `end_session`. Both are kept: the C#
+    scenario exercises the real `extension.end_session` code path end-to-end (unlike the pre-existing
+    bare-close test), the Python test is what actually catches the regression.
+
 
 Exercised black-box by `Scenarios/Security/ClientToServerAllowListTests.cs`: a malicious
 `response.create` override is stripped down to the bare form before the fake upstream ever sees it

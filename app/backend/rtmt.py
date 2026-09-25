@@ -1776,11 +1776,21 @@ class RTMiddleTier:
                     # module docstring), so it bootstrapped on the config
                     # default before we knew which session this socket was
                     # continuing. Without this, a Wi-Fi blip would silently
-                    # revert the guest's own voice choice. Safe to send
-                    # unconditionally: `assistant_audio_seen` is still False
-                    # on this fresh upstream, so GA has not voice-locked it.
+                    # revert the guest's own voice choice.
+                    # #57 FU1: `assistant_audio_seen` is always False here in
+                    # practice (handle_resume only ever runs on the first
+                    # frame -- reject_late_resume handles every later one),
+                    # so this guard changes nothing TODAY. It's kept anyway
+                    # as a free, explicit safety net: sending a voice
+                    # session.update after GA has voice-locked the upstream
+                    # (assistant audio already produced) would be rejected
+                    # wholesale (`cannot_update_voice`, see
+                    # SessionUpdateFallbackTests) -- a real risk for a future
+                    # refactor of this seam (e.g. other brand ports, or a C#
+                    # backend) that no longer guarantees "resume is
+                    # first-frame-only".
                     persisted_voice = self._sessions.get_voice(session_id)
-                    if persisted_voice is not None and persisted_voice != voice:
+                    if persisted_voice is not None and persisted_voice != voice and not assistant_audio_seen:
                         voice = persisted_voice
                         await target_ws.send_str(guard.track(self.build_voice_update(persisted_voice)))
                         logger.info("Restored voice %s for resumed session %s", persisted_voice, session_id)
@@ -2184,9 +2194,24 @@ def configure_realtime_model(rtmt: RTMiddleTier, model_cfg: dict, environ: Any =
     rtmt.reasoning_model = parse_reasoning_model(switch if switch else model_cfg.get("reasoning_model"))
     configured_voices = model_cfg.get("allowed_voices")
     if configured_voices:
+        # #57 FU2: a bare string (e.g. "marin") is iterable character-by-character
+        # in Python, so `frozenset(str(v) for v in "marin")` would silently become
+        # {"m", "a", "r", "i", "n"} instead of raising -- fail loudly at startup
+        # instead of shipping a config typo that rejects every voice pick.
+        if not isinstance(configured_voices, list):
+            raise ValueError(
+                f"model.allowed_voices must be a list of voice names, got "
+                f"{type(configured_voices).__name__} ({configured_voices!r})")
         rtmt.allowed_voices = frozenset(str(v) for v in configured_voices)
     else:
         rtmt.allowed_voices = _DEFAULT_ALLOWED_VOICES
+    # #57 FU2: the default voice (AZURE_OPENAI_REALTIME_VOICE_CHOICE / model.default_voice,
+    # already applied to rtmt.voice_choice by the caller) must itself be an allowed voice --
+    # otherwise every guest's bootstrap session.update would request a voice GA rejects.
+    if isinstance(rtmt.voice_choice, str) and rtmt.voice_choice not in rtmt.allowed_voices:
+        raise ValueError(
+            f"The default voice {rtmt.voice_choice!r} (AZURE_OPENAI_REALTIME_VOICE_CHOICE / "
+            f"model.default_voice) is not in model.allowed_voices ({sorted(rtmt.allowed_voices)})")
     if rtmt.reasoning_effort is not None and not rtmt._reasoning_model():
         logger.info("Deployment %s is not treated as a reasoning model (reasoning_model=%s); `reasoning` "
                     "(effort=%s) will not be sent", rtmt.deployment,

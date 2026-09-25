@@ -903,6 +903,77 @@ class ReasoningAndTranscriptionConfigTests(unittest.TestCase):
                 self.assertNotIn("reasoning", session)
                 self.assertNotIn("parallel_tool_calls", session)
 
+
+class VoiceConfigValidationTests(unittest.TestCase):
+    """swigerb/SonicAIDriveThru#57 FU2: `configure_realtime_model` must fail
+    LOUDLY at startup on a misconfigured voice allow-list, rather than
+    silently shipping a config that rejects every guest's voice pick."""
+
+    def _rtmt(self, voice_choice="marin"):
+        rtmt = RTMiddleTier("https://fake.openai.azure.com", "gpt-realtime-2.1", AzureKeyCredential("k"),
+                             voice_choice=voice_choice)
+        rtmt.system_message = SYSTEM_PROMPT
+        return rtmt
+
+    def test_a_bare_string_allowed_voices_is_rejected(self):
+        """A bare string is iterable character-by-character in Python --
+        `frozenset(str(v) for v in "marin")` would silently become
+        {"m", "a", "r", "i", "n"} instead of the single voice "marin". Pick a
+        default voice that IS one of those characters ("m") so a naive
+        char-set fallback would pass the (separate) membership check too --
+        only the isinstance guard itself can catch this."""
+        from rtmt import configure_realtime_model
+        with self.assertRaises(ValueError):
+            configure_realtime_model(self._rtmt(voice_choice="m"), {"allowed_voices": "marin"}, environ={})
+
+    def test_a_dict_allowed_voices_is_rejected(self):
+        from rtmt import configure_realtime_model
+        with self.assertRaises(ValueError):
+            configure_realtime_model(self._rtmt(), {"allowed_voices": {"marin": True}}, environ={})
+
+    def test_a_list_allowed_voices_is_accepted(self):
+        from rtmt import configure_realtime_model
+        rtmt = configure_realtime_model(self._rtmt(), {"allowed_voices": ["marin", "cedar"]}, environ={})
+        self.assertEqual(rtmt.allowed_voices, frozenset({"marin", "cedar"}))
+
+    def test_empty_or_omitted_allowed_voices_falls_back_to_the_default_ten(self):
+        from rtmt import _DEFAULT_ALLOWED_VOICES, configure_realtime_model
+        for cfg in ({}, {"allowed_voices": []}, {"allowed_voices": None}):
+            with self.subTest(cfg=cfg):
+                rtmt = configure_realtime_model(self._rtmt(), cfg, environ={})
+                self.assertEqual(rtmt.allowed_voices, _DEFAULT_ALLOWED_VOICES)
+
+    def test_default_voice_not_in_allow_list_fails_at_startup(self):
+        from rtmt import configure_realtime_model
+        with self.assertRaises(ValueError):
+            configure_realtime_model(self._rtmt(voice_choice="marin"),
+                                      {"allowed_voices": ["cedar", "shimmer"]}, environ={})
+
+    def test_default_voice_in_allow_list_succeeds(self):
+        from rtmt import configure_realtime_model
+        rtmt = configure_realtime_model(self._rtmt(voice_choice="cedar"),
+                                         {"allowed_voices": ["cedar", "shimmer"]}, environ={})
+        self.assertEqual(rtmt.voice_choice, "cedar")
+
+    def test_no_default_voice_configured_skips_the_membership_check(self):
+        """`voice_choice=None` means "send no voice at all" (see `_VOICE_UNSET`)
+        -- not a voice pick that could ever be invalid."""
+        from rtmt import configure_realtime_model
+        rtmt = configure_realtime_model(self._rtmt(voice_choice=None),
+                                         {"allowed_voices": ["cedar"]}, environ={})
+        self.assertIsNone(rtmt.voice_choice)
+
+    def test_shipped_config_default_voice_is_in_the_default_allow_list(self):
+        import yaml
+
+        from rtmt import _DEFAULT_ALLOWED_VOICES, configure_realtime_model
+        cfg = yaml.safe_load((Path(__file__).resolve().parents[1] / "config.yaml").read_text(encoding="utf-8"))
+        model_cfg = cfg["model"]
+        self.assertNotIn("allowed_voices", model_cfg, "shipped config leaves this commented out/default")
+        rtmt = configure_realtime_model(self._rtmt(voice_choice=model_cfg["default_voice"]), model_cfg, environ={})
+        self.assertIn(rtmt.voice_choice, _DEFAULT_ALLOWED_VOICES)
+
+
 class BuildSessionTests(unittest.TestCase):
 
     def _rtmt(self):

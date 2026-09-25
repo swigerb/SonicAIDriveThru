@@ -1,5 +1,6 @@
 using System.Net.WebSockets;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Conformance.Fakes;
 using Conformance.Harness;
 using Xunit;
@@ -433,5 +434,217 @@ public sealed class VoicePickerTests(VoicePickerConformanceFixture fixture)
             f => f.Sequence >= watermarkB && f.Type == "session.update", TimeSpan.FromSeconds(2), ct);
         Assert.True(spuriousUpdateOnB is null,
             "Guest A's voice pick must not affect guest B's already-open connection.");
+    });
+
+    /// <summary>
+    /// #57 Probe D (the other half -- <see cref="Unknown_voice_is_rejected_and_never_reaches_upstream_or_a_new_guests_bootstrap"/>
+    /// covers an unknown STRING voice): a non-string `voice` value (an object, exactly as a
+    /// tampered/compromised same-origin script could send -- useRealtime.tsx itself only ever
+    /// sends a string) must be dropped just as thoroughly -- never reaches upstream on the
+    /// sender's own connection, and never leaks into a later, unrelated guest's bootstrap either.
+    /// </summary>
+    [Fact]
+    public Task Object_voice_is_rejected_and_never_reaches_upstream_or_a_new_guests_bootstrap() => fixture.RunAsync(async () =>
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var noneOpen = await fixture.Realtime.WaitForNoOpenConnectionsAsync(FrameTimeout, ct);
+        Assert.True(noneOpen, $"Expected no open upstream connections at test start, but " +
+            $"{fixture.Realtime.OpenConnectionCount} are still open — a previous test leaked a connection.");
+
+        var guestAConnectionTask = fixture.Realtime.WaitForNextConnectionAsync(FrameTimeout, ct);
+        await using (var guestA = await RealtimeBrowserClient.ConnectAsync(fixture.Backend!.BaseUri, cancellationToken: ct))
+        {
+            var guestAConnection = await guestAConnectionTask;
+            Assert.True(guestAConnection is not null, $"No upstream connection was accepted within {FrameTimeout}.");
+
+            var bootstrap = await guestAConnection!.ReceivedFrames.WaitForAsync(f => f.Sequence == 0, FrameTimeout, ct);
+            Assert.True(bootstrap is not null, "Bootstrap session.update never arrived.");
+
+            var watermarkA = guestAConnection.ReceivedFrames.Snapshot().Count;
+            await guestA.SendAsync(
+                new JsonObject { ["type"] = "extension.set_voice", ["voice"] = new JsonObject { ["nested"] = "value" } },
+                ct);
+
+            // No assistant audio has been seen yet, so a legitimate immediate pick would forward
+            // right away (see Voice_picker_updates_immediately_before_any_assistant_audio_has_been_sent)
+            // -- a bounded absence window here proves the object voice was dropped, not merely deferred.
+            var spuriousUpdateOnA = await guestAConnection.ReceivedFrames.WaitForAsync(
+                f => f.Sequence >= watermarkA && f.Type == "session.update", TimeSpan.FromSeconds(2), ct);
+            Assert.True(spuriousUpdateOnA is null,
+                $"An object voice must never reach upstream, but a session.update arrived: {spuriousUpdateOnA?.Json}");
+
+            await guestA.CloseAsync(WebSocketCloseStatus.NormalClosure, "object voice attempted, moving to next guest", ct);
+            await guestA.WaitForCloseAsync(FrameTimeout, ct);
+        }
+
+        var firstClosed = await fixture.Realtime.WaitForNoOpenConnectionsAsync(FrameTimeout, ct);
+        Assert.True(firstClosed, "Expected guest A's upstream socket to close before starting the next guest.");
+
+        var guestBConnectionTask = fixture.Realtime.WaitForNextConnectionAsync(FrameTimeout, ct);
+        await using var guestB = await RealtimeBrowserClient.ConnectAsync(fixture.Backend!.BaseUri, cancellationToken: ct);
+        var guestBConnection = await guestBConnectionTask;
+        Assert.True(guestBConnection is not null, $"No upstream connection was accepted within {FrameTimeout}.");
+
+        var guestBBootstrap = await guestBConnection!.ReceivedFrames.WaitForAsync(f => f.Sequence == 0, FrameTimeout, ct);
+        Assert.True(guestBBootstrap is not null, "Bootstrap session.update never arrived for guest B.");
+        var guestBVoice = guestBBootstrap!.Json.GetProperty("session").GetProperty("audio")
+            .GetProperty("output").GetProperty("voice").GetString();
+        Assert.Equal(BackendContract.DefaultVoice, guestBVoice);
+    });
+
+    /// <summary>
+    /// #57 Probe E (the two aspects <see cref="Resumed_connection_restores_the_picked_voice"/>
+    /// doesn't itself pin): (1) the resume-restore session.update must reach upstream BEFORE any
+    /// `response.create` on the resumed connection -- i.e. the restore is not merely eventual, it
+    /// happens ahead of the model being allowed to speak in the restored voice's session; (2) a
+    /// THIRD, wholly unrelated guest connecting after the resume still gets the server's config
+    /// default, never guest A's restored pick (the resume path must not become a new leak vector
+    /// into unrelated bootstraps, mirroring
+    /// <see cref="Voice_picked_after_lock_does_not_carry_to_a_brand_new_unrelated_connection"/>
+    /// for the non-resume case).
+    /// </summary>
+    [Fact]
+    public Task Resumed_voice_restore_precedes_any_response_create_and_a_third_guest_still_gets_the_default() => fixture.RunAsync(async () =>
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var noneOpen = await fixture.Realtime.WaitForNoOpenConnectionsAsync(FrameTimeout, ct);
+        Assert.True(noneOpen, $"Expected no open upstream connections at test start, but " +
+            $"{fixture.Realtime.OpenConnectionCount} are still open — a previous test leaked a connection.");
+
+        const string pickedVoice = "shimmer";
+
+        var firstConnectionTask = fixture.Realtime.WaitForNextConnectionAsync(FrameTimeout, ct);
+        var first = await RealtimeBrowserClient.ConnectAsync(fixture.Backend!.BaseUri, cancellationToken: ct);
+        var firstConnection = await firstConnectionTask;
+        Assert.True(firstConnection is not null, $"No upstream connection was accepted within {FrameTimeout}.");
+
+        await first.SendStartSessionAsync(cancellationToken: ct);
+        var metadata = await first.ReceivedFrames.WaitForAsync(f => f.Type == "extension.session_metadata", FrameTimeout, ct);
+        Assert.True(metadata is not null, "Expected extension.session_metadata on the first connection.");
+        var resumeId = metadata!.Json.GetProperty("resumeId").GetString();
+        Assert.False(string.IsNullOrEmpty(resumeId), "extension.session_metadata must carry a non-empty resumeId.");
+
+        var greetingAudio = await first.ReceivedFrames.WaitForAsync(
+            f => f.Type == "response.audio.delta", FrameTimeout, ct);
+        Assert.True(greetingAudio is not null, "Expected the greeting to send assistant audio to the browser before the voice lock can be exercised.");
+        var roundTripToken = await first.ReceivedFrames.WaitForAsync(
+            f => f.Type == "extension.round_trip_token", FrameTimeout, ct);
+        Assert.True(roundTripToken is not null, "extension.round_trip_token never reached the browser (greeting never completed).");
+
+        // Locked (assistant audio already seen), so this pick is deferred on THIS connection but
+        // must still be persisted for the resume to restore. Sentinel on a follow-up session.update
+        // to prove the pick was fully processed server-side before dropping the connection.
+        await first.SendExtensionSetVoiceAsync(pickedVoice, cancellationToken: ct);
+        var watermark = firstConnection!.ReceivedFrames.Snapshot().Count;
+        await first.SendStartSessionAsync(cancellationToken: ct);
+        var sentinelUpdate = await firstConnection.ReceivedFrames.WaitForAsync(
+            f => f.Sequence >= watermark && f.Type == "session.update", FrameTimeout, ct);
+        Assert.True(sentinelUpdate is not null, "Expected the browser's own follow-up session.update to reach upstream.");
+
+        await first.CloseAsync(cancellationToken: ct);
+        await first.WaitForCloseAsync(FrameTimeout, ct);
+        await first.DisposeAsync();
+
+        var firstClosed = await fixture.Realtime.WaitForNoOpenConnectionsAsync(FrameTimeout, ct);
+        Assert.True(firstClosed, "Expected the first connection's upstream socket to close before resuming.");
+
+        var secondConnectionTask = fixture.Realtime.WaitForNextConnectionAsync(FrameTimeout, ct);
+        await using var second = await RealtimeBrowserClient.ConnectAsync(fixture.Backend!.BaseUri, cancellationToken: ct);
+        var secondConnection = await secondConnectionTask;
+        Assert.True(secondConnection is not null, "No upstream connection was accepted for the resumed browser socket.");
+
+        await second.SendExtensionResumeAsync(resumeId!, ct);
+        var resumed = await second.ReceivedFrames.WaitForAsync(f => f.Type == "extension.session_resumed", FrameTimeout, ct);
+        Assert.True(resumed is not null, "Expected extension.session_resumed on the resumed connection.");
+
+        var bootstrap = await secondConnection!.ReceivedFrames.WaitForAsync(f => f.Sequence == 0, FrameTimeout, ct);
+        Assert.True(bootstrap is not null, "Bootstrap session.update never arrived on the resumed connection.");
+
+        var restoreUpdate = await secondConnection.ReceivedFrames.WaitForAsync(
+            f => f.Type == "session.update" && f.Sequence > bootstrap!.Sequence, FrameTimeout, ct);
+        Assert.True(restoreUpdate is not null,
+            "Expected a follow-up session.update restoring this session's own picked voice on the resumed connection.");
+        var restoredVoice = restoreUpdate!.Json.GetProperty("session").GetProperty("audio")
+            .GetProperty("output").GetProperty("voice").GetString();
+        Assert.Equal(pickedVoice, restoredVoice);
+
+        // #57 Probe E, aspect 1: nudge the model directly (CONFORMANCE_TEST_HOOKS is on for this
+        // Default-profile backend) and confirm the restore's sequence number precedes it -- the
+        // restore must not still be in flight (or worse, not yet issued) by the time a response
+        // could be created in the restored voice's session.
+        await second.SendResponseCreateAsync(ct);
+        var responseCreate = await secondConnection.ReceivedFrames.WaitForAsync(
+            f => f.Type == "response.create" && f.Sequence > bootstrap!.Sequence, FrameTimeout, ct);
+        Assert.True(responseCreate is not null, "The browser's response.create never reached upstream.");
+        Assert.True(restoreUpdate!.Sequence < responseCreate!.Sequence,
+            "The voice restore must reach upstream strictly before any response.create on the resumed connection.");
+
+        // #57 Probe E, aspect 2: a third, wholly unrelated guest (no resume) must still get the
+        // server's config default -- the resume path must not leak guest A's restored voice.
+        var thirdConnectionTask = fixture.Realtime.WaitForNextConnectionAsync(FrameTimeout, ct);
+        await using var third = await RealtimeBrowserClient.ConnectAsync(fixture.Backend!.BaseUri, cancellationToken: ct);
+        var thirdConnection = await thirdConnectionTask;
+        Assert.True(thirdConnection is not null, $"No upstream connection was accepted within {FrameTimeout} for the third guest.");
+
+        var thirdBootstrap = await thirdConnection!.ReceivedFrames.WaitForAsync(f => f.Sequence == 0, FrameTimeout, ct);
+        Assert.True(thirdBootstrap is not null, "Bootstrap session.update never arrived for the third guest.");
+        var thirdVoice = thirdBootstrap!.Json.GetProperty("session").GetProperty("audio")
+            .GetProperty("output").GetProperty("voice").GetString();
+        Assert.Equal(BackendContract.DefaultVoice, thirdVoice);
+    });
+
+    /// <summary>
+    /// #57 Probe F: `extension.end_session` (`session_manager.py`'s `end_session`, which pops
+    /// this session's persisted voice along with every other piece of resume state) must clear
+    /// the picked voice, not just close the socket -- so a brand-new, FRESH session (no resume
+    /// presented; the ended session's resume state is gone anyway) reliably gets the server's
+    /// config default. Deliberately exercises the `extension.end_session` code path (not a bare
+    /// WebSocket close, as
+    /// <see cref="Voice_picked_after_lock_does_not_carry_to_a_brand_new_unrelated_connection"/>
+    /// does) so a regression that skips the voice-cleanup step specifically is still caught.
+    /// </summary>
+    [Fact]
+    public Task Ending_the_session_clears_the_voice_so_the_next_fresh_session_gets_the_default() => fixture.RunAsync(async () =>
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var noneOpen = await fixture.Realtime.WaitForNoOpenConnectionsAsync(FrameTimeout, ct);
+        Assert.True(noneOpen, $"Expected no open upstream connections at test start, but " +
+            $"{fixture.Realtime.OpenConnectionCount} are still open — a previous test leaked a connection.");
+
+        const string pickedVoice = "ballad";
+
+        var firstConnectionTask = fixture.Realtime.WaitForNextConnectionAsync(FrameTimeout, ct);
+        await using (var first = await RealtimeBrowserClient.ConnectAsync(fixture.Backend!.BaseUri, cancellationToken: ct))
+        {
+            var firstConnection = await firstConnectionTask;
+            Assert.True(firstConnection is not null, $"No upstream connection was accepted within {FrameTimeout}.");
+
+            var bootstrap = await firstConnection!.ReceivedFrames.WaitForAsync(f => f.Sequence == 0, FrameTimeout, ct);
+            Assert.True(bootstrap is not null, "Bootstrap session.update never arrived.");
+
+            // No assistant audio seen yet, so the pick applies immediately -- confirms it was
+            // actually processed server-side (and persisted to the session) before end_session.
+            await first.SendExtensionSetVoiceAsync(pickedVoice, cancellationToken: ct);
+            var immediateUpdate = await firstConnection.ReceivedFrames.WaitForAsync(
+                f => f.Sequence > bootstrap!.Sequence && f.Type == "session.update", FrameTimeout, ct);
+            Assert.True(immediateUpdate is not null, "Expected the immediate voice pick to reach upstream.");
+
+            await first.SendExtensionEndSessionAsync(ct);
+            await first.WaitForCloseAsync(FrameTimeout, ct);
+        }
+
+        var firstClosed = await fixture.Realtime.WaitForNoOpenConnectionsAsync(FrameTimeout, ct);
+        Assert.True(firstClosed, "Expected the ended session's upstream socket to close.");
+
+        var secondConnectionTask = fixture.Realtime.WaitForNextConnectionAsync(FrameTimeout, ct);
+        await using var second = await RealtimeBrowserClient.ConnectAsync(fixture.Backend!.BaseUri, cancellationToken: ct);
+        var secondConnection = await secondConnectionTask;
+        Assert.True(secondConnection is not null, $"No upstream connection was accepted within {FrameTimeout}.");
+
+        var secondBootstrap = await secondConnection!.ReceivedFrames.WaitForAsync(f => f.Sequence == 0, FrameTimeout, ct);
+        Assert.True(secondBootstrap is not null, "Bootstrap session.update never arrived for the next fresh session.");
+        var secondVoice = secondBootstrap!.Json.GetProperty("session").GetProperty("audio")
+            .GetProperty("output").GetProperty("voice").GetString();
+        Assert.Equal(BackendContract.DefaultVoice, secondVoice);
     });
 }
