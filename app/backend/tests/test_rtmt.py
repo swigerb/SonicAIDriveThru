@@ -1310,6 +1310,81 @@ class ProcessMessageToClientTests(unittest.IsolatedAsyncioTestCase):
             result = await rtmt._process_message_to_client(msg, client_ws, server_ws, tools_pending)
         self.assertIsNotNone(result)
 
+    async def test_response_done_scrubs_function_call_from_output(self):
+        """A function_call item in response.done's output array (tool name +
+        JSON arguments) must never reach the browser -- the tool result is
+        relayed separately via extension.middle_tier_tool_response (see
+        response.output_item.done). This is the pre-existing part of the
+        scrub; kept here alongside the function_call_output case below so
+        both are covered in one place."""
+        rtmt = self._make_rtmt()
+        client_ws = _make_mock_ws()
+        server_ws = _make_mock_ws()
+        tools_pending = {}
+        msg = MagicMock()
+        msg.data = json.dumps({
+            "type": "response.done",
+            "response": {
+                "output": [
+                    {"type": "function_call", "call_id": "call_1", "name": "update_order",
+                     "arguments": '{"action":"add","item_name":"SECRET_ARGS_TOKEN"}'},
+                    {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "ok"}]},
+                ],
+            },
+        })
+        result = await rtmt._process_message_to_client(msg, client_ws, server_ws, tools_pending)
+        self.assertNotIn("SECRET_ARGS_TOKEN", result)
+        output = json.loads(result)["response"]["output"]
+        self.assertEqual([o["type"] for o in output], ["message"])
+
+    async def test_response_done_scrubs_function_call_output_from_output(self):
+        """swigerb/SonicAIDriveThru#32: a function_call_output item (the raw
+        tool result) embedded in response.done's output array must also
+        never reach the browser -- same leak class as function_call, and the
+        same defense-in-depth `_drop_from_client` already applies on the
+        conversation-item side. GA never actually places one here (it's a
+        client-authored item, not model output), but the middle tier must
+        not assume that will always hold."""
+        rtmt = self._make_rtmt()
+        client_ws = _make_mock_ws()
+        server_ws = _make_mock_ws()
+        tools_pending = {}
+        msg = MagicMock()
+        msg.data = json.dumps({
+            "type": "response.done",
+            "response": {
+                "output": [
+                    {"type": "function_call_output", "call_id": "call_1", "output": "SECRET_RESULT_TOKEN"},
+                    {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "ok"}]},
+                ],
+            },
+        })
+        result = await rtmt._process_message_to_client(msg, client_ws, server_ws, tools_pending)
+        self.assertNotIn("SECRET_RESULT_TOKEN", result)
+        output = json.loads(result)["response"]["output"]
+        self.assertEqual([o["type"] for o in output], ["message"])
+
+    async def test_response_done_still_forwards_message_output_unchanged(self):
+        """A response.done with no function_call/function_call_output items
+        must be forwarded completely unmodified -- the frontend reads
+        response.output[].content[].transcript to build the spoken
+        transcript UI."""
+        rtmt = self._make_rtmt()
+        client_ws = _make_mock_ws()
+        server_ws = _make_mock_ws()
+        tools_pending = {}
+        msg = MagicMock()
+        msg.data = json.dumps({
+            "type": "response.done",
+            "response": {
+                "output": [
+                    {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Anything else?"}]},
+                ],
+            },
+        })
+        result = await rtmt._process_message_to_client(msg, client_ws, server_ws, tools_pending)
+        self.assertEqual(result, msg.data)
+
     async def test_malformed_json_does_not_crash(self):
         """Malformed data that passes regex but fails json.loads should not crash."""
         rtmt = self._make_rtmt()

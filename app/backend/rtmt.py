@@ -1091,7 +1091,18 @@ class RTMiddleTier:
                             logger.info("Response completed with NO tool calls (output types: %s)", out_types)
                         _vlog(verbose, "  Response done — output types: %s",
                               [o.get("type", "?") for o in output])
-                        filtered = [o for o in output if o.get("type") != "function_call"]
+                        # swigerb/SonicAIDriveThru#32: the browser gets the tool
+                        # result via extension.middle_tier_tool_response instead
+                        # (see response.output_item.done) -- it must never see
+                        # the model's raw function_call (tool name + JSON
+                        # arguments) or a function_call_output (tool result)
+                        # embedded in response.done's output array. GA never
+                        # actually places a function_call_output here (it's a
+                        # client-authored item, not model output), but the
+                        # second type is scrubbed anyway for defense in depth
+                        # and to mirror _drop_from_client's identical check on
+                        # the conversation-item side.
+                        filtered = [o for o in output if o.get("type") not in ("function_call", "function_call_output")]
                         if len(filtered) != len(output):
                             message["response"]["output"] = filtered
                             updated_message = json.dumps(message)

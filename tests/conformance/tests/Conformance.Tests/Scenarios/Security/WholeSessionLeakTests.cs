@@ -25,15 +25,22 @@ namespace Conformance.Tests.Scenarios.Security;
 /// enumerate by name) would also be caught.
 ///
 /// PR #30 review round 3, item 3 ("S2a") added a fifth secret source: every bootstrap tool's
-/// `description` and its whole serialized `parameters` object, since `_scrub_session_for_client`
-/// drops them from the browser-bound session echo via `session["tools"] = []` -- a different
-/// line than the conversation-item drop logic the other four secrets exercise.
+/// `description` and its whole serialized `parameters` object, since the browser-bound
+/// `session.created`/`session.updated` echo never carries a `tools` key at all -- a different
+/// mechanism than the conversation-item drop logic the other four secrets exercise. (Originally
+/// enforced by `_scrub_session_for_client`'s deny-list setting `session["tools"] = []`; since
+/// swigerb/SonicAIDriveThru#45, `_client_session_echo` builds a fresh allow-listed dict that
+/// simply never includes a `tools` key in the first place.)
 ///
-/// Deliberately captured text is limited to the operator-only secrets above, and only their
-/// truly operator-only prose: the tool round trip's `function_call_output` content is *not*
-/// added to the secret set, because its result legitimately reaches the browser via
-/// `extension.middle_tier_tool_response` today (by design, not a leak; scrubbing
-/// `response.done`'s embedded function_call args is tracked separately as out-of-scope "F2").
+/// Deliberately captured text is limited to the operator-only secrets above (plus the tool-call
+/// arguments added below), and only their truly operator-only prose. The tool round trip's
+/// `function_call_output` *result* content is not added to the secret set, because it legitimately
+/// reaches the browser via `extension.middle_tier_tool_response` today (by design, not a leak) --
+/// but swigerb/SonicAIDriveThru#32 requires the model's raw `function_call` *arguments* (tool name
+/// + JSON args embedded in `response.done`'s `output` array) never reach the browser at all, so
+/// `update_order`'s `ArgumentsJson` below is added to the secret set via
+/// <see cref="AddSecretWindowsExcludingLegitimateOverlap"/> (excluding the legitimate order-state
+/// overlap its own `extension.middle_tier_tool_response` echo produces).
 /// The rehydration item's embedded order JSON / recent-conversation history duplicates data the
 /// browser already legitimately has (its own order state, its own earlier conversation.item /
 /// transcript frames) -- rather than hand-splitting that text at a backend-specific marker
@@ -48,11 +55,14 @@ namespace Conformance.Tests.Scenarios.Security;
 /// `item.id` authorship check in `_drop_from_client`, leaving only the `role == "system"`
 /// backstop) makes this fail specifically via the greeting item, since it is the one middle-tier
 /// item that is `role: "user"` and therefore not caught by the backstop alone -- the one proof no
-/// other test in this suite can provide.
+/// other test in this suite can provide. Disabling swigerb/SonicAIDriveThru#32's
+/// `function_call`/`function_call_output` scrub in `response.done` (rtmt.py) makes this fail via
+/// `update_order`'s tool-call arguments leaking on the browser's `response.done` frame.
 ///
 /// Runs under <see cref="BackendProfiles.ShortTimers"/> so the resume grace hold and nudge timer
 /// fit in a fast test.
 /// </summary>
+
 [Collection(ShortTimersConformanceCollection.Name)]
 public sealed class WholeSessionLeakTests(ShortTimersConformanceFixture fixture)
 {
@@ -83,10 +93,10 @@ public sealed class WholeSessionLeakTests(ShortTimersConformanceFixture fixture)
 
         // ── PR #30 review round 3, item 3 ("S2a"): every tool's description and its whole
         // serialized parameters object are just as operator-only as `instructions` -- they are
-        // dropped from the browser-bound session echo by `_scrub_session_for_client` setting
-        // `session["tools"] = []`, not by anything role- or authorship-based, so this is the one
-        // proof in the suite that specifically exercises *that* line rather than the
-        // conversation-item drop logic. ──
+        // dropped from the browser-bound session echo because `_client_session_echo` builds a
+        // fresh allow-listed dict that never includes a `tools` key at all, not by anything
+        // role- or authorship-based, so this is the one proof in the suite that specifically
+        // exercises *that* mechanism rather than the conversation-item drop logic. ──
         var bootstrapTools = bootstrap.Json.GetProperty("session").GetProperty("tools");
         Assert.True(bootstrapTools.GetArrayLength() > 0, "Bootstrap session.update must carry at least one tool.");
         foreach (var tool in bootstrapTools.EnumerateArray())
@@ -135,13 +145,17 @@ public sealed class WholeSessionLeakTests(ShortTimersConformanceFixture fixture)
         Assert.True(greetingRoundTrip is not null, "Greeting round trip never completed.");
 
         // ── Tool round trip: realistic mid-conversation traffic, per UpdateOrderToolCallTests.
-        // Its function_call_output text is intentionally *not* added to secretWindows -- see the
-        // class doc comment. ──
+        // Its function_call_output *result* text is intentionally *not* added to secretWindows --
+        // see the class doc comment -- but its function_call *arguments* (raw tool-call JSON) are
+        // added below (swigerb/SonicAIDriveThru#32), since those must never reach the browser via
+        // response.done's output array. ──
         const string callId = "call_whole_session_leak_1";
+        const string updateOrderArgumentsJson =
+            """{"action":"add","item_name":"Small Fries","size":"Small","quantity":1,"price":2.49}""";
         firstConnection.Script.Enqueue(new ResponseScript([
             new FunctionCallEvent(
                 Name: "update_order",
-                ArgumentsJson: """{"action":"add","item_name":"Small Fries","size":"Small","quantity":1,"price":2.49}""",
+                ArgumentsJson: updateOrderArgumentsJson,
                 CallId: callId),
             new DoneEvent(),
         ]));
@@ -164,6 +178,16 @@ public sealed class WholeSessionLeakTests(ShortTimersConformanceFixture fixture)
                  toolName.GetString() == "update_order",
             FrameTimeout, ct);
         Assert.True(toolResponse is not null, "Expected extension.middle_tier_tool_response for update_order on the browser.");
+
+        // ── swigerb/SonicAIDriveThru#32: the raw function_call arguments (tool name + JSON args)
+        // must never reach the browser through response.done's output array. update_order's own
+        // extension.middle_tier_tool_response legitimately echoes overlapping order-state text
+        // (item name, quantity, price) back to the browser by design, so
+        // AddSecretWindowsExcludingLegitimateOverlap -- not the plain AddSecretWindows used for
+        // the other four secrets -- excludes that specific legitimate overlap while still
+        // catching a leak of the raw arguments JSON through any other frame type. ──
+        AddSecretWindowsExcludingLegitimateOverlap(
+            updateOrderArgumentsJson, first.ReceivedFrames.Snapshot(), secretWindows);
 
         // ── Search tool round trip (PR #30 review round 3, item 4, "S2b"): unlike
         // update_order's, `search`'s result is model-only -- `tools.py`'s `search()` always

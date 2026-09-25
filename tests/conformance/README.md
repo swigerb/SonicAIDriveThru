@@ -415,11 +415,113 @@ which would otherwise let a lookalike Origin with an empty host component slip t
 rejection warning log line includes both values (`host=%s origin=%s`) so a real-world 403 is
 diagnosable from logs alone.
 
+## Browser→upstream allow-list contract (swigerb/SonicAIDriveThru#31)
+
+A backend must never forward a browser-sent WebSocket event to the upstream GA realtime socket
+just because it recognised (or failed to recognise) the event's `type` — every browser→upstream
+event type must be checked against an explicit allow-list, and anything not on it must be dropped
+(not forwarded, socket left open) with a WARNING logged, not silently passed through. Before this
+contract existed, the Python backend rewrote only `session.update` by name and forwarded every
+other client event type completely unchanged, which let a compromised/malicious browser page (not
+just the real frontend — anything running same-origin script) override the operator's system
+prompt/tools for a turn, inject a fabricated system-authored conversation item, or read back any
+conversation item verbatim including middle-tier-authored ones never meant for the browser.
+
+**The exact allow-list** (`_CLIENT_ALLOWED_TYPES` in `rtmt.py`), derived from every event type
+`app/frontend/src/hooks/useRealtime.tsx` (the only frontend code that talks to this socket)
+actually sends:
+
+| Type | Transform before forwarding |
+|---|---|
+| `session.update` | forwarded as-is (server-owned fields are re-applied separately, see `_build_session`) |
+| `input_audio_buffer.append` | forwarded as-is |
+| `input_audio_buffer.clear` | forwarded as-is |
+| `input_audio_buffer.commit` | forwarded as-is (legacy; kept for parity with the fast passthrough path) |
+| `response.cancel` | forwarded as-is |
+| `response.create` | forwarded, but with its entire top-level `"response"` key stripped whenever present — the bare `{"type":"response.create"}` form is legitimate turn-nudging traffic (the real frontend never sends one today, but it's used as a same-effect stand-in for server-VAD-triggered turns across many existing scenarios), while a `response.instructions`/`response.tools`/`response.tool_choice` override on it must never reach upstream |
+
+**Anything else — including, explicitly, `conversation.item.create` (a browser has no legitimate
+reason to author a conversation item; this is also how `role: "system"`/`"developer"` injection is
+blocked, by rejecting the whole event type rather than filtering the role field),
+`conversation.item.retrieve`, and any bare `extension.*` type sent directly by the browser instead
+of through its dedicated pre-forwarding handling — is dropped: not forwarded, connection left open,
+one WARNING logged** (`Dropped disallowed client→server event type %r`). A backend must not close
+the socket on an unexpected frame; an unrecognised event on an otherwise-legitimate session is not
+itself proof of compromise.
+
+`extension.*` types are deliberately absent from the allow-list table above: the Python backend
+fully consumes them (resume, end_session, set_verbose_logging, set_log_to_file, `set_voice`) before
+a message ever reaches the allow-list check, so they never need an entry there — but a backend
+implementation that instead let an `extension.*` type fall through to this check (e.g. a bare
+`extension.middle_tier_tool_response` sent directly by the browser, bypassing the normal tool-call
+flow — see the GA-validation-fidelity finding #3 below) must still drop it, since it is not one of
+the allow-listed entries.
+
+Exercised black-box by `Scenarios/Security/ClientToServerAllowListTests.cs`: a malicious
+`response.create` override is stripped down to the bare form before the fake upstream ever sees it
+(and the override text never appears on any upstream frame); a `conversation.item.create` with
+`role: "system"` never reaches upstream; a `conversation.item.retrieve` never reaches upstream; and
+— to prove the allow-list is a *filter*, not a kill-switch — every one of the frontend's own
+legitimate event types (`session.update`, `input_audio_buffer.append`, `response.cancel`,
+`extension.set_voice`) still reaches the fake upstream unimpeded. Unit-tested at the Python level in
+`test_rtmt.py`'s `ProcessMessageToServerTests` (integration path) and `ClientToServerAllowListTests`
+(pure `_filter_client_to_server`/`_CLIENT_ALLOWED_TYPES` unit tests, log assertions included).
+
+## Session-echo allow-list contract (swigerb/SonicAIDriveThru#45)
+
+Symmetrically, a backend must never let the browser see the *full* upstream `session.created`/
+`session.updated` object either — it must build a fresh, minimal, explicitly allow-listed copy for
+every such echo, not a deny-list scrub of the full object. A deny-list has to be updated every time
+the upstream GA API adds a new top-level session key, and silently leaks any key nobody has
+enumerated yet: GA has since shipped `prompt`, `tracing`, `include`, and `truncation`, none of which
+a hypothetical deny-list written before they existed could have known to strip.
+
+**The exact session-echo shape** (`_client_session_echo` in `rtmt.py`) every `session.created` and
+`session.updated` frame is replaced with before being sent to the browser — nothing else, no matter
+what the upstream session object also contains:
+
+```json
+{
+  "type": "session.created",
+  "event_id": "evt_...",
+  "session": {
+    "id": "sess_...",
+    "object": "realtime.session",
+    "audio": { "output": { "voice": "marin" } }
+  }
+}
+```
+
+i.e. exactly `{type, event_id, session:{id, object, audio:{output:{voice}}}}` — every other
+top-level session key (`instructions`, `tools`, `tool_choice`, `model`, `prompt`, `tracing`,
+`include`, `truncation`, `reasoning`, `parallel_tool_calls`, `max_output_tokens`,
+`output_modalities`, ...) is absent, unconditionally, because the copy is built field-by-field
+rather than derived from (and then pruned out of) the upstream object. `voice` is kept only because
+a hypothetical future frontend handler might reasonably want the active voice — the current
+frontend (`useRealtime.tsx`) has no handler at all for either event type, verified by inspection.
+
+Exercised black-box by `Scenarios/Security/ScrubHardeningTests.cs`'s
+`Session_updated_relays_only_the_allow_listed_shape_even_with_every_ga_top_level_key_set`: every GA
+top-level key (including `prompt`, `tracing`, `include`, `truncation`) is set upstream via the
+browser's own `session.update` (all of them are legitimately forwardable per `_GA_SESSION_TOP_LEVEL`
+and accepted by `GaSessionValidator`), yet the resulting `session.updated` the browser receives has
+top-level keys of exactly `{id, object, audio}`, `audio` keys of exactly `{output}`, and `output`
+keys of exactly `{voice}`. The pre-existing scrub/visibility scenarios (`SessionUpdatedClientVisibilityTests.cs`
+and the rest of `ScrubHardeningTests.cs`) continue to pass unchanged under the new allow-list shape.
+Unit-tested at the Python level in `test_rtmt.py`.
+
+**Related scrub, not a separate allow-list of its own:** `response.done`'s `output` array is also
+scrubbed before being relayed to the browser — every `function_call` and `function_call_output`
+item is stripped out (tool names and raw arguments/results are operator-only), leaving only
+`message` items. Covered by `WholeSessionLeakTests` (tool-call arguments added to the tracked secret
+set) plus a targeted `test_rtmt.py` scenario per output-item kind
+(swigerb/SonicAIDriveThru#32).
+
 ## Session-scrub conversation item contract (swigerb/SonicAIDriveThru#29)
 
 A backend must never let the browser see operator-only text: the bootstrap `session.instructions`
 and `tools[].description`/`parameters` (scrubbed from every `session.created`/`session.updated`
-echo — see `_scrub_session_for_client` in `rtmt.py`), and any conversation item the middle tier
+echo — see the session-echo allow-list contract above, `_client_session_echo` in `rtmt.py`), and any conversation item the middle tier
 itself authored (the greeting, resume rehydration, silence nudge, and a tool's
 `function_call_output`) — none of these may reach the browser verbatim, across **every** GA
 subtype that can carry a full item (`conversation.item.created`/`.added`/`.done`/`.retrieved`).
