@@ -201,6 +201,13 @@ class _RealtimeHarness(unittest.IsolatedAsyncioTestCase):
         except TimeoutError:
             return events
 
+    def _only_session(self) -> str:
+        """The session_id of the one connection currently attached. Only
+        meaningful right after connecting a single guest, before any other
+        guest has connected (see the voice-persistence tests, which capture
+        this immediately after each guest connects)."""
+        return next(iter(self.rtmt._sessions._session_map.values()))
+
 class SessionBootstrapTests(_RealtimeHarness):
 
     async def test_reconnected_socket_with_live_mic_still_registers_tools(self):
@@ -240,15 +247,16 @@ class SessionBootstrapTests(_RealtimeHarness):
         await browser.close()
 
     async def test_session_update_after_assistant_audio_is_not_rejected_for_voice(self):
-        """#43 fix (PR #49 review round 5, "S1"): self._voice_override is the
-        sticky default for future NEW connections only -- even if another
-        tab/guest's pick changes it mid-call, THIS connection's own frozen
-        voice is unaffected, so a re-sent session.update (mic re-toggle)
-        still must not carry a new voice."""
+        """#43 fix (PR #49 review round 6, "S1"): the voice a guest picks is
+        stored on their OWN session in self._sessions, never on RTMiddleTier
+        -- so even if another tab/guest's pick lands in session storage under
+        a DIFFERENT session_id mid-call, THIS connection's own local `voice`
+        is unaffected, and a re-sent session.update (mic re-toggle) still
+        must not carry a new voice."""
         browser = await self.client.ws_connect("/realtime")
         await browser.send_json(BROWSER_SESSION_UPDATE)
         await self._response_done(browser)          # greeting -> assistant audio present
-        self.rtmt._voice_override = "coral"          # simulates another tab/guest picking a voice
+        self.rtmt._sessions.set_voice("another-guests-session", "coral")   # simulates another tab/guest picking a voice
         await browser.send_json(BROWSER_SESSION_UPDATE)
         await self._until(lambda: len(self._session_updates()) >= 3)
         await asyncio.sleep(0.1)
@@ -261,6 +269,8 @@ class SessionBootstrapTests(_RealtimeHarness):
 
     async def test_voice_picker_after_assistant_audio_is_deferred(self):
         browser = await self.client.ws_connect("/realtime")
+        await self._until(lambda: self.rtmt._sessions.active_session_count >= 1)
+        sid = self._only_session()
         await browser.send_json(BROWSER_SESSION_UPDATE)
         await self._response_done(browser)
         before = len(self._session_updates())
@@ -269,10 +279,10 @@ class SessionBootstrapTests(_RealtimeHarness):
 
         self.assertEqual(len(self._session_updates()), before, "voice change was sent and would be rejected")
         self.assertEqual(self.fake.errors, [])
-        # #43 fix: self.voice_choice (config default) is never mutated; the
-        # pick lands in self._voice_override (sticky default for future NEW
-        # connections only).
-        self.assertEqual(self.rtmt._voice_override, "coral")
+        # #43 fix (round 6): self.voice_choice (config default) is never
+        # mutated; the pick lands in this session's own entry in
+        # self._sessions, never on RTMiddleTier itself.
+        self.assertEqual(self.rtmt._sessions.get_voice(sid), "coral")
         await browser.close()
 
     async def test_voice_picker_before_assistant_audio_is_applied(self):
@@ -305,12 +315,14 @@ class SessionBootstrapTests(_RealtimeHarness):
         await browser.close()
 
     async def test_two_concurrent_guests_voice_picks_do_not_leak_into_an_already_open_connection(self):
-        """#43 fix (PR #49 review round 5, "S1"): the process-wide
+        """#43 fix (PR #49 review round 6, "S1"): the process-wide
         `self.voice_choice` mutation used to mean guest A picking a voice
         also changed guest B's in-flight conversation, even though B was
         already connected and B's socket has nothing to do with A's pick.
         Mirrors the C# conformance scenario of the same name."""
         guest_a = await self.client.ws_connect("/realtime")
+        await self._until(lambda: self.rtmt._sessions.active_session_count >= 1)
+        sid_a = self._only_session()
         await guest_a.send_json(BROWSER_SESSION_UPDATE)
         await self._response_done(guest_a)   # A's greeting -> A's voice is locked
 
@@ -327,11 +339,11 @@ class SessionBootstrapTests(_RealtimeHarness):
 
         self.assertEqual(len(self._session_updates()), watermark,
                           "guest A's deferred voice pick must not produce any upstream session.update at all")
-        self.assertEqual(self.rtmt._voice_override, "coral")
+        self.assertEqual(self.rtmt._sessions.get_voice(sid_a), "coral")
 
         # Guest B's own connection is unaffected: a re-sent session.update
         # (mic re-toggle) on B must still omit voice (still locked on B's
-        # ORIGINAL voice), never pick up A's pending override.
+        # ORIGINAL voice), never pick up A's pending pick.
         await guest_b.send_json(BROWSER_SESSION_UPDATE)
         await self._until(lambda: len(self._session_updates()) > watermark)
         latest = self._session_updates()[-1]["session"]
@@ -341,11 +353,15 @@ class SessionBootstrapTests(_RealtimeHarness):
         await guest_a.close()
         await guest_b.close()
 
-    async def test_voice_picked_after_lock_carries_to_a_brand_new_connections_bootstrap(self):
-        """The flip side of the leak fix: a voice picked (and deferred) on a
-        locked connection must still apply to the NEXT, brand-new
-        conversation's bootstrap -- #43 must not throw away the legitimate
-        "carries forward" behaviour while fixing the leak."""
+    async def test_voice_picked_after_lock_does_not_carry_to_a_brand_new_unrelated_connection(self):
+        """#43 fix (PR #49 review round 6, "S1"): the round-5 fix left
+        `self._voice_override` as a process-wide sticky default for every
+        future NEW connection, so guest A's pick still became guest B's, C's,
+        ... default -- exactly Rick's S1 finding ("Guest A can still change
+        every guest's voice"). A brand-new, UNRELATED connection (no
+        resume_id presented, so it has nothing to do with the first guest's
+        session) must always bootstrap with the server's config default,
+        never another guest's pick."""
         first = await self.client.ws_connect("/realtime")
         await first.send_json(BROWSER_SESSION_UPDATE)
         await self._response_done(first)   # greeting -> voice locked
@@ -357,7 +373,8 @@ class SessionBootstrapTests(_RealtimeHarness):
         second = await self.client.ws_connect("/realtime")
         await self._until(lambda: len(self._session_updates()) > watermark)
         bootstrap = [e for e in self._session_updates() if str(e.get("event_id", "")).startswith("sonic_bootstrap")][-1]
-        self.assertEqual(bootstrap["session"]["audio"]["output"]["voice"], "verse")
+        self.assertEqual(bootstrap["session"]["audio"]["output"]["voice"], "shimmer",
+                          "a brand-new, unrelated connection must get the server default, never another guest's pick")
         await second.close()
 
     async def test_bootstrap_does_not_trigger_an_unprompted_greeting(self):

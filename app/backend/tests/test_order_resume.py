@@ -832,6 +832,67 @@ class RehydrationAndNudgeTests(_ResumeHarness):
         await browser.close()
 
 
+class VoicePersistenceTests(_ResumeHarness):
+    """#43 fix (PR #49 review round 6, "S1"): the picked voice belongs to the
+    guest's OWN session (stored in self._sessions, never on RTMiddleTier), so
+    it survives a detach/resume (a Wi-Fi blip) instead of silently reverting
+    to the server default -- while a genuinely different, brand-new session
+    (no resume presented) still only ever gets the default. Mirrors the C#
+    conformance scenarios "guest B's fresh bootstrap still has the default"
+    and "the resumed connection's session config carries the picked voice"."""
+
+    async def _resume_ok(self, resume_id):
+        browser = await self._resume(resume_id)
+        await self._until_event(browser, "extension.session_resumed")
+        return browser, self.fake.connections[-1]
+
+    async def test_resumed_connection_restores_the_picked_voice(self):
+        browser = await self.client.ws_connect("/realtime")
+        meta = await self._until_event(browser, "extension.session_metadata")
+        sid = self._sid_for_token(meta["sessionToken"])
+        await browser.send_json({"type": "extension.set_voice", "voice": "cedar"})
+        await self._until(lambda: self.sm.get_voice(sid) == "cedar")
+        await browser.send_json(BROWSER_SESSION_UPDATE)
+        await self._response_done(browser)      # greeting, in the picked voice
+        await self._drop(browser, sid)
+
+        resumed, upstream = await self._resume_ok(meta["resumeId"])
+        await self._until(lambda: sum(e["type"] == "session.update" for e in upstream) >= 2)
+
+        session_updates = [e for e in upstream if e["type"] == "session.update"]
+        self.assertEqual(session_updates[0]["session"]["audio"]["output"]["voice"], "shimmer",
+                          "the bootstrap fires before the resume is known, so it must use the config default")
+        self.assertEqual(session_updates[1]["session"]["audio"]["output"]["voice"], "cedar",
+                          "the follow-up session.update after a confirmed resume must restore this "
+                          "session's own picked voice")
+        await resumed.close()
+
+    async def test_a_different_brand_new_session_still_gets_the_default(self):
+        """The flip side: a genuinely different, brand-new connection (no
+        resume_id presented at all) must never inherit another session's
+        persisted voice, even right after that other session picked one."""
+        browser = await self.client.ws_connect("/realtime")
+        meta = await self._until_event(browser, "extension.session_metadata")
+        sid = self._sid_for_token(meta["sessionToken"])
+        await browser.send_json({"type": "extension.set_voice", "voice": "cedar"})
+        await self._until(lambda: self.sm.get_voice(sid) == "cedar")
+        await browser.send_json(BROWSER_SESSION_UPDATE)
+        await self._response_done(browser)
+        await self._drop(browser, sid)
+
+        watermark = len(self.fake.upstreams)
+        fresh = await self.client.ws_connect("/realtime")
+        await self._until(lambda: len(self.fake.upstreams) > watermark)
+        upstream = self.fake.connections[-1]
+        await self._until(lambda: any(e["type"] == "session.update" for e in upstream))
+
+        bootstrap = next(e for e in upstream if e["type"] == "session.update")
+        self.assertEqual(bootstrap["session"]["audio"]["output"]["voice"], "shimmer",
+                          "a brand-new, unrelated connection must get the server default, never "
+                          "another session's persisted voice pick")
+        await fresh.close()
+
+
 class _Capture(logging.Handler):
     def __init__(self):
         super().__init__(level=logging.DEBUG)

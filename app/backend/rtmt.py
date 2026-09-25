@@ -890,13 +890,15 @@ class RTMiddleTier:
         self.endpoint = endpoint
         self.deployment = deployment
         self.voice_choice = voice_choice
-        # #43 fix (PR #49 review round 5, "S1"): self.voice_choice above is the
-        # config-level default and is NEVER mutated again after this point --
-        # a validated extension.set_voice pick instead updates this field,
-        # which is only ever read at a NEW connection's bootstrap (see
-        # `_forward_messages`), so it can never leak into an already-open
-        # guest's in-flight conversation.
-        self._voice_override: str | None = None
+        # #43 fix (PR #49 review round 6, "S1"): self.voice_choice above is the
+        # config-level default and is NEVER mutated again after this point.
+        # There is deliberately no process-wide "current voice" field here any
+        # more -- a validated extension.set_voice pick belongs to the guest's
+        # OWN session, not to this RTMiddleTier instance (which is shared by
+        # every guest on the worker). It is stored per session_id on
+        # `self._sessions` (see `SessionManager.set_voice`/`get_voice`), read
+        # back only for that SAME session on resume, and never consulted for
+        # any other, brand-new connection -- see `_forward_messages`.
         self.tools = {}
         self._token_provider = None
         self._cached_token: str | None = None
@@ -1584,18 +1586,22 @@ class RTMiddleTier:
                 # Silent-guest nudge after a resume (once per resume).
                 nudge_task: asyncio.Task | None = None
 
-                # #43 fix (PR #49 review round 5, "S1"): freeze THIS connection's
-                # own voice ONCE, before any traffic (browser or upstream) is
-                # relayed. self._voice_override (mutated by extension.set_voice
-                # on ANOTHER, already-open connection) is read only here, at
-                # connection start -- so a pick made on guest A's socket can
-                # only ever change what a NEW connection's bootstrap uses, and
-                # never guest B's already-open, in-flight conversation. Every
-                # later use of "voice" in this coroutine (bootstrap, session.
-                # update rebuilding, echo) reads this frozen local, never the
-                # shared fields again -- self.voice_choice (the config default)
-                # is never mutated after __init__.
-                voice = self._voice_override if self._voice_override is not None else self.voice_choice
+                # #43 fix (PR #49 review round 6, "S1"): THIS connection's own
+                # voice is a purely local variable, initialised ONLY from the
+                # config default. It is never seeded from any other guest's
+                # pick (there is no shared "last picked voice" field any
+                # more) -- so a brand-new connection always bootstraps with
+                # the server default, never another guest's, or even this
+                # same guest's PREVIOUS (non-resumed) session's, choice. A
+                # resume is the one exception: once `handle_resume` confirms
+                # WHICH prior session this socket is continuing, it looks up
+                # that session's own persisted pick (`self._sessions.
+                # get_voice`) and updates this local + sends a follow-up
+                # session.update, so a Wi-Fi blip doesn't silently revert the
+                # guest's own choice back to the default. Every later use of
+                # "voice" in this coroutine (session.update rebuilding, echo)
+                # reads this local, never a shared field.
+                voice = self.voice_choice
 
                 _vlog(verbose, "\n═══ [SESSION] Connected ═══\n"
                                "Session ID: %s\n"
@@ -1696,7 +1702,7 @@ class RTMiddleTier:
                     nudge_task = None
 
                 async def handle_resume(data: str):
-                    nonlocal session_id, announced, greeting_sent, nudge_task
+                    nonlocal session_id, announced, greeting_sent, nudge_task, voice
                     try:
                         presented = json.loads(data).get("resume_id")
                     except (ValueError, AttributeError):
@@ -1711,6 +1717,20 @@ class RTMiddleTier:
                         return
                     session_id = outcome.session_id
                     recovery.session_id = session_id
+                    # #43 fix (PR #49 review round 6, "S1"): restore THIS
+                    # session's own previously-picked voice, if any -- a
+                    # resume opens a brand-new upstream connection (see
+                    # module docstring), so it bootstrapped on the config
+                    # default before we knew which session this socket was
+                    # continuing. Without this, a Wi-Fi blip would silently
+                    # revert the guest's own voice choice. Safe to send
+                    # unconditionally: `assistant_audio_seen` is still False
+                    # on this fresh upstream, so GA has not voice-locked it.
+                    persisted_voice = self._sessions.get_voice(session_id)
+                    if persisted_voice is not None and persisted_voice != voice:
+                        voice = persisted_voice
+                        await target_ws.send_str(guard.track(self.build_voice_update(persisted_voice)))
+                        logger.info("Restored voice %s for resumed session %s", persisted_voice, session_id)
                     if outcome.stale_ws is not None:
                         _spawn(_close_superseded(outcome.stale_ws))
                     identifiers = order_state_singleton.get_session_identifiers(session_id)
@@ -1845,16 +1865,17 @@ class RTMiddleTier:
                                                 "Dropped extension.set_voice with an unknown/invalid voice %r (session=%s)",
                                                 ext_msg.get("voice"), session_id)
                                         else:
-                                            # #43 (PR #49 review round 5, "S1"): self.voice_choice
-                                            # (the config-level default) is never mutated again.
-                                            # self._voice_override is the sticky default for
-                                            # future NEW connections only -- an ALREADY-OPEN other
-                                            # guest's connection keeps its own frozen `voice` local
-                                            # and never re-reads this shared field. This
-                                            # connection's own `voice` is updated too, so ITS
-                                            # subsequent session.update rebuilding / echo reflect
-                                            # the pick immediately, same as before #43.
-                                            self._voice_override = new_voice
+                                            # #43 (PR #49 review round 6, "S1"): persist the
+                                            # pick on THIS session (self._sessions), never on
+                                            # RTMiddleTier -- so it can only ever be read back
+                                            # for the SAME guest's session (on resume) and can
+                                            # never become any other, brand-new connection's
+                                            # bootstrap default. This connection's own `voice`
+                                            # local is updated too, so ITS subsequent
+                                            # session.update rebuilding / echo reflect the pick
+                                            # immediately, same as before #43.
+                                            if session_id:
+                                                self._sessions.set_voice(session_id, new_voice)
                                             voice = new_voice
                                             logger.info("Voice changed to %s for session %s", new_voice, session_id)
                                             if assistant_audio_seen:

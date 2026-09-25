@@ -616,7 +616,7 @@ Exercised black-box by `ClientToServerAllowListTests.cs`'s
 `test_rtmt.py`'s `ClientToServerAllowListTests` (audio/event_id/response_id shape probes and
 `_dump_client_to_server`'s NaN backstop).
 
-### `extension.set_voice` allow-list and per-connection semantics (issue #43, PR #49 review round 5, "M1"/"S1")
+### `extension.set_voice` allow-list and per-connection semantics (issue #43, PR #49 review rounds 5-6, "M1"/"S1")
 
 `extension.set_voice` is consumed entirely by the middle tier (never forwarded as-is — see the
 "`extension.*` types are deliberately absent..." paragraph above) but the **value** it adopts is
@@ -628,24 +628,45 @@ still part of this contract, because a bad value here doesn't just corrupt one g
   `app/frontend/src/lib/voices.ts` — the frontend itself is never touched). Anything else (a
   non-string, or a string not in the list) is dropped with a WARNING; neither forwarded upstream nor
   adopted anywhere.
-- **Per-connection, not shared mutable global state**: picking a valid voice used to overwrite
-  `self.voice_choice` — a single field shared across the whole worker process — so guest A's pick
-  leaked into guest B's bootstrap and echo the moment B connected, even though A and B never shared
-  a session. `self.voice_choice` (the config default) is now never mutated after `__init__`; a
-  validated pick instead updates `self._voice_override`, which each connection reads **exactly
-  once, at connection start**, into a local `voice` variable that every later use in that
-  connection (bootstrap, session-update rebuilding, echo) reads from — never the shared fields
-  again. So a pick on guest A's socket can only ever change what a *later, new* connection's
-  bootstrap uses; it can never reach back into guest B's already-open, in-flight conversation, and
-  a brand-new connection with no pick of its own still gets the server's configured default voice.
+- **Per-connection, session-persisted, never a shared mutable global**: picking a valid voice used
+  to overwrite `self.voice_choice` — a single field shared across the whole worker process — so
+  guest A's pick leaked into guest B's bootstrap and echo the moment B connected, even though A and
+  B never shared a session. Round 5 stopped it leaking into an *already-open* connection (a local
+  `voice` read once at connection start) but left a process-wide `self._voice_override` field that
+  every subsequent NEW connection's bootstrap still read — so guest A's pick still became guest B's,
+  C's, ... default for as long as the worker process ran (Rick's S1: "Guest A can still change
+  every guest's voice"). Round 6 removes `self._voice_override` entirely: a validated pick is
+  stored by `session_manager.py`'s `SessionManager.set_voice(session_id, voice)`, keyed on the
+  picking guest's own `session_id` — never on `RTMiddleTier`, never readable by any other session.
+  `self.voice_choice` (the config default) is never mutated after `__init__`; a brand-new
+  connection's `voice` local is always initialised from it, so a totally unrelated guest always
+  gets the server default, regardless of what any other guest ever picked.
+- **Resume restores the picking guest's OWN voice, and only that guest's**: because the pick is
+  keyed on `session_id` (not the connection), it survives a detach/resume (a Wi-Fi blip must not
+  silently revert a guest's own choice). A resume opens a brand-new upstream connection (this
+  backend never reattaches an existing one), so the unconditional bootstrap sent at connection
+  start always uses the config default — the resuming guest's own persisted voice can only be
+  applied by a **follow-up** `session.update`, sent once `handle_resume` confirms which
+  `session_id` this socket is resuming, mirroring the existing rehydration-item follow-up pattern.
+  A different, brand-new session (no resume presented) never reads any other session's persisted
+  voice, so it is unaffected either way.
 
 Exercised black-box by `Scenarios/Security/ClientToServerAllowListTests.cs` (an unknown voice
 reaches neither the sender's own upstream frames nor a later guest's) and
 `Scenarios/Sessions/VoicePickerTests.cs`'s
-`Two_concurrent_guests_voice_choices_do_not_leak_into_each_other` (#43 — guest A picks a
-non-default voice, guest B connects fresh and still bootstraps with the server's own default).
-Unit-tested at the Python level in `test_session_bootstrap.py` and `test_rtmt.py`'s
+`Two_concurrent_guests_voice_choices_do_not_leak_into_each_other` (an already-open connection is
+unaffected by a concurrent guest's pick),
+`Voice_picked_after_lock_does_not_carry_to_a_brand_new_unrelated_connection` (a brand-new,
+unrelated connection's bootstrap always uses the server default, never a prior guest's pick), and
+`Resumed_connection_restores_the_picked_voice` (the SAME guest's resumed connection restores their
+own picked voice via a follow-up session.update, while the bootstrap that fires before the resume
+is confirmed still shows the default). Unit-tested at the Python level in
+`test_session_bootstrap.py` (`_only_session`-scoped assertions against
+`self.rtmt._sessions.get_voice/set_voice`), `test_order_resume.py`'s `VoicePersistenceTests`
+(`test_resumed_connection_restores_the_picked_voice`,
+`test_a_different_brand_new_session_still_gets_the_default`), and `test_rtmt.py`'s
 `ExtensionSetVoiceTests`/`SanitizeVoiceTests`.
+
 
 Exercised black-box by `Scenarios/Security/ClientToServerAllowListTests.cs`: a malicious
 `response.create` override is stripped down to the bare form before the fake upstream ever sees it
@@ -1003,13 +1024,15 @@ is reached, never whether `CONFORMANCE_BACKEND` still says which language is run
 The consequence: **a new backend under test (`CONFORMANCE_BACKEND=dotnet`) actually runs these
 scenarios instead of silently skipping them.** A conforming C# backend must not reproduce these
 Python bugs, so the scenario is expected to *pass* there — an unconditional `Skip` would have hidden
-that expectation entirely, letting a backend with the exact same bug slip through green. The 9
+that expectation entirely, letting a backend with the exact same bug slip through green. The 8
 scenarios marked this way as of this commit: `SpokenTotalHalfCentTests` (#46),
 `ComboAbsorptionTests.Reset_order_clears_the_previous_orders_absorbed_component_display` (#41),
 `HappyHourBoundaryTests`'s Ched 'R' Peppers case (#39), `UpdateOrderAddRemoveModifyTests`'s two
-Route 44 alias cases (#40), `SearchToolTests`'s two fallback cases (#37),
-`ToolErrorSessionSurvivesTests.Session_survives_an_unhandled_tool_exception` (#36), and
-`VoicePickerTests.Two_concurrent_guests_voice_choices_do_not_leak_into_each_other` (#43).
+Route 44 alias cases (#40), `SearchToolTests`'s two fallback cases (#37), and
+`ToolErrorSessionSurvivesTests.Session_survives_an_unhandled_tool_exception` (#36).
+(`VoicePickerTests.Two_concurrent_guests_voice_choices_do_not_leak_into_each_other` was un-skipped
+in PR #49 review round 5 once #43 was actually fixed — this paragraph's count/list is corrected
+here to match; it is a plain `[Fact]` now, listed instead in the voice contract section above.)
 
 This is deliberately **not** applied to the Windows-only Job Object tests elsewhere in the suite
 (`WindowsJobObjectTests.cs`) — those are plain `[Fact]`s that call `Assert.Skip(...)` at runtime
