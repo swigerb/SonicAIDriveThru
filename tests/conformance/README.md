@@ -37,6 +37,15 @@ under test:
   `AZURE_OPENAI_REALTIME_DEPLOYMENT` its operator gave it, which the harness cannot know or
   change, so running (say) the "reasoning is never sent for 1.5" assertions against it would pass
   or fail for the wrong reason instead of skipping.
+- **#28 N24:** `CONFORMANCE_BACKEND_URL` only changes *how* the backend is reached — it never
+  implies *which* backend is running there. Pointing `CONFORMANCE_BACKEND_URL` at an
+  already-running C# backend instance **also** requires setting `CONFORMANCE_BACKEND=dotnet`
+  alongside it; without that, the suite still assumes Python (the default), which means the wrong
+  money tolerance (`0.000001m` instead of the exact `0m` a `decimal`-based .NET backend must meet —
+  see "Exact-decimal money contract" below) and the wrong set of "Known Python bug" scenarios being
+  skipped instead of run (see "Python-bug scenarios skip only against Python" below). Both `env`
+  vars must be set together; there is no auto-detection from the URL or from a live probe of the
+  backend.
 - `CONFORMANCE_BACKEND=python` (the default) — launch `app/backend` via `.venv`.
 - `CONFORMANCE_BACKEND=dotnet` — the S2 .NET backend placeholder (issue #7; the backend doesn't
   exist yet). **This FAILS the suite by default** (PR #22 review item 15) — CI must never silently
@@ -671,6 +680,20 @@ Consequences for how this suite is written:
   rule is about presentation text, never about how wire/golden values are compared.) There must be
   no `precision: 2` (or any other precision-based money assertion) anywhere under
   `Scenarios/Ordering/`.
+
+### Tool-argument price trust (#28 N23)
+
+`SpokenTotalTests`'s two golden spoken-total cases for "Cherry Limeade medium" use `2.99`/`3.79`
+as the unit price, while `golden-order-pricing.json`'s menu prices that size at `2.89`. This is
+deliberate, not a stale fixture: it is this suite's explicit contract rule that **the backend
+trusts whatever unit price the `update_order` tool call's own argument carries and never
+re-prices, re-validates, or cross-checks it against its own menu lookup.** A scenario asserting a
+spoken total is therefore free to pick any unit price for its `update_order` fixture — including
+one that deliberately does not match the menu — specifically to prove the total is derived from
+the tool-call argument, not silently recomputed server-side from a menu re-lookup a real customer
+order would never trigger. Do not "fix" a scenario's price to match the menu; if a genuinely
+menu-matching golden case is later wanted for its own reasons, add a new case rather than
+resolving this apparent mismatch in the existing one.
 
 ### Python-bug scenarios skip only against Python (PR #38 review should-fix 3)
 
