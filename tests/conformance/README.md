@@ -8,6 +8,36 @@ HTTP and WebSocket; never imports backend source.
 > This file documents the GA realtime protocol validation fidelity work (PR #22 review item 9)
 > and the neutral `BackendContract` (PR #22 review item 13).
 
+## Restoring packages (locked mode) — issue #24
+
+Every project here restores with `RestorePackagesWithLockFile=true` (set repo-wide in
+`Directory.Build.props`), so each project's committed `packages.lock.json` fully pins the
+resolved package graph, including transitive dependencies. CI restores with
+`dotnet restore Conformance.slnx --locked-mode`, which fails loudly instead of silently
+re-resolving if a committed lock file is missing or doesn't match `Directory.Packages.props`/the
+`.csproj` files — this is what makes the NuGet cache key
+(`hashFiles('tests/conformance/Directory.Packages.props', 'tests/conformance/**/*.csproj',
+'tests/conformance/**/packages.lock.json')` in `conformance.yml`) trustworthy.
+
+**Regenerating a lock file** after changing a package reference or `Directory.Packages.props`:
+
+```powershell
+dotnet restore Conformance.slnx --force-evaluate
+```
+
+`--force-evaluate` re-resolves the full dependency graph and rewrites every project's
+`packages.lock.json` in place, even though the lock files already exist — plain `dotnet restore`
+alone will *not* update a lock file it can already satisfy, and deleting the lock files first is
+unnecessary and just means restore has to resolve at CI/local-locked-mode time too. Commit the
+updated `packages.lock.json` file(s) alongside the dependency change.
+
+**When you need this:** if `dotnet restore --locked-mode` (or CI) fails with
+**NU1004: The packages lock file is not present. Run "dotnet restore" to generate a new lock
+file.**, or with a restore error naming a mismatch between the lock file and the resolved graph
+(e.g. after bumping a version in `Directory.Packages.props` without regenerating), run the
+`--force-evaluate` command above, verify the suite still restores cleanly with `--locked-mode`,
+and commit the regenerated lock file(s).
+
 ## Choosing a backend: `CONFORMANCE_BACKEND` / `CONFORMANCE_BACKEND_URL`
 
 `BackendLauncherFactory` (`src/Conformance.Harness/BackendLauncherFactory.cs`) picks the backend
