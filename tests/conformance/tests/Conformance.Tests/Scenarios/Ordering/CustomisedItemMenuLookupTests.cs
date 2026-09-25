@@ -495,4 +495,55 @@ public sealed class CustomisedItemMenuLookupTests
                 Assert.Equal(2, OrderScenarioHelpers.GetOrderItemCount(result.ToolResultJson!));
             });
     }
+
+    /// <summary>PR #50 review round 5, should-fix item 4: "™" and the curly apostrophe "’"
+    /// (U+2019) must be normalised in `_menu_key()` exactly like "®" already is, or a spoken name
+    /// that naturally omits an unspeakable symbol (or uses a plain apostrophe) misses its own
+    /// `MENU_CATEGORY_MAP` entry -- exactly the OREO Blast's NBSP regression class from round 4.
+    ///
+    /// A Smasher is a "Burgers &amp; Sandwiches" item, so the miss is invisible through the
+    /// combo-drink-slot / happy-hour paths this file otherwise exercises (neither the fountain nor
+    /// the shake/blast/malt keyword fallback matches "smasher" either way). The one place the miss
+    /// *is* observable end to end is `update_order`'s extras-eligibility check
+    /// (`tools.py::update_order`, `ALLOWED_EXTRA_CATEGORIES`): it only allows an "extra" line item
+    /// (e.g. "Add Bacon") when an existing order item's `infer_category()` resolves to an allowed
+    /// category. "burgers &amp; sandwiches" is on that allow-list -- but only if the Smasher
+    /// resolves via the map. If the map lookup misses (pre-fix), `infer_category` falls through to
+    /// keyword guessing, which matches none of its keywords ("burger" is not a substring of
+    /// "smasher"), returns "", and the extra is wrongly rejected with an apology even though a
+    /// perfectly valid base item is already in the order.</summary>
+    [Collection(HappyHourJustBeforeOpenCollection.Name)]
+    public sealed class TrademarkAndCurlyApostropheNormalisationTests(HappyHourJustBeforeOpenFixture fixture)
+    {
+        [Fact]
+        public Task Smasher_spoken_without_its_trademark_symbol_still_resolves_and_allows_an_extra() =>
+            fixture.RunAsync(async () =>
+            {
+                var ct = TestContext.Current.CancellationToken;
+                // menuItems.json's real name is "All-American SONIC Smasher™" -- spoken/transcribed
+                // without the unspeakable "™" symbol, exactly as a guest's speech-to-text would.
+                const string smasher = "All-American SONIC Smasher";
+                const decimal smasherPrice = 5.79m; // app/frontend/src/data/menuItems.json
+                const string extra = "Add Bacon"; // tools.py EXTRAS_KEYWORDS
+                const decimal extraPrice = 0.99m;
+
+                var (browser, connection, roundTripIndex) = await OrderScenarioHelpers.ConnectAndGreetAsync(fixture, ct);
+                await using var _ = browser;
+
+                var result = await OrderScenarioHelpers.RunOrderStepsAsync(
+                    connection, browser,
+                    [
+                        ("add", smasher, "standard", 1, smasherPrice),
+                        ("add", extra, "standard", 1, extraPrice),
+                    ],
+                    roundTripIndex, ct);
+
+                OrderScenarioHelpers.AssertMoneyEqual(
+                    smasherPrice + extraPrice,
+                    OrderScenarioHelpers.GetOrderTotal(result.ToolResultJson!),
+                    "A Smasher spoken without its '™' must still resolve to 'burgers & sandwiches' via " +
+                    "the map, so an extra ('Add Bacon') is allowed instead of wrongly rejected.");
+                Assert.Equal(2, OrderScenarioHelpers.GetOrderItemCount(result.ToolResultJson!));
+            });
+    }
 }

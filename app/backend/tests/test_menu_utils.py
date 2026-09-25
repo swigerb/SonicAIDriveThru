@@ -301,5 +301,67 @@ class MenuCategoryMapDirectResolutionTests(unittest.TestCase):
                 is_happy_hour_discounted(name)
 
 
+class TrademarkAndCurlyApostropheNormalisationTests(unittest.TestCase):
+    """PR #50 review round 5, should-fix item 4: "™" and the curly apostrophe "\u2019" must be
+    normalised in ``_menu_key()`` exactly like "®" already is. Eight ``menuItems.json`` names carry
+    "™" (the "SONIC Smasher™" family, plain and Combo variants) and one carries "\u2019" (the
+    "SONIC Blast® made with REESE'S" -- the raw JSON name uses the curly apostrophe verbatim). All
+    nine previously missed their own ``MENU_CATEGORY_MAP`` entry and relied on keyword-fallback
+    luck exactly like the OREO Blast's NBSP did before round 4."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.menu_names = _load_menu_item_names()
+        cls.tm_names = [name for name in cls.menu_names if "\u2122" in name]
+        cls.curly_apostrophe_names = [name for name in cls.menu_names if "\u2019" in name]
+
+    def test_menu_data_has_the_expected_special_character_names(self):
+        """Sanity check on the fixture itself so this test class fails loudly, not silently, if
+        ``menuItems.json`` ever changes which names carry these characters."""
+        self.assertEqual(len(self.tm_names), 8, self.tm_names)
+        self.assertEqual(len(self.curly_apostrophe_names), 1, self.curly_apostrophe_names)
+
+    def test_trademark_symbol_is_stripped_from_the_menu_key(self):
+        for name in self.tm_names:
+            with self.subTest(name=name):
+                self.assertNotIn("\u2122", menu_utils._menu_key(name))
+
+    def test_curly_apostrophe_is_normalised_to_a_plain_apostrophe(self):
+        for name in self.curly_apostrophe_names:
+            with self.subTest(name=name):
+                self.assertNotIn("\u2019", menu_utils._menu_key(name))
+                self.assertIn("'", menu_utils._menu_key(name))
+
+    def test_trademark_and_curly_apostrophe_names_resolve_directly_via_the_category_map(self):
+        """Direct proof of resolution -- ``_menu_key(name)`` must be a member of
+        ``MENU_CATEGORY_MAP`` for every "™"- or "\u2019"-bearing menu item, with no fallback
+        involved at all."""
+        affected = self.tm_names + self.curly_apostrophe_names
+        missing = [name for name in affected if menu_utils._menu_key(name) not in menu_utils.MENU_CATEGORY_MAP]
+        self.assertEqual(missing, [], f"Missing from MENU_CATEGORY_MAP: {missing}")
+
+    def test_classification_never_reaches_the_keyword_fallback_for_these_names(self):
+        """Same stronger proof as ``MenuCategoryMapDirectResolutionTests``: patch both
+        keyword-fallback functions to raise, then classify every "™"- or "\u2019"-bearing name."""
+
+        def _boom(_normalized):
+            raise AssertionError("keyword fallback must not be reached for an on-menu item")
+
+        with (
+            patch.object(menu_utils, "_keyword_fallback_combo_drink", _boom),
+            patch.object(menu_utils, "_keyword_fallback_happy_hour_discounted", _boom),
+        ):
+            for name in self.tm_names + self.curly_apostrophe_names:
+                infer_combo_component(name)
+                is_happy_hour_discounted(name)
+
+    def test_spoken_smasher_without_the_trademark_symbol_still_resolves(self):
+        """A guest's speech-to-text transcription realistically omits an unspeakable "™" symbol --
+        prove a Smasher spoken/typed without it still resolves via the map."""
+        spoken = "All-American SONIC Smasher"
+        on_menu = next(name for name in self.menu_names if menu_utils._menu_key(name) == menu_utils._menu_key(spoken))
+        self.assertIn("™", on_menu)
+
+
 if __name__ == "__main__":
     unittest.main()

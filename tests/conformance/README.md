@@ -817,11 +817,19 @@ C# does the same thing, not just "something similar")**, applied in this order t
 3. Lowercase, **culture-invariantly** (`str.lower()` on the Python side; C# must use
    `ToLowerInvariant()`, not the culture-sensitive `ToLower()`, so casing can never depend on the
    host's current culture/locale).
-4. Remove the `®` character (`str.replace("®", "")`). This is the *one* place this rule lives —
-   used everywhere `_menu_key()` is used (map construction, map lookup, combo-slot/sundae/
+4. Remove the `®` character (`str.replace("®", "")`), the `™` character
+   (`str.replace("™", "")`), and normalise the curly/typographic apostrophe `’` (U+2019) to a plain
+   ASCII apostrophe `'` (U+0027) (`str.replace("’", "'")`) — PR #50 review round 5 added the last
+   two, applying the same reasoning as `®`. These three character rules are the *one* place they
+   live — used everywhere `_menu_key()` is used (map construction, map lookup, combo-slot/sundae/
    happy-hour classification, and `order_state.py`'s combo-conversion matching) — there is no
-   second place left where it could drift. See `.squad/decisions.md` for the history of why this
-   rule was consolidated here.
+   second place left where any of them could drift. Eight `menuItems.json` names carry `™` (the
+   "SONIC Smasher™" family, plain and Combo variants) and one carries `’` (the "SONIC Blast® made
+   with REESE'S", whose raw JSON name uses the curly apostrophe verbatim); without this step, a
+   spoken "All-American SONIC Smasher" or "Reese's" (naturally omitting the unspeakable `™`, or
+   typed with a plain apostrophe) would miss its own map entry, exactly like the OREO Blast's NBSP
+   did before round 4. See `.squad/decisions.md` for the history of why this pattern of
+   consolidating symbol-handling into `_menu_key()` started.
 
 Keyword fallbacks (`_keyword_fallback_combo_drink`, `_keyword_fallback_happy_hour_discounted`, for
 names that resolve to no `MENU_CATEGORY_MAP` entry at all, i.e. genuinely off-menu) match on

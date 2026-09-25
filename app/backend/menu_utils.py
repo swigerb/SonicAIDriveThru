@@ -181,19 +181,33 @@ def strip_modifiers(item_name: str) -> str:
 
 
 def _menu_key(item_name: str) -> str:
-    """Lowercased, modifier-stripped, ®-stripped key used for ALL menuItems.json-based
+    """Lowercased, modifier-stripped, symbol-normalised key used for ALL menuItems.json-based
     classification (combo slot / sundae / category / happy-hour eligibility) AND for
     ``MENU_CATEGORY_MAP``'s own keys below. A customised item must classify identically to its
     uncustomised base item -- PR #50 review: "Chili Cheese Tots (Extra Cheese)" must be charged in
     full exactly like "Chili Cheese Tots" is, and "Cherry Limeade (Extra Cherries)" must still get
     the happy-hour discount exactly like "Cherry Limeade" does.
 
-    The registered-trademark symbol "®" is stripped here -- and ONLY here, i.e. this is now the one
-    and only place that rule lives (PR #50 review round 4: it used to live ONLY in
-    ``order_state.py``'s combo-conversion matching, as a second, independently-maintained
-    ``.replace("®", "")``, which ``order_state.py`` now gets for free by calling this function
-    instead)."""
-    return strip_modifiers(item_name).lower().replace("®", "")
+    Three symbol-normalisation rules live here -- and ONLY here, i.e. this is the one and only
+    place any of them live (PR #50 review round 4/5: they used to live, or would otherwise need to
+    live, as second, independently-maintained rules elsewhere -- e.g. ``order_state.py``'s
+    combo-conversion matching used to strip "®" itself, before it started calling this function):
+      - The registered-trademark symbol "®" is stripped (``SONIC® Cheeseburger``).
+      - The trademark symbol "™" is stripped identically (PR #50 review round 5) -- eight
+        ``menuItems.json`` names carry it (the "SONIC Smasher™" family, plain and Combo variants);
+        without this, a spoken "All-American SONIC Smasher" (naturally omitting an unspeakable
+        symbol) would miss its own map entry exactly like the OREO Blast's NBSP used to.
+      - The curly/typographic apostrophe "\u2019" is normalised to a plain ASCII apostrophe "'"
+        (PR #50 review round 5) -- ``menuItems.json``'s "SONIC Blast® made with REESE'S" uses the
+        curly form verbatim, so a spoken "Reese's" (naturally typed/transcribed with a plain
+        apostrophe) would otherwise miss its own map entry too."""
+    return (
+        strip_modifiers(item_name)
+        .lower()
+        .replace("®", "")
+        .replace("\u2122", "")
+        .replace("\u2019", "'")
+    )
 
 
 # ---------------------------------------------------------------------------

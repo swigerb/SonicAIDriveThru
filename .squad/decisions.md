@@ -523,6 +523,20 @@
   state the algorithm, not its discovery history); the corrected story now lives in this file, in
   the round-4 entry above (see the "Correction" paragraph added to the `®` removal bullet under
   "PR #50 review, round 4").
+- **`™` and the curly apostrophe `’` are now normalised in `_menu_key()`, exactly like `®`
+  (should-fix 4).** `™` is stripped; `’` (U+2019) is replaced with a plain `'` (U+0027). Eight
+  `menuItems.json` names contain `™` (the "SONIC Smasher" family, plain and Combo) and one contains
+  `’` (the REESE'S Blast); all nine previously missed their own `MENU_CATEGORY_MAP` entry and
+  relied on keyword-fallback luck exactly like the OREO Blast's NBSP did before round 4. New
+  pytests prove all nine resolve directly (fallbacks patched to raise, mirroring
+  `MenuCategoryMapDirectResolutionTests`). A Burger/Sandwich item's map miss is invisible through
+  the combo-slot/happy-hour paths (neither keyword list matches "smasher" either way), so the new
+  conformance row instead pins the one place the miss *is* end-to-end observable: `update_order`'s
+  extras-eligibility check (`ALLOWED_EXTRA_CATEGORIES` includes "burgers & sandwiches", but only if
+  the Smasher resolves via the map) — a Smasher spoken without its `™` must still let a follow-up
+  "Add Bacon" extra through instead of being wrongly rejected. Mutation check: reverting `_menu_key`
+  to the round-4 (®-only) form fails exactly that one new conformance test (23 → 22 passing), the
+  other 22 stay green; restored, re-confirmed 23/23.
 
 #### 42. Customised Items Must Be Normalised Before Every Menu Lookup (Summer — Backend Dev, PR #50 review round 2)
 - **Root cause: customizations live *inside* `item_name`, and lookups didn't account for that.**
