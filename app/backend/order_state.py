@@ -12,6 +12,7 @@ from menu_utils import (
     infer_combo_component,
     is_happy_hour_discounted,
     normalize_size,
+    strip_modifiers,
 )
 from models import OrderItem, OrderSummary
 from money_utils import format_money, to_decimal
@@ -169,14 +170,15 @@ class OrderState:
 
             # ── Combo conversion: auto-remove matching standalone entree ──
             if is_combo:
-                combo_base = item_name.lower().replace(" combo", "").replace("®", "").strip()
-                # Strip parenthesized mods so "burger (Pickles Only)" matches "burger"
-                if "(" in combo_base:
-                    combo_base = combo_base[:combo_base.find("(")].strip()
+                # Shared modifier-stripping rule (menu_utils.strip_modifiers, PR #50 review) so
+                # "burger (Pickles Only)" matches "burger" using the exact same normalisation the
+                # menu-lookup functions use elsewhere -- one rule, not two independently
+                # maintained ones.
+                combo_base = strip_modifiers(item_name).lower().replace(" combo", "").replace("®", "").strip()
                 for i, existing in enumerate(order_state):
                     if "combo" in existing.item.lower():
                         continue  # skip other combos
-                    existing_base = existing.item.split("(")[0].strip().lower().replace("®", "")
+                    existing_base = strip_modifiers(existing.item).lower().replace("®", "")
                     if existing_base == combo_base:
                         # Carry customization mods (e.g., "Pickles Only") to the combo
                         if "(" in existing.item:

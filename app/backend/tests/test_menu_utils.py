@@ -2,10 +2,17 @@ import json
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-from menu_utils import infer_combo_component, is_happy_hour_discounted
+import menu_utils
+from menu_utils import (
+    infer_category,
+    infer_combo_component,
+    is_happy_hour_discounted,
+    strip_modifiers,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _GOLDEN_CATEGORIES_PATH = _REPO_ROOT / "tests" / "conformance" / "testdata" / "golden-menu-categories.json"
@@ -134,6 +141,74 @@ class InferComboComponentGoldenCategoryTests(unittest.TestCase):
     def test_burgers_combos_and_hot_dog_entrees_are_never_happy_hour_discounted(self):
         for name in ("Crispy Chicken Sandwich", "SONIC® Cheeseburger Combo", "Corn Dog", "Tots", "Groovy Fries"):
             self.assertFalse(is_happy_hour_discounted(name), name)
+
+
+class CustomisedItemMenuLookupTests(unittest.TestCase):
+    """PR #50 review (second round): modifiers travel inside item_name (e.g. "Tots (Extra
+    Crispy)", tools.py's ``update_order``), so every menuItems.json-based lookup must strip them
+    via the one shared ``strip_modifiers``/``_menu_key`` rule before classifying -- a customised
+    item must classify EXACTLY like its base item, never fall through to a keyword fallback that
+    disagrees with the base item's real menuItems.json category."""
+
+    def test_strip_modifiers_removes_a_trailing_parenthesized_suffix(self):
+        self.assertEqual(strip_modifiers("Tots (Extra Crispy)"), "Tots")
+        self.assertEqual(strip_modifiers("Chili Cheese Tots (Extra Cheese)"), "Chili Cheese Tots")
+        self.assertEqual(strip_modifiers("Cherry Limeade"), "Cherry Limeade")
+
+    def test_chili_cheese_tots_customised_is_charged_in_full_not_absorbed(self):
+        """Rick's repro: Cheeseburger Combo 8.49 + "Chili Cheese Tots (Extra Cheese)" was
+        measuring as absorbed free (8.49) instead of charged in full (12.28) because the raw,
+        un-stripped name missed the menuItems.json category lookup and fell through to a keyword
+        fallback that (wrongly) matched "tots"."""
+        self.assertEqual(infer_combo_component("Chili Cheese Tots (Extra Cheese)"), "")
+
+    def test_chili_cheese_groovy_fries_customised_is_charged_in_full_not_absorbed(self):
+        self.assertEqual(infer_combo_component("Chili Cheese Groovy Fries (No Chili)"), "")
+
+    def test_plain_tots_customised_still_fills_the_combo_side_slot(self):
+        """The allow-listed items themselves must still be absorbed once customised -- only the
+        modifier is stripped, the underlying item is unchanged."""
+        self.assertEqual(infer_combo_component("Tots (Extra Crispy)"), "sides")
+        self.assertEqual(infer_combo_component("Groovy Fries (Extra Salty)"), "sides")
+
+    def test_unknown_misspelled_item_never_fills_the_side_slot_even_as_a_substring_match(self):
+        """PR #50 must-fix 2: the side fallback for unknown items is deleted entirely -- a
+        misspelling/off-menu item (here "chilli cheese tots", a typo) must never silently absorb
+        into a combo's side slot. A charged item is visible and correctable; a free one is a
+        silent revenue loss."""
+        self.assertEqual(infer_combo_component("chilli cheese tots"), "")
+        self.assertEqual(infer_combo_component("totstastic snack"), "")
+
+    def test_cherry_limeade_customised_still_gets_the_happy_hour_discount(self):
+        self.assertTrue(is_happy_hour_discounted("Cherry Limeade (Extra Cherries)"))
+
+    def test_ched_r_peppers_customised_is_still_not_a_combo_side_or_dr_pepper(self):
+        self.assertEqual(infer_combo_component("Ched 'R' Peppers (Extra Spicy)"), "")
+
+    def test_customised_category_matches_base_item_category(self):
+        self.assertEqual(infer_category("Tots (Extra Crispy)"), infer_category("Tots"))
+
+    def test_flipping_the_shakes_and_blasts_flag_changes_every_shake_blast_variant(self):
+        """PR #50 review: prove the flag is genuinely the ONE single switch -- flipping it must
+        change EVERY shake/blast, plain or customised, on-menu (menuItems.json category match) or
+        off-menu (keyword fallback only), never just some of them."""
+        on_menu_plain = "Vanilla Classic Shake"
+        on_menu_customised = "Vanilla Classic Shake (No Whip)"
+        on_menu_blast_customised = "SONIC Blast® made with OREO® Cookie Pieces (Extra Candy)"
+        off_menu_plain = "Chocolate Malt"
+        off_menu_customised = "Chocolate Malt (Extra Malt)"
+
+        # Baseline: the flag is currently True (pending Brian) -- every variant is discounted.
+        for name in (on_menu_plain, on_menu_customised, on_menu_blast_customised, off_menu_plain, off_menu_customised):
+            self.assertTrue(is_happy_hour_discounted(name), name)
+
+        with patch.object(menu_utils, "_SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED", False):
+            for name in (on_menu_plain, on_menu_customised, on_menu_blast_customised, off_menu_plain, off_menu_customised):
+                self.assertFalse(is_happy_hour_discounted(name), name)
+
+        # Combo-drink-slot eligibility is a SEPARATE question and must NOT be affected by the flag.
+        with patch.object(menu_utils, "_SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED", False):
+            self.assertEqual(infer_combo_component(off_menu_customised), "drinks")
 
 
 if __name__ == "__main__":

@@ -17,6 +17,7 @@ __all__ = [
     "SIZE_ALIASES",
     "normalize_size",
     "canonical_size_key",
+    "strip_modifiers",
     "infer_category",
     "infer_combo_component",
     "is_happy_hour_discounted",
@@ -158,10 +159,44 @@ def _load_menu_category_map() -> dict[str, str]:
 
 MENU_CATEGORY_MAP: dict[str, str] = _load_menu_category_map()
 
+# Strips a trailing parenthesized customization suffix, e.g. "Tots (Extra Crispy)" -> "Tots"
+# (PR #50 review: customised items were bypassing every menuItems.json-based lookup because the
+# modifiers travel inside item_name, tools.py's ``update_order`` -- see ``strip_modifiers`` below).
+_MODIFIER_SUFFIX_RE = re.compile(r"\s*\([^)]*\)\s*")
+
+
+def strip_modifiers(item_name: str) -> str:
+    """Strip a parenthesized customization suffix from *item_name* and collapse whitespace.
+
+    THE single normalisation rule for turning a possibly-customised order-line name (e.g.
+    ``"Chili Cheese Tots (Extra Cheese)"``, ``"Tots (Extra Crispy)"``) into its base menu-item
+    name. Used both for every menuItems.json-based lookup below (combo slot / sundae / category /
+    happy-hour eligibility) *and* for combo-conversion base-name matching in ``order_state.py`` --
+    one rule, one implementation, so the two can never drift (Rick's PR #50 review: "reuse one
+    helper, don't duplicate").
+
+    >>> strip_modifiers("Tots (Extra Crispy)")
+    'Tots'
+    >>> strip_modifiers("Chili Cheese Tots (Extra Cheese)")
+    'Chili Cheese Tots'
+    >>> strip_modifiers("Cherry Limeade")
+    'Cherry Limeade'
+    """
+    return " ".join(_MODIFIER_SUFFIX_RE.sub(" ", item_name or "").split())
+
+
+def _menu_key(item_name: str) -> str:
+    """Lowercased, modifier-stripped key used for ALL menuItems.json-based classification (combo
+    slot / sundae / category / happy-hour eligibility). A customised item must classify identically
+    to its uncustomised base item -- PR #50 review: "Chili Cheese Tots (Extra Cheese)" must be
+    charged in full exactly like "Chili Cheese Tots" is, and "Cherry Limeade (Extra Cherries)" must
+    still get the happy-hour discount exactly like "Cherry Limeade" does."""
+    return strip_modifiers(item_name).lower()
+
 
 def infer_category(item_name: str) -> str:
     """Return the menu category for *item_name* (keyword fallback if not in the JSON map)."""
-    normalized = item_name.lower()
+    normalized = _menu_key(item_name)
     if normalized in MENU_CATEGORY_MAP:
         return MENU_CATEGORY_MAP[normalized]
     if "slush" in normalized or "limeade" in normalized or "ocean water" in normalized:
@@ -211,14 +246,40 @@ _SUNDAES = frozenset({"hot fudge sundae", "caramel sundae"})
 # Peppers") isn't misclassified as the drink "Dr Pepper" (#39 / #28 N19 root cause).
 _DR_PEPPER_RE = re.compile(r"\bdr\.?\s*pepper\b")
 
-_DRINK_KEYWORDS = ("slush", "limeade", "ocean water", "drink", "tea", "lemonade", "shake", "blast", "malt", "coke", "sprite", "root beer")
+# Fountain-drink keywords: unconditionally eligible for both combo-drink-slot-filling and the
+# happy-hour discount, matching every "Slushes & Drinks" menuItems.json item's unconditional
+# behaviour. Used ONLY as a fallback for items that aren't in the menu at all (e.g. a spoken item
+# never added to menuItems.json) -- on-menu items are always matched by JSON category first.
+_FOUNTAIN_DRINK_KEYWORDS = ("slush", "limeade", "ocean water", "drink", "tea", "lemonade", "coke", "sprite", "root beer")
+
+# Shake/Blast/Malt keywords: same (unconditional) combo-drink-slot eligibility as fountain drinks,
+# but the happy-hour DISCOUNT for this bucket must obey ``_SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED``
+# below -- PR #50 review: flipping that one flag must change *every* shake/blast variant, plain or
+# customised, on-menu or off, not just the ones matched by JSON category.
+_SHAKE_BLAST_KEYWORDS = ("shake", "blast", "malt")
 
 
-def _keyword_fallback_is_drink(normalized: str) -> bool:
-    """Keyword scan used ONLY for items that aren't in ``menuItems.json`` at all (e.g. a spoken
-    item never added to the menu). "Dr Pepper" matches on a word boundary, never a bare "pepper"
-    substring (#39 / #28 N19 root cause)."""
-    return bool(_DR_PEPPER_RE.search(normalized)) or any(kw in normalized for kw in _DRINK_KEYWORDS)
+def _keyword_fallback_combo_drink(normalized: str) -> bool:
+    """Combo-drink-slot-filling fallback for items that aren't in menuItems.json at all.
+    Combo-slot eligibility is unconditional for both buckets -- it never depends on the
+    happy-hour-discount flag, which is a separate question (see ``is_happy_hour_discounted``)."""
+    return (
+        bool(_DR_PEPPER_RE.search(normalized))
+        or any(kw in normalized for kw in _FOUNTAIN_DRINK_KEYWORDS)
+        or any(kw in normalized for kw in _SHAKE_BLAST_KEYWORDS)
+    )
+
+
+def _keyword_fallback_happy_hour_discounted(normalized: str) -> bool:
+    """Happy-hour-discount fallback for items that aren't in menuItems.json at all. Fountain
+    drinks are always discounted; shakes/blasts/malts obey
+    ``_SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED`` so that flag is the single switch for every
+    shake/blast, on-menu or off, plain or customised (PR #50 review)."""
+    if _DR_PEPPER_RE.search(normalized) or any(kw in normalized for kw in _FOUNTAIN_DRINK_KEYWORDS):
+        return True
+    if any(kw in normalized for kw in _SHAKE_BLAST_KEYWORDS):
+        return _SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED
+    return False
 
 
 def infer_combo_component(item_name: str) -> str:
@@ -229,9 +290,11 @@ def infer_combo_component(item_name: str) -> str:
     eligibility is a SEPARATE question, answered by ``is_happy_hour_discounted`` below, and must
     never be derived from this function's result (PR #50 review). Category comes from
     ``menuItems.json`` first; keyword fallback only applies to items that aren't in the menu at
-    all (#39).
+    all (#39). *item_name* may carry a parenthesized customization suffix (e.g. "Tots (Extra
+    Crispy)") -- ``_menu_key`` strips it before any lookup so a customised item classifies
+    identically to its base item (PR #50 review).
     """
-    normalized = item_name.lower()
+    normalized = _menu_key(item_name)
     if normalized in _COMBO_SIDE_ITEMS:
         return "sides"
     if normalized in _SUNDAES:
@@ -241,12 +304,12 @@ def infer_combo_component(item_name: str) -> str:
     if category is not None:
         return "drinks" if category in _COMBO_DRINK_CATEGORIES else ""
 
-    # Not in the menu at all (e.g. a spoken item never added to menuItems.json) -- fall back to
-    # keyword scanning. Deliberately conservative: only the two allow-listed side names, never a
-    # bare "fries"/"tot" substring match on other Hot Dogs & Tots / Extras & Sides items.
-    if "tots" in normalized or "groovy fries" in normalized:
-        return "sides"
-    if _keyword_fallback_is_drink(normalized):
+    # Not in the menu at all (e.g. a spoken item never added to menuItems.json). PR #50 review:
+    # an unknown item must NEVER silently fill the combo side slot for free -- a charged item is
+    # visible and correctable, a free absorption is silent revenue loss -- so there is no side
+    # fallback here at all, only the (unconditional) drink fallback for genuinely off-menu
+    # fountain drinks/shakes/blasts.
+    if _keyword_fallback_combo_drink(normalized):
         return "drinks"
     return ""
 
@@ -262,8 +325,10 @@ def is_happy_hour_discounted(item_name: str) -> bool:
     """Whether *item_name* gets the happy-hour discount -- a SEPARATE question from
     ``infer_combo_component`` above (PR #50 review): don't derive one from the other. Sundaes are
     never discounted (Brian's #39 decision). See ``_SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED``
-    above for the one open question (Shakes & Blasts, pending Brian)."""
-    normalized = item_name.lower()
+    above for the one open question (Shakes & Blasts, pending Brian). *item_name* may carry a
+    parenthesized customization suffix -- ``_menu_key`` strips it before any lookup so a
+    customised drink is discounted (or not) exactly like its base item (PR #50 review)."""
+    normalized = _menu_key(item_name)
     if normalized in _SUNDAES:
         return False
 
@@ -275,5 +340,6 @@ def is_happy_hour_discounted(item_name: str) -> bool:
     if category is not None:
         return False
 
-    # Not in the menu at all -- same keyword fallback as the combo-drink-slot check.
-    return _keyword_fallback_is_drink(normalized)
+    # Not in the menu at all -- same keyword fallback categories as the combo-drink-slot check,
+    # but gated so the shakes/blasts flag above is genuinely the single switch (PR #50 review).
+    return _keyword_fallback_happy_hour_discounted(normalized)
