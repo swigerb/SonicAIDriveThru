@@ -18,10 +18,12 @@ gpt-realtime-1.5 on 2026-09-22):
 
 import asyncio
 import json
+import logging
+import os
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
@@ -29,6 +31,7 @@ from aiohttp import WSMsgType, web
 from aiohttp.test_utils import TestClient, TestServer
 from azure.core.credentials import AzureKeyCredential
 
+import rtmt as rtmt_module
 from rtmt import RTMiddleTier, Tool
 
 SYSTEM_PROMPT = "You are a Sonic Drive-In carhop."
@@ -391,6 +394,105 @@ class SessionBootstrapTests(_RealtimeHarness):
         self.assertEqual(sum(e["type"] == "conversation.item.create" for e in self.fake.received), 1)
         self.assertEqual(self.fake.response_sessions[0]["tools"], TOOL_NAMES)
         await browser.close()
+
+
+class ClientLogControlGateTests(_RealtimeHarness):
+    """swigerb/SonicAIDriveThru#53: a browser must never be able to flip
+    process-wide log verbosity (`extension.set_verbose_logging`) or open a
+    process-wide log file (`extension.set_log_to_file`) in production --
+    both mutate the shared `sonic-verbose` logger, so one guest's request
+    would silently change every OTHER connection's logging on the same
+    worker process (and file logging additionally risks writing guest audio
+    transcripts to disk and filling it).
+
+    Gated the same way #31's G1 `response.create` gate is (see
+    `test_rtmt.ResponseCreateGateTests` /
+    `rtmt._client_log_control_allowed`): `conformance_hooks.hooks_enabled_now()`
+    (live-rechecked every call, never the frozen import-time constant -- see
+    that function's own docstring for why) OR an explicit
+    `security.allow_client_log_control` config/env opt-in.
+
+    `app/backend/tests/conftest.py` sets `CONFORMANCE_TEST_HOOKS=1` for the
+    whole pytest process, so the "dropped" test below forces hooks off LIVE
+    for its own duration to reproduce production's actual shape (mirroring
+    the G1 test's identical `patch.dict(os.environ, ...)` technique)."""
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        # Snapshot the shared vlogger's state so a test that legitimately
+        # enables it (hooks on / config flag on) can't leak into any other
+        # test in the process.
+        self._vlogger_level = rtmt_module.vlogger.level
+        self._vlogger_handlers = list(rtmt_module.vlogger.handlers)
+
+    async def asyncTearDown(self):
+        for h in list(rtmt_module.vlogger.handlers):
+            if h not in self._vlogger_handlers:
+                rtmt_module.vlogger.removeHandler(h)
+                try:
+                    h.close()
+                except Exception:
+                    pass
+        rtmt_module.vlogger.setLevel(self._vlogger_level)
+        await super().asyncTearDown()
+
+    async def test_both_extensions_dropped_with_warning_when_hooks_and_flag_are_off(self):
+        with patch.dict(os.environ, {"CONFORMANCE_TEST_HOOKS": ""}), \
+                patch.object(rtmt_module, "_security_cfg", {}):
+            browser = await self.client.ws_connect("/realtime")
+            await self._until(lambda: self.rtmt._sessions.active_session_count >= 1)
+
+            with self.assertLogs("sonic-drive-in", level="WARNING") as logs:
+                await browser.send_json({"type": "extension.set_verbose_logging", "enabled": True})
+                await asyncio.sleep(0.1)
+            self.assertTrue(any("set_verbose_logging" in m for m in logs.output))
+            self.assertEqual(rtmt_module.vlogger.level, self._vlogger_level,
+                              "verbose logging must not be enabled while gated off")
+            self.assertEqual(list(rtmt_module.vlogger.handlers), self._vlogger_handlers)
+
+            with self.assertLogs("sonic-drive-in", level="WARNING") as logs2:
+                await browser.send_json({"type": "extension.set_log_to_file", "enabled": True})
+                await asyncio.sleep(0.1)
+            self.assertTrue(any("set_log_to_file" in m for m in logs2.output))
+            self.assertEqual(list(rtmt_module.vlogger.handlers), self._vlogger_handlers,
+                              "no file handler must be attached while gated off")
+            # Liveness: the socket must still be open and processing frames
+            # afterwards -- a dropped extension frame must never close it.
+            await browser.send_json({"type": "input_audio_buffer.clear"})
+            await asyncio.sleep(0.05)
+            self.assertFalse(browser.closed)
+            await browser.close()
+
+    async def test_both_extensions_still_work_when_conformance_hooks_are_enabled(self):
+        # conftest.py already sets CONFORMANCE_TEST_HOOKS=1 for this whole
+        # process -- no patch needed, this is the existing/legacy behaviour.
+        with patch.object(rtmt_module, "_create_verbose_file_handler", return_value=MagicMock()):
+            browser = await self.client.ws_connect("/realtime")
+            await self._until(lambda: self.rtmt._sessions.active_session_count >= 1)
+
+            await browser.send_json({"type": "extension.set_verbose_logging", "enabled": True})
+            await self._until(lambda: rtmt_module.vlogger.level == logging.DEBUG)
+
+            await browser.send_json({"type": "extension.set_log_to_file", "enabled": True})
+            await self._until(lambda: len(rtmt_module.vlogger.handlers) > len(self._vlogger_handlers))
+
+            await browser.send_json({"type": "extension.set_log_to_file", "enabled": False})
+            await browser.send_json({"type": "extension.set_verbose_logging", "enabled": False})
+            await asyncio.sleep(0.05)
+            await browser.close()
+
+    async def test_verbose_logging_still_works_via_explicit_config_flag_with_hooks_off(self):
+        with patch.dict(os.environ, {"CONFORMANCE_TEST_HOOKS": ""}), \
+                patch.object(rtmt_module, "_security_cfg", {"allow_client_log_control": True}):
+            browser = await self.client.ws_connect("/realtime")
+            await self._until(lambda: self.rtmt._sessions.active_session_count >= 1)
+
+            await browser.send_json({"type": "extension.set_verbose_logging", "enabled": True})
+            await self._until(lambda: rtmt_module.vlogger.level == logging.DEBUG)
+
+            await browser.send_json({"type": "extension.set_verbose_logging", "enabled": False})
+            await asyncio.sleep(0.05)
+            await browser.close()
 
 
 class SessionUpdatedScrubTests(_RealtimeHarness):

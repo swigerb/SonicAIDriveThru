@@ -70,6 +70,35 @@ _config = get_config()
 _conn_cfg = _config.get("connection", {})
 _security_cfg = _config.get("security", {})
 
+
+def _truthy(value: Any) -> bool:
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+_ALLOW_CLIENT_LOG_CONTROL_ENV = "ALLOW_CLIENT_LOG_CONTROL"
+
+
+def _client_log_control_allowed() -> bool:
+    """swigerb/SonicAIDriveThru#53: is a browser allowed to change process-wide
+    logging (extension.set_verbose_logging / extension.set_log_to_file) right now?
+
+    Off by default in production -- both extensions are process-wide side effects
+    (one connection's request affects every OTHER connection sharing the same
+    worker process), so a single guest must never be able to flip them on. Allowed
+    only when the conformance harness's test hooks are active (live-checked via
+    `conformance_hooks.hooks_enabled_now()`, mirroring the `response.create`
+    gate's own re-check-on-every-call reasoning -- see that function's
+    docstring), or when an operator has explicitly opted in via config.yaml's
+    `security.allow_client_log_control` (env override: ALLOW_CLIENT_LOG_CONTROL).
+    """
+    if conformance_hooks.hooks_enabled_now():
+        return True
+    env_value = os.environ.get(_ALLOW_CLIENT_LOG_CONTROL_ENV)
+    if env_value is not None and env_value.strip():
+        return _truthy(env_value)
+    return bool(_security_cfg.get("allow_client_log_control", False))
+
+
 __all__ = ["RTMiddleTier", "RTToolCall", "Tool", "ToolResult", "ToolResultDirection", "configure_realtime_model",
            "deployment_supports_reasoning", "normalize_reasoning_effort", "parse_reasoning_model"]
 
@@ -1824,6 +1853,16 @@ class RTMiddleTier:
                                 try:
                                     ext_msg = json.loads(msg.data)
                                     if ext_msg.get("type") == "extension.set_verbose_logging":
+                                        if not _client_log_control_allowed():
+                                            # #53: process-wide log verbosity is never a
+                                            # single connection's call to make in production
+                                            # -- drop silently (from the guest's perspective)
+                                            # and just log a WARNING server-side.
+                                            logger.warning(
+                                                "Dropped extension.set_verbose_logging from session %s "
+                                                "(client log control is disabled in this deployment)",
+                                                session_id)
+                                            continue
                                         if session_id:
                                             self._sessions.touch_activity(session_id)
                                         verbose = bool(ext_msg.get("enabled", False))
@@ -1848,6 +1887,17 @@ class RTMiddleTier:
                                 try:
                                     ext_msg = json.loads(msg.data)
                                     if ext_msg.get("type") == "extension.set_log_to_file":
+                                        if not _client_log_control_allowed():
+                                            # #53: same reasoning as extension.set_verbose_logging
+                                            # above -- additionally, file logging risks filling
+                                            # the disk and writing guest data to disk, so this
+                                            # must never be a single connection's call in
+                                            # production.
+                                            logger.warning(
+                                                "Dropped extension.set_log_to_file from session %s "
+                                                "(client log control is disabled in this deployment)",
+                                                session_id)
+                                            continue
                                         if session_id:
                                             self._sessions.touch_activity(session_id)
                                         enabled = bool(ext_msg.get("enabled", False))

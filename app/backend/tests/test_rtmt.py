@@ -43,6 +43,7 @@ from rtmt import (
     Tool,
     ToolResult,
     ToolResultDirection,
+    _client_log_control_allowed,
     _drop_from_client,
     _dump_client_to_server,
     _filter_client_to_server,
@@ -706,6 +707,40 @@ class HMACTokenTests(unittest.TestCase):
         parts[0] = parts[0][:-1] + "X"
         tampered = ".".join(parts)
         self.assertFalse(validate_hmac_token(tampered, self.secret))
+
+
+class ClientLogControlAllowedTests(unittest.TestCase):
+    """swigerb/SonicAIDriveThru#53: `_client_log_control_allowed()` is the
+    single gate `extension.set_verbose_logging`/`extension.set_log_to_file`
+    must consult before touching the shared `vlogger`. Precedence, highest
+    first: live `CONFORMANCE_TEST_HOOKS` > live `ALLOW_CLIENT_LOG_CONTROL`
+    env override > `config.yaml`'s `security.allow_client_log_control`
+    (defaults to False, i.e. off in production)."""
+
+    def test_off_by_default(self):
+        with patch.dict(os.environ, {"CONFORMANCE_TEST_HOOKS": "", "ALLOW_CLIENT_LOG_CONTROL": ""}), \
+                patch("rtmt._security_cfg", {}):
+            self.assertFalse(_client_log_control_allowed())
+
+    def test_allowed_when_conformance_hooks_are_enabled(self):
+        with patch.dict(os.environ, {"CONFORMANCE_TEST_HOOKS": "1", "ALLOW_CLIENT_LOG_CONTROL": ""}), \
+                patch("rtmt._security_cfg", {}):
+            self.assertTrue(_client_log_control_allowed())
+
+    def test_allowed_via_env_override_with_hooks_off(self):
+        with patch.dict(os.environ, {"CONFORMANCE_TEST_HOOKS": "", "ALLOW_CLIENT_LOG_CONTROL": "true"}), \
+                patch("rtmt._security_cfg", {}):
+            self.assertTrue(_client_log_control_allowed())
+
+    def test_env_override_false_wins_over_config_flag_true(self):
+        with patch.dict(os.environ, {"CONFORMANCE_TEST_HOOKS": "", "ALLOW_CLIENT_LOG_CONTROL": "false"}), \
+                patch("rtmt._security_cfg", {"allow_client_log_control": True}):
+            self.assertFalse(_client_log_control_allowed())
+
+    def test_allowed_via_config_flag_with_hooks_and_env_off(self):
+        with patch.dict(os.environ, {"CONFORMANCE_TEST_HOOKS": "", "ALLOW_CLIENT_LOG_CONTROL": ""}), \
+                patch("rtmt._security_cfg", {"allow_client_log_control": True}):
+            self.assertTrue(_client_log_control_allowed())
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

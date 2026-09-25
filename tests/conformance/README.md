@@ -1471,3 +1471,50 @@ one new backend error log line (`allowedNewBackendErrors: 1`) — the `logger.ex
 itself is expected and desired (per the issue's ask to log the failure server-side); it just must no
 longer propagate and tear the socket down.
 
+## Client-controlled server logging must be gated off in production (#53)
+
+`extension.set_verbose_logging` and `extension.set_log_to_file` are two browser-sent extension
+types `rtmt.py` has always intercepted and consumed (never forwarded upstream). Both toggle
+**process-wide** state on the shared `sonic-verbose` logger (`audio_pipeline.vlogger`) — a
+`logging.Logger` instance, not anything scoped per-connection — so before this fix, *any* connected
+guest could flip verbose logging on for the whole worker process (raising log volume for every other
+connection sharing it) or attach a real `logging.FileHandler` that writes to disk under
+`app/backend/logs/` (a disk-filling and guest-data-in-logs risk with zero relation to *that guest's
+own* session).
+
+**The fix:** both handlers now consult `rtmt._client_log_control_allowed()` before touching any
+shared state. Off (frame dropped, `logger.warning(...)` logged, socket kept open, nothing forwarded)
+unless:
+- `conformance_hooks.hooks_enabled_now()` is true (live-rechecked every call, same reasoning as the
+  `response.create` S1 gate — see the browser→upstream allow-list contract above), **or**
+- an operator has explicitly opted in via `config.yaml`'s `security.allow_client_log_control: true`
+  (env override: `ALLOW_CLIENT_LOG_CONTROL=true|false`, checked live and taking precedence over the
+  config file when set to a non-empty value).
+
+Both are **off by default** in `config.yaml` — a real production deployment ignores both extension
+types entirely, exactly as if the frontend had never sent them, unless an operator has deliberately
+turned on debug-mode log control.
+
+### No conformance (wire-level) scenario for this gate — documented, not filed
+
+Unlike `response.create` (#31/G1), there is no wire-level signal a black-box test could observe here
+either way: these two extension types are **always** consumed and **never** forwarded to the fake
+upstream, whether the gate allows the toggle or drops it — so "did a frame reach the fake upstream"
+can't distinguish the gated case from the ungated one. The only observable effect of either branch is
+the backend's own internal `logging` module state (and, for `set_log_to_file`, a file written to
+disk) — inherently a Python-implementation detail, not a wire contract a future C# backend could be
+held to the same way (see the "Backend logging is not a wire contract" note above, and the
+`IBackendUnderTest.UnhandledErrorCount()` doc comment's identical reasoning for why this suite
+deliberately avoids coupling assertions to captured backend log *text*).
+
+Per this stream's own precedent (G1's "if the harness can't do it economically, document it as
+Python-unit-only, and file nothing"): **this contract is Python-unit-only.** It's pinned by
+`app/backend/tests/test_rtmt.py::ClientLogControlAllowedTests` (the gate function itself, all four
+precedence combinations) and `app/backend/tests/test_session_bootstrap.py::ClientLogControlGateTests`
+(full end-to-end: dropped-with-warning under production defaults, still-works under
+`CONFORMANCE_TEST_HOOKS=1`, still-works via the explicit config-flag opt-in with hooks off) — both
+mutation-checked (removing either handler's gate check independently turns the corresponding
+end-to-end test red; see the mutation table in the #53 commit). **A C# backend must implement the
+same gate itself** (off by default, `CONFORMANCE_TEST_HOOKS`-or-explicit-opt-in to enable) — there is
+no conformance scenario to hold it to, only this documented expectation.
+
