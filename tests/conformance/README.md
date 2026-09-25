@@ -817,16 +817,11 @@ C# does the same thing, not just "something similar")**, applied in this order t
 3. Lowercase, **culture-invariantly** (`str.lower()` on the Python side; C# must use
    `ToLowerInvariant()`, not the culture-sensitive `ToLower()`, so casing can never depend on the
    host's current culture/locale).
-4. Remove the `®` character (`str.replace("®", "")`). This used to be a second, separate rule that
-   only lived in `order_state.py`'s combo-conversion base-name matching; PR #50 review round 4 found
-   that `MENU_CATEGORY_MAP` itself was still keyed by bare `name.lower()` (no `®` removal), so a
-   *lookup* of a `®`-bearing name (e.g. `"SuperSONIC® Bacon Double Cheeseburger"`,
-   `"SONIC® Cheeseburger"`) missed the map's own entry for itself and fell through to keyword
-   guessing — 12 of the 60 menu items were affected, not just the single NBSP case originally
-   reported. `®` removal is now step 4 of the *one* shared `_menu_key()` function, used everywhere
-   (map construction, map lookup, combo-slot/sundae/happy-hour classification, and
-   `order_state.py`'s combo-conversion matching) — there is no second place left where this rule
-   could drift.
+4. Remove the `®` character (`str.replace("®", "")`). This is the *one* place this rule lives —
+   used everywhere `_menu_key()` is used (map construction, map lookup, combo-slot/sundae/
+   happy-hour classification, and `order_state.py`'s combo-conversion matching) — there is no
+   second place left where it could drift. See `.squad/decisions.md` for the history of why this
+   rule was consolidated here.
 
 Keyword fallbacks (`_keyword_fallback_combo_drink`, `_keyword_fallback_happy_hour_discounted`, for
 names that resolve to no `MENU_CATEGORY_MAP` entry at all, i.e. genuinely off-menu) match on

@@ -451,13 +451,20 @@
 - **`®` removal is now one rule, not two.** `_menu_key()` (the shared normalisation helper) now
   strips `®` itself, as its own explicit step, alongside paren-group removal, whitespace collapse,
   and lowercasing. Previously `®` removal only existed in `order_state.py`'s ad-hoc combo-conversion
-  string, and `MENU_CATEGORY_MAP` was still keyed by bare `name.lower()` — so a *lookup* of a
-  `®`-bearing menu item name (not just a customised one) missed the map's own entry for itself and
-  fell through to keyword guessing. This turned out to affect **12 of the 60** menu items (every
-  `®`-bearing name — `SuperSONIC® Bacon Double Cheeseburger`, `SONIC® Cheeseburger`, `Ocean Water®`,
-  both FRITOS® wraps, etc.), not just the single NBSP-affected OREO Blast Rick's report named —
-  proven by a mutation reverting the map-key line back to `name.lower()`, which failed a new
-  direct-resolution test for all 12 in one shot.
+  string, and `MENU_CATEGORY_MAP` was still keyed by bare `name.lower()`.
+  **Correction (PR #50 review round 5, should-fix 3):** the line above originally claimed this was a
+  *live* bug affecting "12 of the 60" `®`-bearing menu items. Re-checked directly against `467494b`
+  (the commit before this fix): map construction (`name.lower()`) and lookup
+  (`strip_modifiers(item_name).lower()`) were **both** missing `®` removal — symmetric, so
+  `®`-bearing names actually resolved fine at that point. The one genuine *live* bug was narrower:
+  map construction didn't collapse whitespace the way `strip_modifiers()` does, so only the single
+  NBSP-bearing OREO Blast name could ever actually fail to resolve via the map. Consolidating `®`
+  removal into `_menu_key()` was still worth doing — it closed a *latent* duplication/drift risk,
+  since `order_state.py`'s combo-conversion matching already stripped `®` independently while
+  `menu_utils.py` didn't — but it was not fixing a live classification bug for the other 11 `®`
+  names. The "reverting the map-key line fails a test for all 12" mutation result is real and worth
+  keeping as a regression guard (it proves construction and lookup must stay in sync going forward),
+  but it does not mean those 12 were broken in the code as shipped before this fix.
 - **Keyword fallbacks now match on word boundaries, not bare substrings.** A plain
   `any(kw in normalized ...)` substring check let `"tea"` match inside `"steak"`, silently
   absorbing an off-menu `"Philly Cheesesteak"`/`"Steak Sandwich"` into a combo's drink slot for
@@ -511,6 +518,11 @@
   Python's `str.split()` uses internally) and notes that every `menuItems.json` name's whitespace
   is either an ASCII space or a single NBSP, so C#'s `char.IsWhiteSpace` — which also treats NBSP
   as whitespace — agrees on every real name without special-casing.
+- **README history correction (should-fix 3):** the "12 of the 60 items were affected" story has
+  been removed from the *rule* statement in the conformance README (the contract only needs to
+  state the algorithm, not its discovery history); the corrected story now lives in this file, in
+  the round-4 entry above (see the "Correction" paragraph added to the `®` removal bullet under
+  "PR #50 review, round 4").
 
 #### 42. Customised Items Must Be Normalised Before Every Menu Lookup (Summer — Backend Dev, PR #50 review round 2)
 - **Root cause: customizations live *inside* `item_name`, and lookups didn't account for that.**
