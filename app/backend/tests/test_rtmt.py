@@ -973,7 +973,11 @@ class ProcessMessageToClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result)
         self.assertIn("call-ga-1", tools_pending)
 
-    async def test_session_created_strips_instructions(self):
+    async def test_session_created_relays_only_the_allow_listed_session_shape(self):
+        """swigerb/SonicAIDriveThru#45: replaced the deny-list scrub with a
+        minimal allow-listed copy -- the browser-bound `session` object must
+        contain only `id`, `object`, and `audio.output.voice`, no matter what
+        else upstream echoes back."""
         rtmt = self._make_rtmt()
         rtmt.voice_choice = "coral"
         client_ws = _make_mock_ws()
@@ -985,8 +989,10 @@ class ProcessMessageToClientTests(unittest.IsolatedAsyncioTestCase):
         msg = MagicMock()
         msg.data = json.dumps({
             "type": "session.created",
+            "event_id": "evt_1",
             "session": {
                 "id": "sess-123",
+                "object": "realtime.session",
                 "instructions": "secret prompt",
                 "tools": [{"name": "search"}],
                 "voice": "alloy",
@@ -996,14 +1002,20 @@ class ProcessMessageToClientTests(unittest.IsolatedAsyncioTestCase):
         })
         result = await rtmt._process_message_to_client(msg, client_ws, server_ws, tools_pending)
         parsed = json.loads(result)
-        self.assertEqual(parsed["session"]["instructions"], "")
-        self.assertEqual(parsed["session"]["tools"], [])
-        self.assertEqual(parsed["session"]["voice"], "coral")
-        self.assertEqual(parsed["session"]["audio"]["output"]["voice"], "coral")
+        self.assertEqual(parsed, {
+            "type": "session.created",
+            "event_id": "evt_1",
+            "session": {
+                "id": "sess-123",
+                "object": "realtime.session",
+                "audio": {"output": {"voice": "coral"}},
+            },
+        })
 
-    async def test_session_updated_strips_instructions_and_tools(self):
-        """swigerb/SonicAIDriveThru#27: session.updated echoes the full session
-        object just like session.created, and must be scrubbed identically."""
+    async def test_session_updated_relays_only_the_allow_listed_session_shape(self):
+        """swigerb/SonicAIDriveThru#27, #45: session.updated echoes the full
+        session object just like session.created, and must be reduced to the
+        same allow-listed shape."""
         rtmt = self._make_rtmt()
         rtmt.voice_choice = "coral"
         client_ws = _make_mock_ws()
@@ -1015,8 +1027,10 @@ class ProcessMessageToClientTests(unittest.IsolatedAsyncioTestCase):
         msg = MagicMock()
         msg.data = json.dumps({
             "type": "session.updated",
+            "event_id": "evt_2",
             "session": {
                 "id": "sess-123",
+                "object": "realtime.session",
                 "instructions": "secret prompt",
                 "tools": [{"name": "search"}],
                 "voice": "alloy",
@@ -1026,10 +1040,15 @@ class ProcessMessageToClientTests(unittest.IsolatedAsyncioTestCase):
         })
         result = await rtmt._process_message_to_client(msg, client_ws, server_ws, tools_pending)
         parsed = json.loads(result)
-        self.assertEqual(parsed["session"]["instructions"], "")
-        self.assertEqual(parsed["session"]["tools"], [])
-        self.assertEqual(parsed["session"]["voice"], "coral")
-        self.assertEqual(parsed["session"]["audio"]["output"]["voice"], "coral")
+        self.assertEqual(parsed, {
+            "type": "session.updated",
+            "event_id": "evt_2",
+            "session": {
+                "id": "sess-123",
+                "object": "realtime.session",
+                "audio": {"output": {"voice": "coral"}},
+            },
+        })
 
     async def test_session_updated_with_no_session_object_is_a_noop(self):
         """A malformed/unexpected session.updated with no `session` key must
@@ -1043,14 +1062,16 @@ class ProcessMessageToClientTests(unittest.IsolatedAsyncioTestCase):
         result = await rtmt._process_message_to_client(msg, client_ws, server_ws, tools_pending)
         self.assertEqual(result, msg.data)
 
-    async def test_session_created_and_updated_strip_ga_only_secret_fields(self):
-        """swigerb/SonicAIDriveThru#29: the GA echo carries a duplicate token
-        cap under `max_output_tokens` (the original scrub only nulled the
-        legacy `max_response_output_tokens`), plus `model` (the internal
-        Azure deployment name), `audio.input.transcription.model` (the
-        transcription deployment name), `reasoning` and `parallel_tool_calls`
-        (reasoning-model tuning knobs) -- none of which the browser needs or
-        useRealtime.tsx reads off session.created/session.updated."""
+    async def test_session_created_and_updated_never_relay_any_ga_top_level_secret_key(self):
+        """swigerb/SonicAIDriveThru#29, #45: the previous deny-list scrub had
+        to be updated for every new GA top-level key (it missed `max_output_tokens`,
+        `model`, `audio.input.transcription.model`, `reasoning` and
+        `parallel_tool_calls` when they shipped, and would miss the next one
+        too). The allow-listed replacement can't leak a key nobody has
+        thought to deny: set every GA top-level key that exists today
+        (including the newest ones -- `prompt`, `tracing`, `include`,
+        `truncation`) and confirm the browser-bound copy still contains only
+        `id`/`object`/`audio.output.voice`."""
         rtmt = self._make_rtmt()
         client_ws = _make_mock_ws()
         server_ws = _make_mock_ws()
@@ -1060,6 +1081,7 @@ class ProcessMessageToClientTests(unittest.IsolatedAsyncioTestCase):
 
         raw_session = {
             "id": "sess-123",
+            "object": "realtime.session",
             "instructions": "secret prompt",
             "tools": [{"name": "search"}],
             "voice": "alloy",
@@ -1069,6 +1091,10 @@ class ProcessMessageToClientTests(unittest.IsolatedAsyncioTestCase):
             "model": "gpt-realtime-2.1-super-secret-deployment",
             "reasoning": {"effort": "low"},
             "parallel_tool_calls": True,
+            "prompt": {"id": "pmpt_secret"},
+            "tracing": "auto",
+            "include": ["item.input_audio_transcription.logprobs"],
+            "truncation": "auto",
             "audio": {
                 "input": {"transcription": {"model": "gpt-4o-transcribe-secret-deployment"}},
                 "output": {"voice": "alloy"},
@@ -1079,12 +1105,11 @@ class ProcessMessageToClientTests(unittest.IsolatedAsyncioTestCase):
             msg.data = json.dumps({"type": event_type, "session": dict(raw_session)})
             result = await rtmt._process_message_to_client(msg, client_ws, server_ws, tools_pending)
             session = json.loads(result)["session"]
-            self.assertNotIn("max_output_tokens", session, f"{event_type} leaked the GA max-token cap")
-            self.assertNotIn("model", session, f"{event_type} leaked the internal deployment name")
-            self.assertNotIn("reasoning", session, f"{event_type} leaked the reasoning tuning knob")
-            self.assertNotIn("parallel_tool_calls", session, f"{event_type} leaked parallel_tool_calls")
-            self.assertNotIn("model", session["audio"]["input"]["transcription"],
-                              f"{event_type} leaked the transcription deployment name")
+            self.assertEqual(set(session), {"id", "object", "audio"},
+                              f"{event_type} relayed a key outside the allow-list: {sorted(session)}")
+            self.assertEqual(session["audio"], {"output": {"voice": rtmt.voice_choice}},
+                              f"{event_type} relayed something other than the allow-listed voice shape")
+
 
     async def test_conversation_item_created_drops_server_authored_system_item(self):
         """swigerb/SonicAIDriveThru#29: role="system" conversation items are

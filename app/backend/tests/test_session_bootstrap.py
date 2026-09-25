@@ -300,6 +300,13 @@ class SessionUpdatedScrubTests(_RealtimeHarness):
     `session.updated` after every accepted session.update (starting with our
     own bootstrap one), echoing the full session object back, so every
     browser connection received the real system prompt and tool schemas.
+
+    swigerb/SonicAIDriveThru#45 replaced the original deny-list scrub with a
+    minimal allow-listed copy (`RTMiddleTier._client_session_echo`): the
+    browser-bound `session` object now contains only `id`, `object`, and
+    `audio.output.voice` -- `instructions`/`tools` (and everything else) are
+    absent entirely rather than nulled out, so these tests assert absence,
+    not emptiness.
     """
 
     async def test_bootstrap_session_updated_reaching_the_browser_has_no_instructions_or_tools(self):
@@ -319,9 +326,11 @@ class SessionUpdatedScrubTests(_RealtimeHarness):
 
         for event in updates:
             session = event["session"]
-            self.assertEqual(session.get("instructions"), "",
+            self.assertEqual(set(session), {"id", "object", "audio"},
+                              "session.updated must relay only the allow-listed session keys")
+            self.assertNotIn("instructions", session,
                               "session.updated leaked the system prompt to the browser")
-            self.assertEqual(session.get("tools"), [],
+            self.assertNotIn("tools", session,
                               "session.updated leaked tool schemas to the browser")
         await browser.close()
 
@@ -336,9 +345,11 @@ class SessionUpdatedScrubTests(_RealtimeHarness):
 
         for event in updates:
             session = event["session"]
-            self.assertEqual(session.get("instructions"), "",
+            self.assertEqual(set(session), {"id", "object", "audio"},
+                              "session.updated must relay only the allow-listed session keys")
+            self.assertNotIn("instructions", session,
                               "session.updated leaked the system prompt to the browser")
-            self.assertEqual(session.get("tools"), [],
+            self.assertNotIn("tools", session,
                               "session.updated leaked tool schemas to the browser")
         await browser.close()
 

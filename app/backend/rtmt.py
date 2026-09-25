@@ -811,45 +811,49 @@ class RTMiddleTier:
             self._token_refresh_task.cancel()
         self._sessions.stop_idle_checker()
 
-    def _scrub_session_for_client(self, session: dict) -> None:
-        """Strip the system prompt, tool schemas and other server-internal
-        fields from a `session` object before it is relayed to the browser.
+    def _client_session_echo(self, message: dict) -> dict:
+        """Build the minimal allow-listed browser-bound copy of a GA
+        `session.created`/`session.updated` echo (swigerb/SonicAIDriveThru#45).
 
-        Every GA server event that echoes the full session object -- currently
+        Replaces the previous `_scrub_session_for_client`, a deny-list scrub
+        that mutated the *full* upstream session object in place and had to
+        be updated every time GA added a new top-level key. GA has since
+        shipped `prompt`, `tracing`, `include` and `truncation` -- none were
+        ever added to that deny-list, so each would have been relayed to the
+        browser completely unscrubbed. An allow-list can't leak a key nobody
+        has thought to deny yet: this builds a brand-new dict containing
+        exactly the shape below and nothing else, no matter what upstream
+        adds next.
+
+        `useRealtime.tsx` has no handler at all for either event type
+        (verified: neither `session.created` nor `session.updated` appears in
+        its message-type switch), so this shape is deliberately minimal
+        rather than driven by any actual frontend field read -- `voice` is
+        kept only because a hypothetical future handler might reasonably
+        want to know the active voice.
+
+        Every event that echoes the full session object -- currently
         `session.created` (on connect) and `session.updated` (after every
         accepted session.update: our own bootstrap one, the voice picker, the
         browser's own handshake, a rejection fallback...) -- must route
-        through this one helper so both events are scrubbed identically. If
-        we ever allow client-side tools, this will need updating.
+        through this one helper so both are reduced identically.
+
+        Caller must only invoke this when `message["session"]` is present:
+        `session.updated` is not guaranteed to carry one, and a malformed/
+        unexpected frame missing it is passed through unchanged instead (see
+        the `session.updated` case below) rather than echoed as this shape
+        with every field null.
         """
-        session["instructions"] = ""
-        session["tools"] = []
-        # Set voice in both legacy and GA locations for client compatibility
-        session["voice"] = self.voice_choice
-        audio = session.setdefault("audio", {})
-        audio.setdefault("output", {})["voice"] = self.voice_choice
-        session["tool_choice"] = "none"
-        session["max_response_output_tokens"] = None
-        # `max_response_output_tokens` above is the legacy field name; GA
-        # echoes the same cap back under `max_output_tokens`, which the line
-        # above never touches. Drop it rather than null it out, since the
-        # browser has no case for either session event and reads neither key.
-        session.pop("max_output_tokens", None)
-        # `model` is our Azure deployment name (internal infra detail, not a
-        # secret the browser has any use for); `reasoning`/`parallel_tool_calls`
-        # are server-owned tuning knobs for reasoning-capable deployments
-        # (see `_build_session`) that reveal which model family is deployed.
-        session.pop("model", None)
-        session.pop("reasoning", None)
-        session.pop("parallel_tool_calls", None)
-        # `audio.input.transcription.model` names the transcription deployment
-        # (see `transcription_model` / `_build_session`) -- same class of leak
-        # as `model` above, just nested under the GA audio shape.
-        audio_input = audio.get("input")
-        if isinstance(audio_input, dict):
-            transcription = audio_input.get("transcription")
-            if isinstance(transcription, dict):
-                transcription.pop("model", None)
+        session = message["session"]
+        return {
+            "type": message.get("type"),
+            "event_id": message.get("event_id"),
+            "session": {
+                "id": session.get("id"),
+                "object": session.get("object"),
+                "audio": {"output": {"voice": self.voice_choice}},
+            },
+        }
 
     async def _process_message_to_client(self, msg: str, client_ws: web.WebSocketResponse, server_ws: web.WebSocketResponse, tools_pending: dict[str, RTToolCall], verbose: bool = False, guard: "_SessionUpdateGuard | None" = None, on_session_created: Callable[[], Awaitable[None]] | None = None, recovery: RateLimitRecovery | None = None) -> str | None:
         data = msg.data
@@ -918,8 +922,7 @@ class RTMiddleTier:
                 case "session.created":
                     session = message["session"]
                     _vlog(verbose, "  Session ID: %s", session.get("id", "?"))
-                    self._scrub_session_for_client(session)
-                    updated_message = json.dumps(message)
+                    updated_message = json.dumps(self._client_session_echo(message))
                     if on_session_created is not None:
                         # The forwarder announces the session (metadata or resume)
                         # once it knows whether this socket is resuming.
@@ -940,10 +943,8 @@ class RTMiddleTier:
                     # after every accepted session.update (ours or the
                     # browser's) and echoes the full session object right
                     # back -- instructions/tools/max-tokens included.
-                    session = message.get("session")
-                    if session is not None:
-                        self._scrub_session_for_client(session)
-                        updated_message = json.dumps(message)
+                    if message.get("session") is not None:
+                        updated_message = json.dumps(self._client_session_echo(message))
 
                 case "response.created":
                     if recovery is not None:
