@@ -34,7 +34,6 @@ from audio_pipeline import (
     MARKER_AUDIO_DONE_LEGACY as _MARKER_AUDIO_DONE_LEGACY,
     MARKER_END_SESSION as _MARKER_END_SESSION,
     MARKER_LOG_TO_FILE as _MARKER_LOG_TO_FILE,
-    MARKER_RESPONSE_CANCEL as _MARKER_RESPONSE_CANCEL,
     MARKER_RESUME as _MARKER_RESUME,
     MARKER_SESSION_UPDATED as _MARKER_SESSION_UPDATED,
     MARKER_SET_VOICE as _MARKER_SET_VOICE,
@@ -1869,9 +1868,6 @@ class RTMiddleTier:
                                 audio_frame_count += 1
                                 if (verbose or _VERBOSE_GLOBAL) and audio_frame_count % 50 == 0:
                                     _vlog(verbose, "─── [Client → Server] Audio frame #%d ───", audio_frame_count)
-                            # Barge-in: client sent response.cancel — user wants to speak.
-                            if _MARKER_RESPONSE_CANCEL in msg.data:
-                                echo.on_barge_in(verbose)
                             # Forward client message to OpenAI.
                             new_msg = await self._process_message_to_server(msg, ws, verbose, voice_locked=assistant_audio_seen, guard=guard, voice=voice)
                             # PR #49 review round 2, "F1": idle reset, nudge
@@ -1909,6 +1905,19 @@ class RTMiddleTier:
                             if not greeting_sent and sent_type == "session.update":
                                 logger.info("Client session.update forwarded — sending greeting")
                                 await send_greeting_once(trigger="client-session.update")
+                            # PR #49 review round 5, "F1": barge-in used to be
+                            # keyed on the raw `_MARKER_RESPONSE_CANCEL in
+                            # msg.data` substring check, evaluated on the
+                            # browser's raw bytes before the filter above ever
+                            # ran -- so a frame merely *containing* the
+                            # substring "response.cancel" somewhere (e.g.
+                            # buried in an unrelated field), without actually
+                            # being that type, could still disable echo
+                            # suppression. Same seam/fix as the idle/nudge/
+                            # greeting triggers above: keyed on the validated
+                            # `sent_type`, never the raw bytes.
+                            if sent_type == "response.cancel":
+                                echo.on_barge_in(verbose)
                         elif msg.type == aiohttp.WSMsgType.ERROR:
                             logger.error("Client WebSocket error: %s", ws.exception())
                             break
