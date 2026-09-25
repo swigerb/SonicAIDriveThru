@@ -19,13 +19,13 @@ namespace Conformance.Tests.Scenarios.Ordering;
 ///
 ///  2. A genuine unhandled Python exception inside a tool handler (e.g., a scripted call missing
 ///     a required argument the handler accesses via `args["..."]` with no `.get()` fallback,
-///     raising KeyError). app/backend/rtmt.py has no try/except around `await tool.target(...)`
-///     in its response.output_item.done handler — only a connection-wide catch-all much further
-///     up the stack (see _forward_messages's `except Exception: logger.exception(...)` around the
-///     asyncio.gather of both relay directions) that logs and tears the whole socket down instead
-///     of returning a model-visible error. Empirically confirmed against the live backend (not
-///     just by reading rtmt.py): running this scenario unskipped produced exactly the predicted
-///     traceback --
+///     raising KeyError). Originally (#36), app/backend/rtmt.py had no try/except around
+///     `await tool.target(...)` in its response.output_item.done handler — only a connection-wide
+///     catch-all much further up the stack (see _forward_messages's
+///     `except Exception: logger.exception(...)` around the asyncio.gather of both relay
+///     directions) that logged and tore the whole socket down instead of returning a model-visible
+///     error. Empirically confirmed against the live backend before the fix (not just by reading
+///     rtmt.py): running this scenario unskipped produced exactly the predicted traceback --
 ///
 ///       File "app/backend/rtmt.py", line 1357, in _forward_messages
 ///         await asyncio.gather(from_client_to_server(), from_server_to_client())
@@ -38,9 +38,14 @@ namespace Conformance.Tests.Scenarios.Ordering;
 ///       KeyError: 'item_name'
 ///
 ///     -- followed by "Session ... detached (client close code=None)" and no
-///     function_call_output ever reaching the upstream socket. Marked [Fact(Skip = ...)] per the
-///     fan-out rules: this is a genuine Python backend bug, not a harness or test defect, and
-///     app/backend must not be modified from this stream.
+///     function_call_output ever reaching the upstream socket.
+///
+///     Fixed by (a) wrapping the tool-execution + result-marshaling block in
+///     response.output_item.done in a try/except that logs server-side (tool name + session id
+///     only, never the raw args) and returns a neutral function_call_output ("tool_execution_failed"
+///     in error_messages.yaml) instead of letting the exception propagate, and (b) tools.py's
+///     update_order now validates its required arguments up front and returns the same graceful
+///     ToolResult instead of raising a bare KeyError in the first place.
 /// </summary>
 [Collection(ConformanceCollection.Name)]
 public sealed class ToolErrorSessionSurvivesTests(ConformanceFixture fixture)
@@ -73,18 +78,7 @@ public sealed class ToolErrorSessionSurvivesTests(ConformanceFixture fixture)
         Assert.Equal(1, order.GetProperty("items").GetArrayLength());
     });
 
-    [Fact(Skip = "Known Python bug (tracked in #36): app/backend/rtmt.py's response.output_item.done handler " +
-        "(_process_message_to_client, line ~817) calls `await tool.target(args, session_id)` " +
-        "with no try/except. A genuinely unhandled exception inside a tool (e.g. update_order's " +
-        "`args[\"item_name\"]` with no default, raising KeyError when the argument is omitted) " +
-        "propagates up through _forward_messages's connection-wide `except Exception: " +
-        "logger.exception(...)` (line ~1360), which logs and tears down the entire WebSocket " +
-        "connection via detach_session instead of returning a graceful, model-visible tool-error " +
-        "result. Empirically confirmed: running this test unskipped produces the exact predicted " +
-        "traceback (KeyError: 'item_name' at tools.py:325) and no function_call_output is ever " +
-        "sent upstream -- the session does NOT survive. app/backend must not be modified from " +
-        "this stream; see the #9 report for details.",
-        SkipWhen = nameof(BackendUnderTest.IsPython), SkipType = typeof(BackendUnderTest))]
+    [Fact]
     public Task Session_survives_an_unhandled_tool_exception() => fixture.RunAsync(async () =>
     {
         var ct = TestContext.Current.CancellationToken;

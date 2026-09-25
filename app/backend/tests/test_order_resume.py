@@ -892,6 +892,26 @@ class VoicePersistenceTests(_ResumeHarness):
                           "another session's persisted voice pick")
         await fresh.close()
 
+    async def test_end_session_clears_the_persisted_voice(self):
+        """#57 Probe F, white-box half: the C# conformance scenario
+        (Ending_the_session_clears_the_voice_so_the_next_fresh_session_gets_the_default)
+        proves the OBSERVABLE effect -- a next fresh session gets the config
+        default -- but that assertion holds regardless of whether
+        session_manager.end_session actually pops the voice, because a
+        brand-new connection always gets a brand-new session_id anyway (see
+        that scenario's own doc comment). This pins the specific line
+        (`self._voices.pop(session_id, None)` in `end_session`) directly."""
+        browser = await self.client.ws_connect("/realtime")
+        meta = await self._until_event(browser, "extension.session_metadata")
+        sid = self._sid_for_token(meta["sessionToken"])
+        await browser.send_json({"type": "extension.set_voice", "voice": "cedar"})
+        await self._until(lambda: self.sm.get_voice(sid) == "cedar")
+
+        self.sm.end_session(sid, "test: probe F white-box pin")
+        self.assertIsNone(self.sm.get_voice(sid),
+                           "end_session must clear this session's persisted voice pick")
+        await browser.close()
+
 
 class _Capture(logging.Handler):
     def __init__(self):

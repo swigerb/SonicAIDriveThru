@@ -75,7 +75,10 @@ public sealed class RateLimitRecoveryTests(ShortTimersConformanceFixture fixture
     // (PR #54 review follow-up, Rick, post-merge): ShortTimers' 1s idle_timeout against 0.2s/0.4s
     // retry delays left this test's ceiling assertion only ~190ms of headroom between the latest
     // realistic correct-code close and the earliest possible mutant close -- see that profile's
-    // own doc comment for the full math and the wider (2s/0.3s/1.2s) values that fix it.
+    // own doc comment for the full math and the current (6s/0.9s/3.6s) values that fix it (widened
+    // again after CI run 36176347267 exposed the same margin problem one level up: 2s of
+    // idle-clock headroom wasn't enough for the un-timed connect-and-greet phase under real host
+    // contention on a 4-vCPU CI runner).
 
     [Fact]
     public Task A_pending_retry_is_cancelled_by_detach() => fixture.RunAsync(async () =>

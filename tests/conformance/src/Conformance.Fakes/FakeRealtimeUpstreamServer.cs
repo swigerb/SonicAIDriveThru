@@ -1108,7 +1108,24 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
                         break;
 
                     case DoneEvent done:
-                        await CloseOpenAudioItemAsync().ConfigureAwait(false);
+                        if (done.Pace is { } donePace)
+                        {
+                            // swigerb/SonicAIDriveThru#48 follow-up: same pacing mechanism as
+                            // AudioDeltaEvent.Pace above -- a real delay via the connection's own
+                            // TimeProvider, interrupted immediately by an accepted
+                            // response.cancel (responseCts.Token, not ct), so a scenario can keep
+                            // this response "in progress" for a bounded window without any audio
+                            // output at all.
+                            await Task.Delay(donePace, connection.TimeProvider, responseCts.Token).ConfigureAwait(false);
+                        }
+
+                        if (!done.SuppressAudioDone)
+                        {
+                            await CloseOpenAudioItemAsync().ConfigureAwait(false);
+                        }
+                        // else (PR #58 re-review "F1"): leave any open audio item unclosed --
+                        // response.output_audio.done is never sent, modelling audio that streamed
+                        // and then never completed (see DoneEvent.SuppressAudioDone's doc comment).
 
                         var responseBody = new JsonObject
                         {

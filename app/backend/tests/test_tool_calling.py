@@ -330,6 +330,21 @@ class UpdateOrderAddTests(unittest.TestCase):
         }, sid))
         self.assertEqual(result.destination, ToolResultDirection.TO_SERVER)
 
+    def test_missing_required_argument_returns_graceful_error(self):
+        """swigerb/SonicAIDriveThru#36: a malformed tool call missing a required
+        argument (e.g. "item_name") must not raise a bare KeyError -- it must be
+        validated up front and turned into the same kind of graceful, TO_SERVER-only
+        apology as the other application-level rejections in this module, so a
+        malformed call from the model can never tear down the guest's connection."""
+        sid = _make_session()
+        result = _run(update_order({
+            "action": "add", "size": "medium", "quantity": 1, "price": 2.79,
+        }, sid))
+        self.assertEqual(result.destination, ToolResultDirection.TO_SERVER)
+        self.assertTrue(len(result.text) > 0)
+        summary = order_state_singleton.get_order_summary(sid)
+        self.assertEqual(len(summary.items), 0)
+
 
 class UpdateOrderRemoveTests(unittest.TestCase):
     """Test update_order with remove action."""

@@ -34,6 +34,7 @@ from audio_pipeline import (
     MARKER_AUDIO_DONE_LEGACY as _MARKER_AUDIO_DONE_LEGACY,
     MARKER_END_SESSION as _MARKER_END_SESSION,
     MARKER_LOG_TO_FILE as _MARKER_LOG_TO_FILE,
+    MARKER_RESPONSE_DONE as _MARKER_RESPONSE_DONE,
     MARKER_RESUME as _MARKER_RESUME,
     MARKER_SESSION_UPDATED as _MARKER_SESSION_UPDATED,
     MARKER_SET_VOICE as _MARKER_SET_VOICE,
@@ -68,6 +69,35 @@ logger = logging.getLogger("sonic-drive-in")
 _config = get_config()
 _conn_cfg = _config.get("connection", {})
 _security_cfg = _config.get("security", {})
+
+
+def _truthy(value: Any) -> bool:
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+_ALLOW_CLIENT_LOG_CONTROL_ENV = "ALLOW_CLIENT_LOG_CONTROL"
+
+
+def _client_log_control_allowed() -> bool:
+    """swigerb/SonicAIDriveThru#53: is a browser allowed to change process-wide
+    logging (extension.set_verbose_logging / extension.set_log_to_file) right now?
+
+    Off by default in production -- both extensions are process-wide side effects
+    (one connection's request affects every OTHER connection sharing the same
+    worker process), so a single guest must never be able to flip them on. Allowed
+    only when the conformance harness's test hooks are active (live-checked via
+    `conformance_hooks.hooks_enabled_now()`, mirroring the `response.create`
+    gate's own re-check-on-every-call reasoning -- see that function's
+    docstring), or when an operator has explicitly opted in via config.yaml's
+    `security.allow_client_log_control` (env override: ALLOW_CLIENT_LOG_CONTROL).
+    """
+    if conformance_hooks.hooks_enabled_now():
+        return True
+    env_value = os.environ.get(_ALLOW_CLIENT_LOG_CONTROL_ENV)
+    if env_value is not None and env_value.strip():
+        return _truthy(env_value)
+    return bool(_security_cfg.get("allow_client_log_control", False))
+
 
 __all__ = ["RTMiddleTier", "RTToolCall", "Tool", "ToolResult", "ToolResultDirection", "configure_realtime_model",
            "deployment_supports_reasoning", "normalize_reasoning_effort", "parse_reasoning_model"]
@@ -281,7 +311,9 @@ _TURN_DETECTION_NUMERIC_BOUNDS = {
 _TURN_DETECTION_INT_ONLY_KEYS = frozenset({"prefix_padding_ms", "silence_duration_ms"})
 
 
-def _sanitize_turn_detection(value: Any, session_id: str | None = None) -> dict | None:
+def _sanitize_turn_detection(
+        value: Any, session_id: str | None = None,
+        limiter: "_ClientFrameDropWarningLimiter | None" = None) -> dict | None:
     """Allow-list a browser-sent `turn_detection` object down to exactly the
     four sub-keys `useRealtime.tsx`'s `startSession()` ever sends
     (`type`, `threshold`, `prefix_padding_ms`, `silence_duration_ms`).
@@ -322,13 +354,109 @@ def _sanitize_turn_detection(value: Any, session_id: str | None = None) -> dict 
             dropped.append(key)
     extra = sorted(k for k in value if k not in _TURN_DETECTION_ALLOWED_KEYS)
     if dropped or extra:
-        logger.warning(
+        _warn_dropped_frame(
+            limiter,
             "Sanitized client turn_detection: dropped out-of-bounds/invalid sub-key(s) %s and "
-            "disallowed sub-key(s) %s (session=%s)", dropped, extra, session_id)
+            "disallowed sub-key(s) %s (session=%s)",
+            _truncate_key_list_for_log(dropped), _truncate_key_list_for_log(extra), session_id)
     return sanitized
 
 
-def _filter_client_to_server(message: dict, session_id: str | None = None) -> dict | None:
+def _truncate_for_log(value: Any, max_len: int = 64) -> str:
+    """Render a browser-supplied value for a log line, truncated to at most
+    `max_len` characters of its `repr()` (PR #58 review round 2, "F2").
+
+    A forged frame can put an arbitrarily large value in a field that ends
+    up quoted in a WARNING line -- e.g. a multi-megabyte `type` string on a
+    disallowed-type probe, or a long `voice` string on a forged
+    `extension.set_voice` -- turning one bad frame into a multi-megabyte log
+    line. `repr()` is computed first (so the output still looks like the
+    `%r` callers previously used -- quoted and escaped) and only the
+    resulting text is truncated; `repr()` is never called on anything after
+    truncation, since that could reintroduce the same unbounded cost for a
+    sufficiently pathological `__repr__`.
+    """
+    text = repr(value)
+    if len(text) <= max_len:
+        return text
+    return f"{text[:max_len]}...(truncated, {len(text)} chars total)"
+
+
+def _truncate_key_list_for_log(keys: list, max_items: int = 10) -> str:
+    """Render a browser-supplied list of dict key NAMES for a log line,
+    bounded in both dimensions (PR #58 re-review, "F2").
+
+    `_truncate_for_log` bounds any single browser-supplied *value*, but the
+    stripped/disallowed key-name lists logged by `_filter_client_to_server`
+    (top-level keys) and `_sanitize_turn_detection` (`turn_detection`
+    sub-keys) were passed straight to `%s` as a Python list -- a forged frame
+    can put an arbitrarily long string as a dict key (JSON object keys are
+    just strings), or supply a huge number of bogus keys, and either one
+    reproduces the same unbounded-log-line risk `_truncate_for_log` closes
+    for values. Each key name is truncated individually first (so one
+    pathological key can't blow up the line even when `max_items` would
+    otherwise keep it), then the list itself is capped to the first
+    `max_items` entries with a "(+N more)" count for the rest.
+    """
+    rendered = [_truncate_for_log(k) for k in keys[:max_items]]
+    remaining = len(keys) - len(rendered)
+    text = f"[{', '.join(rendered)}]"
+    if remaining > 0:
+        text += f" (+{remaining} more)"
+    return text
+
+
+class _ClientFrameDropWarningLimiter:
+    """Rate-limits the per-frame WARNING logs emitted while validating one
+    browser→upstream frame or extension message (PR #58 review round 2, "F2").
+
+    A misbehaving or actively probing browser client can otherwise flood the
+    backend's logs with one WARNING line per bad frame -- `input_audio_buffer
+    .append` alone is ~10 frames/sec, so a client that trips a validation
+    failure on every frame (accidentally or deliberately) produces the same
+    log volume as legitimate traffic. The signal that matters ("this
+    connection is sending something the allow-list rejects") is already
+    established by the first few lines; every one after that adds noise, not
+    new information.
+
+    Logs the first `LOG_LIMIT` per-frame warnings verbatim (each still names
+    its own specific reason), then one summary line, then stays silent for
+    the rest of this connection's lifetime. One instance is created per
+    connection (alongside `_SessionUpdateGuard`, at the same scope) and
+    threaded through `_filter_client_to_server` / `_sanitize_turn_detection`
+    / `_process_message_to_server` and the extension-message handlers.
+    Passing `None` (the default everywhere) disables rate limiting
+    entirely -- every existing unit test that calls `_filter_client_to_server`
+    directly, with no per-connection context, keeps logging every warning.
+    """
+
+    LOG_LIMIT = 5
+
+    def __init__(self) -> None:
+        self._count = 0
+
+    def warning(self, msg: str, *args: Any) -> None:
+        self._count += 1
+        if self._count <= self.LOG_LIMIT:
+            logger.warning(msg, *args)
+        elif self._count == self.LOG_LIMIT + 1:
+            logger.warning(
+                "Suppressing further per-frame drop/strip warnings on this connection "
+                "after the first %d (this connection is still being served normally)",
+                self.LOG_LIMIT)
+
+
+def _warn_dropped_frame(limiter: "_ClientFrameDropWarningLimiter | None", msg: str, *args: Any) -> None:
+    """Log a per-frame validation WARNING, rate-limited if `limiter` is given."""
+    if limiter is None:
+        logger.warning(msg, *args)
+    else:
+        limiter.warning(msg, *args)
+
+
+def _filter_client_to_server(
+        message: dict, session_id: str | None = None,
+        limiter: "_ClientFrameDropWarningLimiter | None" = None) -> dict | None:
     """Allow-list and rebuild a browser→upstream event before
     `_process_message_to_server` forwards it (swigerb/SonicAIDriveThru#31,
     hardened per PR #49 review round 2).
@@ -393,38 +521,44 @@ def _filter_client_to_server(message: dict, session_id: str | None = None) -> di
     allowed = msg_type in _CLIENT_ALLOWED_TYPES or (
         msg_type in _CLIENT_TEST_ONLY_TYPES and conformance_hooks.hooks_enabled_now())
     if not allowed:
-        logger.warning("Dropped disallowed client→server event type %r (session=%s)", msg_type, session_id)
+        _warn_dropped_frame(
+            limiter, "Dropped disallowed client→server event type %s (session=%s)",
+            _truncate_for_log(msg_type), session_id)
         return None
 
     allowed_keys = _CLIENT_TOP_LEVEL_KEYS[msg_type]
     dropped_keys = sorted(k for k in message if k not in allowed_keys)
     if dropped_keys:
-        logger.warning(
-            "Stripped disallowed top-level key(s) %s from client %s (session=%s)",
-            dropped_keys, msg_type, session_id)
+        _warn_dropped_frame(
+            limiter, "Stripped disallowed top-level key(s) %s from client %s (session=%s)",
+            _truncate_key_list_for_log(dropped_keys), msg_type, session_id)
 
     filtered = {k: v for k, v in message.items() if k in allowed_keys}
 
     if "audio" in filtered and not (
             isinstance(filtered["audio"], str) and _CLIENT_BASE64_RE.fullmatch(filtered["audio"])):
-        logger.warning(
+        _warn_dropped_frame(
+            limiter,
             "Dropped input_audio_buffer.append with a non-base64-alphabet audio value (session=%s)", session_id)
         return None
 
     if "event_id" in filtered and not (
             isinstance(filtered["event_id"], str) and _CLIENT_EVENT_ID_RE.fullmatch(filtered["event_id"])):
-        logger.warning("Stripped an invalid client event_id (session=%s)", session_id)
+        _warn_dropped_frame(limiter, "Stripped an invalid client event_id (session=%s)", session_id)
         del filtered["event_id"]
 
     if "response_id" in filtered and not (
             isinstance(filtered["response_id"], str) and _CLIENT_EVENT_ID_RE.fullmatch(filtered["response_id"])):
-        logger.warning("Dropped response.cancel with an invalid response_id (session=%s)", session_id)
+        _warn_dropped_frame(
+            limiter, "Dropped response.cancel with an invalid response_id (session=%s)", session_id)
         return None
 
     return filtered
 
 
-def _dump_client_to_server(payload: dict, session_id: str | None = None) -> str | None:
+def _dump_client_to_server(
+        payload: dict, session_id: str | None = None,
+        limiter: "_ClientFrameDropWarningLimiter | None" = None) -> str | None:
     """Serialise an already-filtered client→server payload, or return `None`
     if it can't be serialised safely (PR #49 review round 5, "S3").
 
@@ -443,7 +577,8 @@ def _dump_client_to_server(payload: dict, session_id: str | None = None) -> str 
     try:
         return json.dumps(payload, allow_nan=False)
     except ValueError:
-        logger.warning(
+        _warn_dropped_frame(
+            limiter,
             "Dropped client→server frame that failed to re-serialise (NaN/Infinity) (session=%s)", session_id)
         return None
 
@@ -508,6 +643,161 @@ _VOICE_UNSET = object()
 # parse instead of a regex match.
 _CLIENT_APPEND_FAST_PATH_RE = re.compile(
     r'\{"type":"input_audio_buffer\.append","audio":"[A-Za-z0-9+/=]*"\}')
+
+
+# swigerb/SonicAIDriveThru#36, PR #58 re-review "S2"/"S1": after this many
+# *consecutive* failed tool rounds on one connection with no guest turn in
+# between, stop auto-continuing the model (see the "response.done" case's
+# tools_pending handling below). Retrying the identical broken flow silently a
+# third time in a row is more likely to compound a bad order state than help --
+# the model still gets the function_call_output(s) (so it can tell the guest
+# something went wrong), and at the cap it's given one server-authored,
+# tool-free response.create so it can apologise out loud and ask the guest,
+# instead of either silently retrying tools again or going dead-air.
+_TOOL_FAILURE_CAP = 2
+
+# swigerb/SonicAIDriveThru#36, PR #58 re-review "S1": sent (server-authored,
+# never client-originated -- the #31 browser->upstream allow-list in
+# _filter_client_to_server is unaffected) in place of a bare response.create
+# once the consecutive-failed-round cap is reached. `response.tool_choice` is
+# a documented GA field on response.create's `response` object -- this same
+# codebase's own #31 work already established it as a real override the
+# model honours (rtmt.py strips a *browser*-supplied response.tool_choice
+# for exactly that reason; see the README "backend contract" section and
+# _filter_client_to_server's RESPONSE_OVERRIDE_KEYS) -- "none" tells the
+# model it must not call a tool on this turn, so it can only speak.
+#
+# PR #58 re-review round 3: `response.tool_choice="none"` ALONE is not enough. A live
+# probe against Sonic's real gpt-realtime-2.1 deployment
+# (session-state/.../probe_tool_choice_none.py, 2026-09-25), with two failed update_order
+# rounds' function_call_output already in context, showed the model falsely told the
+# guest an item was added/changed in 2 of 3 runs even though tool_choice="none" correctly
+# stopped it from calling a tool. Response-level `instructions` (also a documented GA
+# field on response.create's `response` object, and -- like tool_choice -- one for THIS
+# response only, replacing rather than merging with the session's own instructions for
+# its duration) explicitly telling the model nothing was added or changed fixed it in 3
+# of 3 runs. `_tool_failure_cap_instructions()` prefers the brand prompt config's
+# `tool_failure_cap_instructions` (so each brand can keep its own carhop/crew-member
+# voice) and falls back to a neutral built-in default -- deliberately NOT via
+# PromptLoader.render_error()'s own generic "Unknown error message key" placeholder,
+# which would be a worse, more visibly broken instruction than a plain neutral one -- so
+# there is never an empty (or placeholder) `instructions` field.
+_TOOL_FAILURE_CAP_INSTRUCTIONS_FALLBACK = (
+    "The order system just failed twice in a row and nothing was added or changed. "
+    "Do not say an item was added, removed, or changed. Briefly apologise, say you "
+    "couldn't update the order just now, and ask the guest to repeat what they'd like."
+)
+
+
+def _tool_failure_cap_instructions(prompt_loader) -> str:
+    """Return the response-level `instructions` text for the tool-failure cap notice.
+
+    Reads the brand prompt config's `error_messages.yaml` key
+    `tool_failure_cap_instructions` if one is configured; otherwise returns
+    `_TOOL_FAILURE_CAP_INSTRUCTIONS_FALLBACK`. Deliberately checks
+    `get_error_messages()` directly rather than calling `prompt_loader.render_error()`
+    unconditionally -- `render_error()`'s own fallback for an unknown key is a generic
+    "An error occurred (...)" placeholder, not this function's neutral default, and a
+    placeholder string sent to the model as its ONLY instructions for this response
+    would be worse than nothing.
+    """
+    if prompt_loader is not None and "tool_failure_cap_instructions" in prompt_loader.get_error_messages():
+        return prompt_loader.render_error("tool_failure_cap_instructions")
+    return _TOOL_FAILURE_CAP_INSTRUCTIONS_FALLBACK
+
+
+def _build_tool_failure_cap_notice_msg(prompt_loader) -> str:
+    """Build the server-authored response.create sent once per capped failure streak.
+
+    `tool_choice: "none"` stops the model from calling a tool again with no guest
+    input; `instructions` (see `_tool_failure_cap_instructions()` above) stops it from
+    falsely claiming the order changed anyway, on top of not calling a tool.
+    """
+    return json.dumps({
+        "type": "response.create",
+        "response": {
+            "tool_choice": "none",
+            "instructions": _tool_failure_cap_instructions(prompt_loader),
+        },
+    })
+
+
+class _ToolFailureTracker:
+    """Per-connection consecutive-failed-tool-*round*-counter (#36, PR #58 re-review "S1"/"S2").
+
+    Counts failed tool rounds since the last guest turn, not failed calls or
+    tool successes (PR #58 re-review "S1"): the earlier per-call, reset-on-
+    any-success version let a model loop `update_order` (fails) -> `get_order`
+    (succeeds -- the very call our own error text tells it to make) ->
+    `update_order` (fails) -> ... forever without ever reaching the cap, since
+    each `get_order` reset the count back to zero with no guest input at all.
+    A round with several parallel tool calls where only some fail is also
+    counted once, not once per failing call.
+
+    Once the cap is reached, `consume_cap_notice()` grants exactly ONE
+    server-authored, tool-free response.create (see
+    `_RESPONSE_CREATE_TOOL_CHOICE_NONE_MSG`) so the model can apologise out
+    loud -- but every response.done *after* that, while still at cap and
+    with no guest turn in between, goes back to sending nothing at all. A
+    model (or, in the fake upstream's deterministic scripting, a test) that
+    keeps calling tools every round regardless of what `tool_choice` said
+    must not be able to ride an unbounded ladder of one-more-apology
+    responses with zero guest input -- only a single apology per capped
+    streak, exactly like the plain "stop auto-continuing" cap this replaces.
+    """
+    __slots__ = ("count", "_round_had_failure", "_cap_notice_sent")
+
+    def __init__(self):
+        self.count = 0
+        self._round_had_failure = False
+        self._cap_notice_sent = False
+
+    def record_call_failure(self) -> None:
+        """One tool call in the current round raised an unhandled exception.
+
+        Marks the round as failed; does not touch `count` yet -- `end_round()`
+        does that once per round, so several parallel failing calls in one
+        round (e.g. two tool calls in the same response, both raising) still
+        only count as a single failed round.
+        """
+        self._round_had_failure = True
+
+    def end_round(self) -> None:
+        """Call once per response.done that had >=1 tool call pending.
+
+        Increments the streak only if at least one call in this round failed.
+        A round with only successful calls (e.g. the `get_order` the model's
+        own error text tells it to make after a failure) leaves the streak
+        unchanged -- it must NOT reset it back to zero, or the cap could
+        never be reached no matter how long the loop runs.
+        """
+        if self._round_had_failure:
+            self.count += 1
+            self._round_had_failure = False
+
+    def reset_for_new_turn(self) -> None:
+        """Genuine guest activity (speech_started / a completed input
+        transcription) breaks the streak -- only the guest, not the model
+        retrying tools on its own, gets to start the count over."""
+        self.count = 0
+        self._round_had_failure = False
+        self._cap_notice_sent = False
+
+    def at_cap(self) -> bool:
+        return self.count >= _TOOL_FAILURE_CAP
+
+    def consume_cap_notice(self) -> bool:
+        """True (and marks the notice sent) the first time this is called
+        after the cap is reached; False every time after that, until
+        `reset_for_new_turn()` runs. Lets the response.done handler send
+        exactly one tool_choice="none" apology per capped streak, then fall
+        back to sending nothing at all for as long as the streak continues
+        with no guest turn -- see the class docstring.
+        """
+        if self._cap_notice_sent:
+            return False
+        self._cap_notice_sent = True
+        return True
 
 
 class ToolResultDirection(Enum):
@@ -658,8 +948,25 @@ _BACKGROUND_TASKS: set[asyncio.Task] = set()
 def _spawn(coro) -> asyncio.Task:
     task = asyncio.ensure_future(coro)
     _BACKGROUND_TASKS.add(task)
-    task.add_done_callback(_BACKGROUND_TASKS.discard)
+    task.add_done_callback(_on_background_task_done)
     return task
+
+
+def _on_background_task_done(task: asyncio.Task) -> None:
+    # swigerb/SonicAIDriveThru#59 (PR #58 re-review, "F1" completeness): a
+    # done callback that only discards from the tracking set still leaves
+    # any exception the task raised unretrieved -- asyncio logs those as
+    # "Task exception was never retrieved" at ERROR, the exact noisy-log
+    # shape #59 fixed for the echo flush specifically. Retrieving it here
+    # (even just to log it at DEBUG and drop it) is what actually silences
+    # that for every task spawned via `_spawn`, not just the two echo-flush
+    # sends #59 originally covered.
+    _BACKGROUND_TASKS.discard(task)
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.debug("Background task raised (retrieved, not re-raised): %r", exc)
 
 
 async def _close_superseded(stale_ws: web.WebSocketResponse) -> None:
@@ -1148,7 +1455,7 @@ class RTMiddleTier:
             },
         }
 
-    async def _process_message_to_client(self, msg: str, client_ws: web.WebSocketResponse, server_ws: web.WebSocketResponse, tools_pending: dict[str, RTToolCall], verbose: bool = False, guard: "_SessionUpdateGuard | None" = None, on_session_created: Callable[[], Awaitable[None]] | None = None, recovery: RateLimitRecovery | None = None, voice: str | None = _VOICE_UNSET) -> str | None:
+    async def _process_message_to_client(self, msg: str, client_ws: web.WebSocketResponse, server_ws: web.WebSocketResponse, tools_pending: dict[str, RTToolCall], verbose: bool = False, guard: "_SessionUpdateGuard | None" = None, on_session_created: Callable[[], Awaitable[None]] | None = None, recovery: RateLimitRecovery | None = None, voice: str | None = _VOICE_UNSET, tool_failures: "_ToolFailureTracker | None" = None) -> str | None:
         data = msg.data
 
         # FAST PATH: extract type via regex without full JSON parse.
@@ -1311,36 +1618,96 @@ class RTMiddleTier:
                                 logger.error("Unknown tool requested: %s", item["name"])
                                 updated_message = None
                             else:
-                                args = json.loads(item["arguments"])
-                                logger.info("Executing tool '%s' with args %s (session=%s)", item["name"], args, session_id)
-                                t0 = time.monotonic()
-                                if item["name"] in ("update_order", "get_order", "reset_order"):
-                                    result = await tool.target(args, session_id)
-                                else:
-                                    result = await tool.target(args)
-                                elapsed_ms = (time.monotonic() - t0) * 1000
-                                logger.info("Tool '%s' result direction=%s", item["name"], result.destination)
+                                try:
+                                    args = json.loads(item["arguments"])
+                                    logger.info("Executing tool '%s' (session=%s)", item["name"], session_id)
+                                    t0 = time.monotonic()
+                                    if item["name"] in ("update_order", "get_order", "reset_order"):
+                                        result = await tool.target(args, session_id)
+                                    else:
+                                        result = await tool.target(args)
+                                    elapsed_ms = (time.monotonic() - t0) * 1000
+                                    logger.info("Tool '%s' result direction=%s", item["name"], result.destination)
 
-                                # ── Verbose: full tool call lifecycle ──
-                                result_text = result.to_text()[:_VERBOSE_RESULT_TRUNCATE]
-                                _vlog(verbose,
-                                      "\n═══ [TOOL CALL] %s ═══\n"
-                                      "Args: %s\n"
-                                      "Result: %s\n"
-                                      "Direction: %s\n"
-                                      "Time: %.1fms\n"
-                                      "═══════════════════════════",
-                                      item["name"],
-                                      json.dumps(args, indent=2),
-                                      result_text,
-                                      result.destination.name,
-                                      elapsed_ms)
+                                    # ── Verbose: full tool call lifecycle ──
+                                    result_text = result.to_text()[:_VERBOSE_RESULT_TRUNCATE]
+                                    _vlog(verbose,
+                                          "\n═══ [TOOL CALL] %s ═══\n"
+                                          "Args: %s\n"
+                                          "Result: %s\n"
+                                          "Direction: %s\n"
+                                          "Time: %.1fms\n"
+                                          "═══════════════════════════",
+                                          item["name"],
+                                          json.dumps(args, indent=2),
+                                          result_text,
+                                          result.destination.name,
+                                          elapsed_ms)
 
-                                # Track tool call args + result in context window
-                                ctx_monitor = self._sessions.get_context_monitor(session_id)
-                                if ctx_monitor:
-                                    ctx_monitor.add_content(item.get("arguments", ""))
-                                    ctx_monitor.add_content(result.to_text())
+                                    # Track tool call args + result in context window
+                                    ctx_monitor = self._sessions.get_context_monitor(session_id)
+                                    if ctx_monitor:
+                                        ctx_monitor.add_content(item.get("arguments", ""))
+                                        ctx_monitor.add_content(result.to_text())
+
+                                    output_text = result.to_text() if result.destination in (ToolResultDirection.TO_SERVER, ToolResultDirection.TO_BOTH) else ""
+                                    send_to_client = result.destination in (ToolResultDirection.TO_CLIENT, ToolResultDirection.TO_BOTH)
+                                    client_text = result.to_client_text() if send_to_client else None
+                                    # #36 S1 (PR #58 re-review): a successful tool call no
+                                    # longer resets the failure streak here -- see
+                                    # _ToolFailureTracker's docstring for why (the model's own
+                                    # prescribed get_order retry must not be what un-caps it).
+                                except Exception:
+                                    # #36: a genuinely unhandled exception inside a tool handler
+                                    # (e.g. a malformed call missing a required argument) used to
+                                    # propagate all the way up through _forward_messages's
+                                    # connection-wide catch-all, tearing down the guest's whole
+                                    # WebSocket instead of giving the model a graceful, recoverable
+                                    # error. Log server-side only (tool name + session id) and
+                                    # hand the model a neutral function_call_output so the
+                                    # conversation, and the guest's session, survive.
+                                    logger.exception("Tool '%s' raised an unhandled exception (session=%s)",
+                                                      item["name"], session_id)
+                                    output_text = self._prompt_loader.render_error("tool_execution_failed") if self._prompt_loader else (
+                                        "Something went wrong with that action and it did not complete. "
+                                        "Don't retry it yet -- call get_order to confirm the order's current "
+                                        "state, then ask the guest to repeat what they'd like."
+                                    )
+                                    send_to_client = False
+                                    client_text = None
+                                    # #36 S2 (PR #58 re-review "F3"): refresh the guest-visible
+                                    # order ticket from order_state_singleton's CACHED order
+                                    # summary (get_order_summary_json returns order_summary_json,
+                                    # refreshed by _update_summary() at the end of the *previous*
+                                    # successful mutation) -- not from the failed tool's own
+                                    # result. This is still strictly better than doing nothing:
+                                    # it reflects every mutation that completed successfully
+                                    # before this call, so a guest speaking again after an earlier
+                                    # order change isn't shown a stale pre-that-change ticket. It
+                                    # is NOT a live re-read of order_state -- if this call's own
+                                    # exception landed after some in-place mutation but before its
+                                    # own _update_summary() ran, that partial change won't be in
+                                    # the cache either. Best-effort: if the order state isn't
+                                    # readable for this session at all, skip it -- the guest still
+                                    # gets the function_call_output below regardless.
+                                    if session_id is not None:
+                                        try:
+                                            ticket_json = order_state_singleton.get_order_summary_json(session_id)
+                                        except Exception:
+                                            logger.warning(
+                                                "Could not read order state to refresh the ticket after a tool "
+                                                "failure (session=%s)", session_id,
+                                            )
+                                        else:
+                                            await client_ws.send_json({
+                                                "type": "extension.middle_tier_tool_response",
+                                                "previous_item_id": tool_call.previous_id,
+                                                "tool_name": "get_order",
+                                                "tool_result": ticket_json,
+                                            })
+                                    if tool_failures is not None:
+                                        tool_failures.record_call_failure()
+
 
                                 await server_ws.send_json({
                                     "type": "conversation.item.create",
@@ -1348,17 +1715,18 @@ class RTMiddleTier:
                                         "id": new_middle_tier_item_id(),
                                         "type": "function_call_output",
                                         "call_id": item["call_id"],
-                                        "output": result.to_text() if result.destination in (ToolResultDirection.TO_SERVER, ToolResultDirection.TO_BOTH) else ""
+                                        "output": output_text
                                     }
                                 })
-                                if result.destination in (ToolResultDirection.TO_CLIENT, ToolResultDirection.TO_BOTH):
+                                if send_to_client:
                                     await client_ws.send_json({
                                         "type": "extension.middle_tier_tool_response",
                                         "previous_item_id": tool_call.previous_id,
                                         "tool_name": item["name"],
-                                        "tool_result": result.to_client_text()
+                                        "tool_result": client_text
                                     })
                                 updated_message = None
+
 
                 case "response.done":
                     if recovery is not None and await recovery.on_response_done(message):
@@ -1370,7 +1738,42 @@ class RTMiddleTier:
                         return None
                     if tools_pending:
                         tools_pending.clear()
-                        await server_ws.send_str(_RESPONSE_CREATE_MSG)
+                        if tool_failures is not None:
+                            # #36 S1 (PR #58 re-review): tally this round's outcome once,
+                            # here -- not per call -- so several parallel failing tool calls
+                            # in the same response only count as a single failed round.
+                            tool_failures.end_round()
+                        if tool_failures is not None and tool_failures.at_cap():
+                            # #36 S1/S2: two (or more) consecutive *failed rounds* on this
+                            # connection with no guest turn in between. The FIRST
+                            # response.done that reaches the cap gets one server-authored,
+                            # tool-free response.create instead of nothing: the model
+                            # already has the function_call_output(s) in context, so it can
+                            # apologise out loud and ask the guest what to do, but
+                            # tool_choice="none" stops it from calling a tool again on this
+                            # turn. This frame is server-authored (never derived from
+                            # browser input), so the #31 browser->upstream allow-list in
+                            # _filter_client_to_server is unaffected. Every response.done
+                            # AFTER that one, while still at the cap with no guest turn in
+                            # between, goes back to sending nothing at all -- otherwise a
+                            # model (or a deterministic test double) that keeps calling
+                            # tools regardless of tool_choice could ride an unbounded
+                            # ladder of one-more-apology responses with zero guest input.
+                            if tool_failures.consume_cap_notice():
+                                logger.warning(
+                                    "Capping auto response.create with tool_choice=none "
+                                    "after %d consecutive failed tool round(s) (session=%s)",
+                                    tool_failures.count, session_id,
+                                )
+                                await server_ws.send_str(_build_tool_failure_cap_notice_msg(self._prompt_loader))
+                            else:
+                                logger.warning(
+                                    "Suppressing auto response.create -- still at the "
+                                    "%d-round cap with no guest turn since the apology "
+                                    "(session=%s)", tool_failures.count, session_id,
+                                )
+                        else:
+                            await server_ws.send_str(_RESPONSE_CREATE_MSG)
                     is_tool_call_response = False
                     if "response" in message:
                         output = message["response"]["output"]
@@ -1425,7 +1828,7 @@ class RTMiddleTier:
 
         return updated_message
 
-    async def _process_message_to_server(self, msg: str, ws: web.WebSocketResponse, verbose: bool = False, voice_locked: bool = False, guard: "_SessionUpdateGuard | None" = None, voice: str | None = _VOICE_UNSET) -> "tuple[str | None, str | None]":
+    async def _process_message_to_server(self, msg: str, ws: web.WebSocketResponse, verbose: bool = False, voice_locked: bool = False, guard: "_SessionUpdateGuard | None" = None, voice: str | None = _VOICE_UNSET, limiter: "_ClientFrameDropWarningLimiter | None" = None) -> "tuple[str | None, str | None]":
         """Validate and forward one browser→upstream frame, or drop it.
 
         Returns `(forwarded, sent_type)`: `forwarded` is the exact string to
@@ -1440,6 +1843,10 @@ class RTMiddleTier:
         re-`json.loads`-ing `forwarded` themselves (PR #49 review round 5,
         "F4"). Callers must not assume `forwarded` `is` (identical object to)
         `msg.data` -- see "M2" below.
+
+        `limiter`, if given, rate-limits this call's own per-frame drop/strip
+        WARNING logs (PR #58 review round 2, "F2") -- see
+        `_ClientFrameDropWarningLimiter`.
         """
         data = msg.data
 
@@ -1460,28 +1867,28 @@ class RTMiddleTier:
         try:
             message = json.loads(data)
         except (json.JSONDecodeError, ValueError):
-            logger.warning("Dropped unparseable client→server frame (session=%s)", session_id)
+            _warn_dropped_frame(limiter, "Dropped unparseable client→server frame (session=%s)", session_id)
             return None, None
         if not isinstance(message, dict):
-            logger.warning(
-                "Dropped non-object client→server frame of type %s (session=%s)",
+            _warn_dropped_frame(
+                limiter, "Dropped non-object client→server frame of type %s (session=%s)",
                 type(message).__name__, session_id)
             return None, None
         if not isinstance(message.get("type"), str):
             # Also covers `{"type": ["x"]}`: an unhashable `type` would raise
             # TypeError on _filter_client_to_server's frozenset membership
             # test below if it weren't caught here first.
-            logger.warning(
-                "Dropped client→server frame with a non-string/missing type (session=%s)", session_id)
+            _warn_dropped_frame(
+                limiter, "Dropped client→server frame with a non-string/missing type (session=%s)", session_id)
             return None, None
 
-        filtered = _filter_client_to_server(message, session_id=session_id)
+        filtered = _filter_client_to_server(message, session_id=session_id, limiter=limiter)
         if filtered is None:
             return None, None
         msg_type = filtered["type"]
         # M2: always rebuilt from the allow-listed dict -- never the browser's
         # original bytes/object -- so no extra top-level key can survive.
-        updated_message = _dump_client_to_server(filtered, session_id)
+        updated_message = _dump_client_to_server(filtered, session_id, limiter=limiter)
         if updated_message is None:
             return None, None
         _vlog(verbose, "─── [Client → Server] %s ───", msg_type)
@@ -1489,16 +1896,17 @@ class RTMiddleTier:
         if msg_type == "session.update":
             client_session = filtered.get("session")
             if not isinstance(client_session, dict):
-                logger.warning(
-                    "Dropped session.update with a missing/invalid session object (session=%s)", session_id)
+                _warn_dropped_frame(
+                    limiter, "Dropped session.update with a missing/invalid session object (session=%s)", session_id)
                 return None, None
             # M3: keep only the session keys the frontend actually sends;
             # everything server-owned is applied fresh by _build_session below.
             session_in = {k: v for k, v in client_session.items() if k in _CLIENT_SESSION_KEYS}
             if "turn_detection" in client_session:
-                sanitized_td = _sanitize_turn_detection(client_session["turn_detection"], session_id=session_id)
+                sanitized_td = _sanitize_turn_detection(client_session["turn_detection"], session_id=session_id, limiter=limiter)
                 if sanitized_td is None:
-                    logger.warning(
+                    _warn_dropped_frame(
+                        limiter,
                         "Rejected browser turn_detection (missing/invalid type=server_vad) — falling back "
                         "to the server's own default (session=%s)", session_id)
                     sanitized_td = copy.deepcopy(_BOOTSTRAP_CLIENT_SESSION["turn_detection"])
@@ -1534,6 +1942,8 @@ class RTMiddleTier:
     async def _forward_messages(self, ws: web.WebSocketResponse):
         # Per-connection tool tracking — prevents cross-connection interference
         tools_pending: dict[str, RTToolCall] = {}
+        # #36 S2: per-connection consecutive-tool-failure counter.
+        tool_failures = _ToolFailureTracker()
 
         # Per-connection verbose logging toggle (set by frontend extension message)
         verbose = _VERBOSE_GLOBAL
@@ -1571,6 +1981,11 @@ class RTMiddleTier:
                 assistant_audio_seen = False
                 session_configured = asyncio.Event()
                 guard = _SessionUpdateGuard()
+                # F2: one rate-limiter per connection, shared across the
+                # client→server validation path and the extension-message
+                # handlers below (both log per-frame WARNINGs a probing/
+                # misbehaving client could otherwise flood).
+                drop_limiter = _ClientFrameDropWarningLimiter()
                 recovery = RateLimitRecovery(self.rate_limit_settings, target_ws.send_str, ws.send_json,
                                              sleep=self._rate_limit_sleep, session_id=session_id)
 
@@ -1723,11 +2138,21 @@ class RTMiddleTier:
                     # module docstring), so it bootstrapped on the config
                     # default before we knew which session this socket was
                     # continuing. Without this, a Wi-Fi blip would silently
-                    # revert the guest's own voice choice. Safe to send
-                    # unconditionally: `assistant_audio_seen` is still False
-                    # on this fresh upstream, so GA has not voice-locked it.
+                    # revert the guest's own voice choice.
+                    # #57 FU1: `assistant_audio_seen` is always False here in
+                    # practice (handle_resume only ever runs on the first
+                    # frame -- reject_late_resume handles every later one),
+                    # so this guard changes nothing TODAY. It's kept anyway
+                    # as a free, explicit safety net: sending a voice
+                    # session.update after GA has voice-locked the upstream
+                    # (assistant audio already produced) would be rejected
+                    # wholesale (`cannot_update_voice`, see
+                    # SessionUpdateFallbackTests) -- a real risk for a future
+                    # refactor of this seam (e.g. other brand ports, or a C#
+                    # backend) that no longer guarantees "resume is
+                    # first-frame-only".
                     persisted_voice = self._sessions.get_voice(session_id)
-                    if persisted_voice is not None and persisted_voice != voice:
+                    if persisted_voice is not None and persisted_voice != voice and not assistant_audio_seen:
                         voice = persisted_voice
                         await target_ws.send_str(guard.track(self.build_voice_update(persisted_voice)))
                         logger.info("Restored voice %s for resumed session %s", persisted_voice, session_id)
@@ -1757,7 +2182,7 @@ class RTMiddleTier:
                     logger.info("Resumed session %s rehydrated (%d recent turns); greeting suppressed",
                                 session_id, len(self._sessions.recent_turns(session_id)))
                     if self._sessions.nudge_after_seconds > 0:
-                        nudge_task = asyncio.ensure_future(nudge_after_silence())
+                        nudge_task = _spawn(nudge_after_silence())
 
                 async def reject_late_resume(data: str):
                     nonlocal announced
@@ -1800,6 +2225,17 @@ class RTMiddleTier:
                                 try:
                                     ext_msg = json.loads(msg.data)
                                     if ext_msg.get("type") == "extension.set_verbose_logging":
+                                        if not _client_log_control_allowed():
+                                            # #53: process-wide log verbosity is never a
+                                            # single connection's call to make in production
+                                            # -- drop silently (from the guest's perspective)
+                                            # and just log a WARNING server-side.
+                                            _warn_dropped_frame(
+                                                drop_limiter,
+                                                "Dropped extension.set_verbose_logging from session %s "
+                                                "(client log control is disabled in this deployment)",
+                                                session_id)
+                                            continue
                                         if session_id:
                                             self._sessions.touch_activity(session_id)
                                         verbose = bool(ext_msg.get("enabled", False))
@@ -1824,6 +2260,18 @@ class RTMiddleTier:
                                 try:
                                     ext_msg = json.loads(msg.data)
                                     if ext_msg.get("type") == "extension.set_log_to_file":
+                                        if not _client_log_control_allowed():
+                                            # #53: same reasoning as extension.set_verbose_logging
+                                            # above -- additionally, file logging risks filling
+                                            # the disk and writing guest data to disk, so this
+                                            # must never be a single connection's call in
+                                            # production.
+                                            _warn_dropped_frame(
+                                                drop_limiter,
+                                                "Dropped extension.set_log_to_file from session %s "
+                                                "(client log control is disabled in this deployment)",
+                                                session_id)
+                                            continue
                                         if session_id:
                                             self._sessions.touch_activity(session_id)
                                         enabled = bool(ext_msg.get("enabled", False))
@@ -1861,9 +2309,10 @@ class RTMiddleTier:
                                         # upstream and not adopted anywhere.
                                         new_voice = _sanitize_voice(ext_msg.get("voice"), self.allowed_voices)
                                         if new_voice is None:
-                                            logger.warning(
-                                                "Dropped extension.set_voice with an unknown/invalid voice %r (session=%s)",
-                                                ext_msg.get("voice"), session_id)
+                                            _warn_dropped_frame(
+                                                drop_limiter,
+                                                "Dropped extension.set_voice with an unknown/invalid voice %s (session=%s)",
+                                                _truncate_for_log(ext_msg.get("voice")), session_id)
                                         else:
                                             # #43 (PR #49 review round 6, "S1"): persist the
                                             # pick on THIS session (self._sessions), never on
@@ -1895,7 +2344,7 @@ class RTMiddleTier:
                                 if (verbose or _VERBOSE_GLOBAL) and audio_frame_count % 50 == 0:
                                     _vlog(verbose, "─── [Client → Server] Audio frame #%d ───", audio_frame_count)
                             # Forward client message to OpenAI.
-                            new_msg, sent_type = await self._process_message_to_server(msg, ws, verbose, voice_locked=assistant_audio_seen, guard=guard, voice=voice)
+                            new_msg, sent_type = await self._process_message_to_server(msg, ws, verbose, voice_locked=assistant_audio_seen, guard=guard, voice=voice, limiter=drop_limiter)
                             # PR #49 review round 2, "F1": idle reset, nudge
                             # cancel and the greeting trigger used to be keyed
                             # on raw substring checks against msg.data,
@@ -1925,6 +2374,11 @@ class RTMiddleTier:
                                 if nudge_task is not None:
                                     cancel_nudge("guest-initiated response")
                                 recovery.on_external_response_create("browser")
+                                # PR #58 re-review Nit: the browser's own response.create is
+                                # not the rate-limit ladder's retry of a greeting that produced
+                                # no audio (#48 M1) -- cancel any pending re-arm so this new
+                                # response's audio isn't mistaken for the greeting's own.
+                                echo.on_external_response_create()
                             # The browser's session.update marks the start of a conversation.
                             if not greeting_sent and sent_type == "session.update":
                                 logger.info("Client session.update forwarded — sending greeting")
@@ -1962,13 +2416,26 @@ class RTMiddleTier:
                                 assistant_audio_seen = True
                                 echo.on_audio_delta(verbose)
                             elif _MARKER_AUDIO_DONE in data or _MARKER_AUDIO_DONE_LEGACY in data:
-                                echo.on_audio_done(loop, target_ws, verbose)
+                                # swigerb/SonicAIDriveThru#59: route the echo
+                                # flush's fire-and-forget sends through this
+                                # module's own background-task tracking so
+                                # they're held alive until done, same as
+                                # every other spawned task on the connection.
+                                echo.on_audio_done(loop, target_ws, verbose, spawn=_spawn)
                             elif _MARKER_SPEECH_STARTED in data:
                                 echo.on_speech_started(verbose)
                                 if session_id:
                                     self._sessions.touch_activity(session_id)
                                 cancel_nudge("guest speech")
                                 recovery.on_guest_speech()
+                                if tool_failures is not None:
+                                    # #36 S1 (PR #58 re-review): input_audio_buffer.speech_started
+                                    # is in _PASSTHROUGH_SERVER_TYPES (the fast path below returns
+                                    # before _process_message_to_client's switch/case ever runs),
+                                    # so this marker check -- not that switch/case -- is the only
+                                    # reachable place to reset the tool-failure streak on genuine
+                                    # guest speech.
+                                    tool_failures.reset_for_new_turn()
                             elif _MARKER_TRANSCRIPTION_COMPLETED in data and session_id:
                                 self._sessions.touch_activity(session_id)
                                 cancel_nudge("guest transcript")
@@ -1976,6 +2443,19 @@ class RTMiddleTier:
                                     self._sessions.record_turn(session_id, "guest", json.loads(data).get("transcript"))
                                 except (ValueError, AttributeError):
                                     pass
+                                if tool_failures is not None:
+                                    # #36 S1 (PR #58 re-review): a completed input transcription
+                                    # is the other guest-turn signal that breaks the failure streak.
+                                    tool_failures.reset_for_new_turn()
+                            elif _MARKER_RESPONSE_DONE in data:
+                                # swigerb/SonicAIDriveThru#48: a greeting that produced no
+                                # audio (text-only fallback, cancelled/failed before any
+                                # audio, a no-output rate-limited retry) never reaches
+                                # echo.on_audio_done() -- response.done is the guaranteed
+                                # event for every response, so it's the fallback that ends
+                                # greeting suppression instead of leaving the mic muted
+                                # until the guest physically interrupts.
+                                echo.on_response_done(loop, target_ws, verbose)
 
                             # The bootstrap session.updated arrives as soon as the socket
                             # opens, so it must NOT trigger the greeting -- the browser's
@@ -2003,7 +2483,7 @@ class RTMiddleTier:
 
                             new_msg = await self._process_message_to_client(msg, ws, target_ws, tools_pending, verbose, guard=guard,
                                                                             on_session_created=on_session_created,
-                                                                            recovery=recovery, voice=voice)
+                                                                            recovery=recovery, voice=voice, tool_failures=tool_failures)
                             if new_msg is not None:
                                 await ws.send_str(new_msg)
                         elif msg.type == aiohttp.WSMsgType.ERROR:
@@ -2012,7 +2492,7 @@ class RTMiddleTier:
                         elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSING, aiohttp.WSMsgType.CLOSED):
                             break
 
-                deadline_task = asyncio.ensure_future(first_frame_deadline())
+                deadline_task = _spawn(first_frame_deadline())
                 try:
                     await asyncio.gather(from_client_to_server(), from_server_to_client())
                 except ConnectionResetError:
@@ -2023,6 +2503,10 @@ class RTMiddleTier:
                     deadline_task.cancel()
                     cancel_nudge("socket closed")
                     recovery.cancel("socket closed")
+                    # swigerb/SonicAIDriveThru#59: cancel any delayed echo
+                    # flush timer so it can't fire (and attempt a send)
+                    # after this connection has already gone away.
+                    echo.close()
                     _vlog(verbose, "\n═══ [SESSION] Disconnected ═══\n"
                                    "Session ID: %s\n"
                                    "══════════════════════════════", session_id or "?")
@@ -2101,9 +2585,24 @@ def configure_realtime_model(rtmt: RTMiddleTier, model_cfg: dict, environ: Any =
     rtmt.reasoning_model = parse_reasoning_model(switch if switch else model_cfg.get("reasoning_model"))
     configured_voices = model_cfg.get("allowed_voices")
     if configured_voices:
+        # #57 FU2: a bare string (e.g. "marin") is iterable character-by-character
+        # in Python, so `frozenset(str(v) for v in "marin")` would silently become
+        # {"m", "a", "r", "i", "n"} instead of raising -- fail loudly at startup
+        # instead of shipping a config typo that rejects every voice pick.
+        if not isinstance(configured_voices, list):
+            raise ValueError(
+                f"model.allowed_voices must be a list of voice names, got "
+                f"{type(configured_voices).__name__} ({configured_voices!r})")
         rtmt.allowed_voices = frozenset(str(v) for v in configured_voices)
     else:
         rtmt.allowed_voices = _DEFAULT_ALLOWED_VOICES
+    # #57 FU2: the default voice (AZURE_OPENAI_REALTIME_VOICE_CHOICE / model.default_voice,
+    # already applied to rtmt.voice_choice by the caller) must itself be an allowed voice --
+    # otherwise every guest's bootstrap session.update would request a voice GA rejects.
+    if isinstance(rtmt.voice_choice, str) and rtmt.voice_choice not in rtmt.allowed_voices:
+        raise ValueError(
+            f"The default voice {rtmt.voice_choice!r} (AZURE_OPENAI_REALTIME_VOICE_CHOICE / "
+            f"model.default_voice) is not in model.allowed_voices ({sorted(rtmt.allowed_voices)})")
     if rtmt.reasoning_effort is not None and not rtmt._reasoning_model():
         logger.info("Deployment %s is not treated as a reasoning model (reasoning_model=%s); `reasoning` "
                     "(effort=%s) will not be sent", rtmt.deployment,

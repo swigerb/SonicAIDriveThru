@@ -151,6 +151,17 @@ public sealed class RealtimeBrowserClient : IAsyncDisposable
     /// </summary>
     internal static RealtimeBrowserClient CreateForTesting(WebSocket socket) => new(socket);
 
+    /// <summary>
+    /// #28 flake hunt: <see cref="CreateForTesting"/> deliberately never starts the background
+    /// reader loop (see that factory's doc comment), so a test that specifically wants to exercise
+    /// <see cref="AbortAsync"/>'s await of its reader task -- not just its early-return when no
+    /// reader is running at all -- needs a way to start one against the fake socket first. Starts
+    /// the same loop <see cref="ConnectAsync"/> would have, with no real handshake and no real
+    /// timing: whatever the fake socket's <see cref="WebSocket.ReceiveAsync"/> does (including
+    /// throwing synchronously) happens on this loop's very first iteration, deterministically.
+    /// </summary>
+    internal void StartReaderLoopForTesting() => _readerTask = PumpReceivedFramesAsync(_readerCts.Token);
+
     /// <summary>The exact `session.update` useRealtime.tsx's startSession() sends.</summary>
     public Task SendStartSessionAsync(bool enableInputAudioTranscription = true, CancellationToken cancellationToken = default)
     {
@@ -358,6 +369,16 @@ public sealed class RealtimeBrowserClient : IAsyncDisposable
                 // Expected: the reader loop's in-flight ReceiveAsync observes the now-aborted
                 // socket as a fault rather than a cancellation, depending on exactly where it was
                 // in its own receive when Abort() ran.
+            }
+            catch (ObjectDisposedException)
+            {
+                // #28 flake hunt (post-#54-merge, run 16/25 on ResumeRehydrationAndNudgeTests):
+                // belt and braces alongside WebSocketJson.ReceiveJsonOrCloseAsync's own catch for
+                // this same shape -- see that method's doc comment for the full three-shape
+                // explanation. This call is the one place that *knows* it just aborted the socket
+                // on purpose, so it tolerates its own reader task reporting exactly that outcome,
+                // regardless of which layer inside the reader loop the exception happened to
+                // surface at.
             }
         }
     }

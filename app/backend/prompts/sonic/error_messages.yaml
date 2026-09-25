@@ -39,3 +39,34 @@ messages:
 
   # Order reset
   order_cleared: "Order cleared."
+
+  # Tool execution failures (swigerb/SonicAIDriveThru#36): a malformed/incomplete tool
+  # call (missing required arguments) or a genuine unhandled exception inside a tool
+  # handler. Deliberately short and neutral -- no internal detail is ever guest-visible.
+  # Model-facing (PR #58 re-review "S2"): points the model at get_order to confirm the
+  # order's actual state before doing anything else, and at asking the guest rather than
+  # silently retrying -- the exception may have landed after the order was already
+  # partially mutated, so a blind "try again" risks compounding it.
+  tool_execution_failed: >-
+    Something went wrong with that action and it did not complete. Don't retry it yet --
+    call get_order to confirm the order's current state, then ask the guest to repeat
+    what they'd like rather than guessing.
+
+  # Tool-failure cap notice (swigerb/SonicAIDriveThru#36, PR #58 re-review round 3): the
+  # response-level `instructions` sent on the ONE server-authored response.create (also
+  # carrying response.tool_choice="none") when two consecutive tool-call rounds have
+  # failed with no guest turn in between (see _TOOL_FAILURE_CAP in rtmt.py). Response-
+  # level `instructions` REPLACE the session instructions for that single response, so
+  # this must be self-contained -- it can't assume the rest of the system prompt (menu,
+  # persona details, etc.) is still in effect for this one turn.
+  #
+  # Live-probe evidence against Sonic's real gpt-realtime-2.1 deployment (2026-09-25,
+  # session-state/.../probe_tool_choice_none.py): response.tool_choice="none" ALONE still
+  # let the model falsely tell the guest an item was added/changed in 2 of 3 runs, even
+  # though it correctly didn't call a tool. Adding this explicit "nothing was added or
+  # changed" instruction fixed it in 3 of 3 runs.
+  tool_failure_cap_instructions: >-
+    The order system just failed twice in a row and NOTHING was added or changed. Do not
+    say an item was added, removed, or changed. Stay upbeat and in character as a Sonic
+    carhop: briefly apologise, say you couldn't update the order just now, and ask the
+    guest to repeat what they'd like.

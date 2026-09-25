@@ -706,6 +706,64 @@ is confirmed still shows the default). Unit-tested at the Python level in
 `test_a_different_brand_new_session_still_gets_the_default`), and `test_rtmt.py`'s
 `ExtensionSetVoiceTests`/`SanitizeVoiceTests`.
 
+#### Issue #57 follow-ups to the voice contract
+
+- **FU1 (defense in depth, no observable behaviour change today)**: the resume voice-restore guard
+  (`handle_resume`) also checks `not assistant_audio_seen` before sending the restore
+  `session.update`. In practice `handle_resume` only ever runs on a connection's first frame
+  (`reject_late_resume` handles every later one), so `assistant_audio_seen` is always `False` at
+  this point and the guard changes nothing *today*. It is kept as a free, explicit safety net: were
+  a future refactor (a rebrand port, or the C# backend) to relax the "resume is first-frame-only"
+  invariant, sending a voice `session.update` after the upstream has voice-locked (assistant audio
+  already produced) would otherwise be silently rejected (`cannot_update_voice`; see
+  `SessionUpdateFallbackTests`). No new test was written for this guard specifically — it is
+  unreachable via any current code path, so a synthetic test would only assert on dead code. Any
+  future PR that removes the first-frame-only invariant must add one then.
+- **FU2 — allowed-voices config validation**: `configure_realtime_model()` now rejects a
+  non-`list` `model.allowed_voices` (e.g. a bare string, silently iterated character-by-character)
+  at startup with `ValueError`, and separately rejects a configured `default_voice` that is not a
+  member of the resulting allow-list. An omitted/empty `allowed_voices` falls back to the
+  10-voice default set (`app/frontend/src/lib/voices.ts`). Unit-tested in `test_session_bootstrap.py`
+  (`VoiceConfigValidationTests`): bare string rejected, dict rejected, list accepted, falls back to
+  the default set when empty/omitted, default-voice-not-in-list fails startup, default-voice-in-list
+  succeeds, `voice_choice=None` skips the membership check, and the shipped `config.yaml`'s default
+  voice is confirmed present in the default allow-list.
+- **FU3 — CI artifact upload on failure**: already satisfied by the existing
+  `.github/workflows/conformance.yml` (`if: failure()` upload-artifact step uploads
+  `tests/conformance/TestResults` — containing `conformance.trx` — and
+  `tests/conformance/conformance-output.log`). The "backend log" is not a separate file: on any
+  scenario failure `ConformanceFixture.RunAsync` embeds `Backend.DumpDiagnostics()` (the captured
+  backend stdout/stderr ring buffer) directly into the exception message, so it lands in both the
+  `.trx` and the detailed-console output log already uploaded. No workflow change was needed.
+- **Probes D/E/F** (`VoicePickerTests.cs`), extending the round-6 scenarios above:
+  - **D — object voice**: `Object_voice_is_rejected_and_never_reaches_upstream_or_a_new_guests_bootstrap`
+    sends `{"type":"extension.set_voice","voice":{"nested":"value"}}` (a non-string value, distinct
+    from the already-covered unknown-*string* case) and asserts it reaches neither the sender's own
+    upstream frames nor a fresh second guest's bootstrap.
+  - **E — restore ordering + a third guest**:
+    `Resumed_voice_restore_precedes_any_response_create_and_a_third_guest_still_gets_the_default`
+    extends the existing resume-restore scenario: after the resumed connection's restore
+    `session.update` is confirmed, it sends `response.create` and asserts the restore frame's
+    sequence number is strictly earlier than the `response.create` frame's — then connects a
+    **third**, entirely unrelated guest and asserts its bootstrap voice is still the server default.
+    (The restore-precedes-response.create ordering is additionally structurally guaranteed by
+    `_forward_messages`'s single-threaded per-connection message loop — `handle_resume` fully
+    `await`s its restore send before the loop advances to the next inbound frame — so no single-line
+    mutation can reorder it; this is documented rather than mutation-tested for that specific
+    sub-assertion.)
+  - **F — end_session clears the voice**:
+    `Ending_the_session_clears_the_voice_so_the_next_fresh_session_gets_the_default` has a guest pick
+    a non-default voice, end the session via `extension.end_session`, then connects a second guest
+    and asserts the default. **Known black-box limitation**: because every new connection gets a
+    brand-new `session_id`, this scenario cannot actually distinguish whether `end_session` popped
+    the voice or not (a new session was never in the voice map regardless), so it is inert against a
+    regression that removes `SessionManager.end_session`'s `self._voices.pop(session_id, None)`. The
+    real pin for that line is the companion Python white-box test
+    `test_order_resume.py::VoicePersistenceTests::test_end_session_clears_the_persisted_voice`, which
+    asserts `get_voice(session_id) is None` directly after `end_session`. Both are kept: the C#
+    scenario exercises the real `extension.end_session` code path end-to-end (unlike the pre-existing
+    bare-close test), the Python test is what actually catches the regression.
+
 
 Exercised black-box by `Scenarios/Security/ClientToServerAllowListTests.cs`: a malicious
 `response.create` override is stripped down to the bare form before the fake upstream ever sees it
@@ -1077,15 +1135,17 @@ is reached, never whether `CONFORMANCE_BACKEND` still says which language is run
 The consequence: **a new backend under test (`CONFORMANCE_BACKEND=dotnet`) actually runs these
 scenarios instead of silently skipping them.** A conforming C# backend must not reproduce these
 Python bugs, so the scenario is expected to *pass* there — an unconditional `Skip` would have hidden
-that expectation entirely, letting a backend with the exact same bug slip through green. The 8
+that expectation entirely, letting a backend with the exact same bug slip through green. The 7
 scenarios marked this way as of this commit: `SpokenTotalHalfCentTests` (#46),
 `ComboAbsorptionTests.Reset_order_clears_the_previous_orders_absorbed_component_display` (#41),
 `HappyHourBoundaryTests`'s Ched 'R' Peppers case (#39), `UpdateOrderAddRemoveModifyTests`'s two
-Route 44 alias cases (#40), `SearchToolTests`'s two fallback cases (#37), and
-`ToolErrorSessionSurvivesTests.Session_survives_an_unhandled_tool_exception` (#36).
+Route 44 alias cases (#40), and `SearchToolTests`'s two fallback cases (#37).
 (`VoicePickerTests.Two_concurrent_guests_voice_choices_do_not_leak_into_each_other` was un-skipped
-in PR #49 review round 5 once #43 was actually fixed — this paragraph's count/list is corrected
-here to match; it is a plain `[Fact]` now, listed instead in the voice contract section above.)
+in PR #49 review round 5 once #43 was actually fixed, and
+`ToolErrorSessionSurvivesTests.Session_survives_an_unhandled_tool_exception` was un-skipped in the
+A2 stream once #36 was fixed (`433dc03`) — this paragraph's count/list is corrected here to match;
+both are plain `[Fact]`s now, listed instead in the voice contract section and the tool-error
+section respectively.)
 
 This is deliberately **not** applied to the Windows-only Job Object tests elsewhere in the suite
 (`WindowsJobObjectTests.cs`) — those are plain `[Fact]`s that call `Assert.Skip(...)` at runtime
@@ -1103,9 +1163,9 @@ rather than letting propagate — is expected, even in a fully correct implement
 one such ERROR line for that exception. Use the second overload,
 `RunAsync(Func<Task> body, int allowedNewBackendErrors)`, to declare an upper bound on that count
 instead of letting the zero-new-errors invariant block an otherwise-passing scenario
-(`ToolErrorSessionSurvivesTests.cs`'s `Session_survives_an_unhandled_tool_exception` — currently
-`[Fact(Skip = ...)]` pending the Python fix tracked in #36 — is written to pass
-`allowedNewBackendErrors: 1` once that fix lands). The assertion is `actual <= baseline +
+(`ToolErrorSessionSurvivesTests.cs`'s `Session_survives_an_unhandled_tool_exception` passes
+`allowedNewBackendErrors: 1`, now that the #36 fix lands the rtmt.py-level exception handler
+described below). The assertion is `actual <= baseline +
 allowedNewBackendErrors`, never exact equality: per PR #42 review item 1 (see "Backend logging is
 not a wire contract" above), *how many* ERROR-level lines a backend logs for a given recovered
 condition is a logging/observability choice, not a wire contract — a correct backend that logs
@@ -1443,3 +1503,445 @@ only `cooldown_end` to drive suppression by that point — which the mutation's 
 audio-free `ResponseScript` (`[new DoneEvent()]`, no `AudioDeltaEvent`) for the greeting in that test
 before triggering it, restoring genuine isolation; the mutation now fails Phase A as intended. See
 the updated docstring on `EchoSuppressionBargeInTests` for the full account.
+
+### `response.done` is the greeting's own echo-suppression safety net (#48)
+
+`audio_pipeline.EchoSuppressor.start_greeting_suppression()` pre-sets `ai_speaking = True` before
+the greeting's `response.create` is even sent, on the assumption real audio is about to stream. Two
+events normally clear it: `response.output_audio.done` (`on_audio_done()`, a real audio delta/done
+pair actually played) and the browser's own `response.cancel` (`on_barge_in()`, an explicit
+barge-in). A greeting that produces **no audio at all** — a text-only fallback, a response
+cancelled/failed by the model before any audio, a rate-limited retry with empty output — triggers
+neither. Before this fix, `should_suppress_audio()` then dropped every `input_audio_buffer.append`
+**forever**: the guest's mic stayed muted until they physically interrupted, which they have no
+reason to do since the AI never said anything to interrupt.
+
+The fix: `response.done` is the one event GA guarantees for *every* response regardless of status
+(see "`response.cancel` still emits the normal `.done`-shaped events" above), so
+`audio_pipeline.EchoSuppressor.on_response_done()` uses it as the fallback — but **only** for the
+pending greeting, and **only** if nothing else already ended it:
+
+- If `greeting_in_progress` is already `False` (no greeting pending, or `on_audio_done()` already
+  ran normally for it), `on_response_done()` is a pure no-op — it must never touch a genuinely
+  unrelated in-flight response's `ai_speaking` (e.g. a late/duplicate `response.done` racing a
+  different, still-active response).
+- If `ai_speaking` is still `True` (`on_audio_done()` never ran for this response — no completed
+  `audio.done`), `on_response_done()` now splits on whether the guest actually heard anything, via
+  a dedicated `_greeting_audio_seen` flag set by `on_audio_delta()` — **not** on `ai_speaking`
+  itself, which `start_greeting_suppression()`'s own pre-set makes `True` before any audio exists,
+  so it can't tell the two cases apart on its own (PR #58 re-review, "S1"; an earlier version of
+  this fix conflated them: "latched ⇒ nothing rendered" was wrong):
+  - **No audio ever seen** (`_greeting_audio_seen` is `False` — a text-only fallback, or cancelled
+    before the first delta): clear `ai_speaking` **immediately, with no cooldown**. Nothing was
+    ever actually rendered to the guest, so there is no residual/echo risk that would warrant
+    `on_audio_done()`'s extended post-greeting cooldown (`ECHO_COOLDOWN_SEC * 2`). This is
+    deliberately the same "instant, no cooldown" behaviour as `on_barge_in()`, not a delegation to
+    `on_audio_done()` — an earlier draft of this fix *did* delegate to `on_audio_done()`, which
+    reintroduced an artificial multi-second mute after a greeting the guest never actually heard
+    (caught by `GreetingWithoutAudioUnmutesTests`, whose single post-greeting mic append landed
+    inside that unwarranted cooldown window and was dropped forever, since a dropped mic frame is
+    never retried/requeued by the browser at that point in the flow).
+  - **At least one audio delta was seen** (`_greeting_audio_seen` is `True` — the greeting's audio
+    started streaming but was cancelled/errored mid-stream, with no completing `audio.done`):
+    apply the **same doubled post-greeting cooldown** `on_audio_done()` would, not the instant
+    unmute above. Partial audio already reached the guest, carrying the same residual echo risk a
+    normal completion does.
+- If `ai_speaking` is already `False` (a real barge-in, `on_barge_in()`, already cleared it before
+  this `response.done` arrived), only the `greeting_in_progress` bookkeeping flag is cleared — no
+  cooldown is re-armed retroactively.
+
+**A rate-limited greeting may still be retried (#48, PR #58 re-review "M1").** The "no audio at
+all" case above legitimately includes a rate-limited `response.done` with no output — but
+`rate_limit.py`'s `RateLimitRecovery` ladder (see "Rate-limit recovery" below) can then retry that
+same greeting with a bare `response.create`. The greeting isn't actually over in that case, even
+though the mic was correctly (and still is) unmuted in the meantime: `on_response_done()` sets
+`_greeting_awaiting_retry = True` alongside the instant unmute, and `on_audio_delta()` checks it on
+the very next audio delta — if set, it re-enters `greeting_in_progress` instead of treating the
+retry's audio as an ordinary response. This matters because, without it, the retry's own
+`speech_started` would no longer be ignored as greeting echo (a false barge-in — a regression from
+`dev`, where the flag stayed latched for the whole greeting) and its own `on_audio_done()` would
+apply only the normal cooldown instead of the doubled post-greeting one. The pending re-arm is
+itself cancelled — by `on_speech_started()`'s genuine-speech path and by `on_barge_in()` — the
+instant anything other than a retry actually happens next (real guest speech, or an explicit
+browser interrupt), so a guest who starts talking during the unmuted gap before any retry audio
+arrives is never mistaken for the retry. `GreetingRateLimitRetryEchoSuppressionTests` is the
+black-box proof: it scripts the greeting's first attempt as a rate-limited failure, lets the
+ladder's own retry produce real audio, injects a synthetic `speech_started` during that retry's
+audio (bypassing the client→server filter entirely, the same way a real echoed/overlapping guest
+utterance would reach the model), and asserts both that a mic append sent immediately after is
+still suppressed (echo, not barge-in) and that one sent at 1.5× the plain cooldown is *still*
+suppressed (the doubled cooldown, not the normal one) while one sent after the full doubled
+cooldown is finally forwarded.
+
+Wired in `rtmt.py`'s `from_server_to_client` dispatch on a new `MARKER_RESPONSE_DONE` (`'"response.done"'`)
+raw-substring check, alongside the existing audio/speech markers (same substring-based dispatch
+style as the rest of that loop; the fragility of substring dispatch itself was flagged as PR #49
+review round 6's "F2" and left as an explicit follow-up ("Leave F2 (server→client regex) for a
+follow-up issue"). That follow-up has not been filed as its own tracked issue — #53 turned out to
+be a different, unrelated finding (gating `extension.set_log_to_file`/`extension.set_verbose_logging`
+behind server config, now fixed; see "Client-controlled server logging must be gated off in
+production" below) — so the server→client substring-dispatch fragility remains outstanding and
+un-numbered, not addressed here.
+
+`GreetingWithoutAudioUnmutesTests` is the direct, unassisted regression proof: it scripts the
+greeting with a bare `DoneEvent()` (no `AudioDeltaEvent` at all, immediate completion, no `Pace`),
+then sends exactly one guest mic `input_audio_buffer.append` with **no `response.cancel` anywhere in
+the test** — proving `response.done` alone, with no browser interrupt, is what unmutes the mic.
+Contrast with `EchoSuppressionBargeInTests`'s Phase A, which deliberately *delays* the greeting's
+completion (via the harness's `DoneEvent.Pace`, added for this purpose) and relies on an explicit
+browser barge-in to isolate `on_barge_in()` specifically — a different, narrower claim than
+`GreetingWithoutAudioUnmutesTests`'s.
+
+## A tool that raises an unhandled exception must not kill the guest's connection (#36)
+
+`rtmt.py`'s `response.output_item.done` dispatch (`_process_message_to_client`) is the seam between
+the model's function-call request and the actual tool execution (`await tool.target(...)`) plus
+result marshaling (building the `function_call_output` sent upstream, and — for `TO_CLIENT`/`TO_BOTH`
+results — the `extension.middle_tier_tool_response` sent to the browser). Before this fix, none of
+that block was guarded: any exception raised anywhere in it (JSON-decoding the model's own
+`arguments`, the tool handler itself, or the result-marshaling code) propagated straight up through
+`_forward_messages`'s connection-wide `except Exception: logger.exception(...)`, which tears the
+*entire* guest WebSocket down — turning one malformed or buggy tool call into a hard disconnect for
+the whole ordering session.
+
+The fix has two layers, deliberately kept as defense-in-depth rather than either one alone:
+
+1. **Generic seam** — the whole tool-execution + result-marshaling block is wrapped in a single
+   `try/except Exception`. On any exception: log server-side only via `logger.exception(...)` with
+   the **tool name and session id only** (never the raw `args`, which may contain guest-entered
+   text); build a short, neutral apology via `self._prompt_loader.render_error("tool_execution_failed")`
+   (new key in `error_messages.yaml`; a hardcoded fallback string is used if `self._prompt_loader`
+   is `None`); send it as a normal `function_call_output` to the **server only** (`server_ws`) so
+   the model can gracefully recover the conversation — **never** to the client/browser (no stray
+   `extension.middle_tier_tool_response` for a failed call). The guest's session, and the socket,
+   survive; the very next tool call on the same connection works normally.
+2. **`update_order`'s own upfront validation** (`tools.py`) — the literal reproduction cited in #36
+   was a scripted `update_order` call missing `item_name`, which raised a bare `KeyError` at
+   `args["item_name"]`. `update_order` now validates its full required-argument list
+   (`action`, `item_name`, `size`, `quantity`) up front and returns the same kind of graceful,
+   `TO_SERVER`-only `ToolResult` apology used by its other application-level rejections (the
+   zero/negative-price guard, extras rules, per-item/-order limits) — instead of ever reaching a
+   raise in the first place.
+
+These two layers are complementary, not redundant: layer 2 gives `update_order`'s specific known
+failure mode a precise, immediate, well-tested response; layer 1 is the safety net for *any* tool
+(present or future) that raises for a reason nobody anticipated. Mutation-testing this confirmed the
+layering is real, not accidental — removing layer 2 alone (`tools.py`'s validation) is still fully
+caught by layer 1 at the black-box level (`ToolErrorSessionSurvivesTests` stays green, because the
+generic seam in `rtmt.py` catches the resulting `KeyError` just the same as any other tool
+exception); removing layer 1 alone (`rtmt.py`'s `try/except`) is *not* caught by
+`ToolErrorSessionSurvivesTests` at all, because layer 2 already prevents that specific scenario from
+ever raising — only a Python-level unit test that bypasses `tools.py` entirely (a directly-raising
+mock tool target) pins layer 1's own behaviour.
+
+`ToolErrorSessionSurvivesTests.Session_survives_an_unhandled_tool_exception` (previously skipped,
+now unskipped) is the black-box regression proof: it scripts an `update_order` `FunctionCallEvent`
+with no `item_name`, then asserts (a) a `function_call_output` for that `call_id` arrives; (b) the
+connection survives and a subsequent tool call still works; (c) **no** stray
+`extension.middle_tier_tool_response` reaches the browser for the failed call; (d) the output text
+does not look like a coincidentally-successful order-summary JSON object. The test allows exactly
+one new backend error log line (`allowedNewBackendErrors: 1`) — the `logger.exception(...)` call
+itself is expected and desired (per the issue's ask to log the failure server-side); it just must no
+longer propagate and tear the socket down.
+
+### Model-facing failure wording, ticket refresh, and the consecutive-failure cap (PR #58 review round 2, S2)
+
+Layer 1's apology text (`error_messages.yaml`'s `tool_execution_failed`, and its hardcoded fallback
+when `self._prompt_loader` is `None`) was reworded so the model is told to **confirm the order state
+via `get_order` and ask the guest** rather than silently retrying the same mutation — the original
+wording invited a blind "try again," which is unsafe when the exception happened *after* `tools.py`
+had already partially applied the mutation (e.g. an in-place quantity/price update that raised only
+on the follow-up total recalculation). The reworded text is the model-facing contract; the exact
+string is intentionally not pinned character-for-character by conformance (only *that a
+`function_call_output` still arrives and the session survives* is a wire contract) — see also the
+"backend logging is not a wire contract" note above, applied here to model-facing prose instead of
+logs.
+
+Three related behaviours, all keyed off `session_id` (so a session-less/degraded connection still
+survives, just without the extras):
+
+1. **Ticket refresh on failure.** Immediately after the layer-1 apology's `function_call_output` is
+   sent to the server, the backend also pushes a fresh `extension.middle_tier_tool_response` to the
+   **browser** with `tool_name: "get_order"` and the current order summary JSON (same shape
+   `get_order` itself would send), so the guest's on-screen ticket doesn't silently drift out of sync
+   with whatever the model does next. If the order state can't be read (e.g. the session was already
+   torn down between the exception and the refresh attempt), the refresh is skipped — no exception,
+   no client push — never at the cost of the primary apology already having reached the server.
+   `ToolFailureCapAndTicketRefreshTests.A_genuine_tool_exception_refreshes_the_guests_ticket` is the
+   black-box proof: it scripts `update_order` with a non-numeric `price` (`"cheap"`, present but the
+   wrong type — sails past `tools.py`'s layer-2 *presence* validation, then raises a genuine
+   `TypeError` at the `price <= 0.0` comparison, the only vector that reaches layer 1 through
+   `update_order`'s normal front door black-box; a missing-argument script like the original #36 repro
+   never reaches layer 1 at all, because layer 2 already turns it into a graceful non-raising
+   `ToolResult` — see the layering discussion above), then asserts a `get_order`-tagged
+   `extension.middle_tier_tool_response` arrives at the browser, distinct from (and not to be confused
+   with) the missing `update_order`-tagged one.
+2. **Consecutive-failure cap.** A per-connection `_ToolFailureTracker` counts **consecutive failed
+   tool-call rounds since the last guest turn** — not consecutive failed *calls*, and not reset by
+   tool success (see the round-2 update below; text above described an earlier, superseded design).
+   Below `_TOOL_FAILURE_CAP` (2), the existing auto-continue behaviour is unchanged: rtmt sends its
+   own `response.create` right after the failure's `function_call_output`, so the model gets an
+   immediate chance to react. At the cap, the auto-continue is replaced by exactly ONE
+   server-authored `response.create` carrying `response.tool_choice: "none"` (see the round-3 update
+   below for `response.instructions`) instead of a bare one — the model can still apologise out loud
+   and ask the guest, but can't call a tool again with no guest input — and every capped round after
+   that (same streak, still no guest turn) goes back to sending nothing at all, so the apology itself
+   can't restart an unbounded loop.
+   `ToolFailureCapAndTicketRefreshTests.Consecutive_tool_exceptions_suppress_the_auto_continue_at_the_cap`
+   is the black-box proof: two consecutive `price:"cheap"` failures (the first's auto-continue must
+   still fire, driving the second automatically with no browser action; the second is the cap-th and
+   must not auto-continue a third). Because nothing else is queued on the fake, an erroneous third
+   auto-continue would fall through to `ResponseScript.Default` (plain audio, no tool call) — which,
+   unlike either tool-call response, *would* emit an `extension.round_trip_token` automatically. The
+   test proves the cap held by (a) sending a known, always-forwarded, unrelated probe frame
+   (`input_audio_buffer.clear`, same idiom as `ResponseCreateHooksGateTests`) and waiting for *it* to
+   arrive upstream — since the connection is a single ordered socket, anything an errant auto-continue
+   would have sent is *guaranteed* to have already arrived by the time the probe frame is recorded, so
+   the absence check that follows is a hard ordering guarantee rather than a timing-sensitive race —
+   then (b) asserting no premature `extension.round_trip_token` reached the browser and no premature
+   `response.create` reached upstream between the second failure and the probe. It then proves the
+   connection still works via the browser's own action (`OrderScenarioHelpers.RunOrderStepsAsync`).
+   (An earlier draft of this test tried to prove the same thing with a third *queued* scripted
+   response and a raw frame-sequence/watermark comparison; that version was **unsound** — it passed
+   both with and without the cap fix, because the watermark could already include the buggy
+   auto-continue's frames depending on scheduling. The probe-frame idiom above is deterministic and is
+   the one actually committed.)
+3. **INFO log tidy.** The INFO line logged just before the exception handler previously included the
+   raw tool `args` (contradicting a comment nearby claiming "never raw args"); it's been trimmed to
+   omit them, and the stale comment corrected to match reality.
+
+#### Round update: counting rounds, not calls (PR #58 review round 3, S1)
+
+The original cap counter above (round 2) reset to zero on **any** tool success, which meant a model
+that alternates a failing `update_order` with the recovery loop's own prescribed `get_order` call
+(exactly the pattern the reworded apology text asks the model to do) never actually reached the cap —
+`get_order` succeeding reset the streak every time, so the "silent retry loop" guard never engaged for
+the one case its own wording invites.
+`ToolFailureCapAndTicketRefreshTests.Cap_is_not_reset_by_the_prescribed_get_order`
+is the black-box proof (red on the pre-fix code): a failing `update_order` / succeeding `get_order` /
+failing `update_order` sequence, with **no guest input anywhere**, must still hit the cap on the
+second failure. Two related refinements, both keyed off `tool_failures`:
+
+- The counter tallies **rounds**, not calls: several parallel tool calls failing within the *same*
+  `response.done` count as one failed round, tallied once per `response.done` rather than once per
+  call.
+- It resets only on **guest activity** — `speech_started` or a completed input transcription — never
+  on tool success. `ToolFailureCapAndTicketRefreshTests.Guest_speech_resets_the_failure_streak_after_the_cap`
+  proves the complementary case: guest speech *does* reset the streak, so a real conversational turn in
+  between two unrelated tool failures doesn't spuriously trip the cap.
+
+#### Round update: `response.instructions`, not `tool_choice` alone (PR #58 review round 3, S1 cont'd)
+
+A live probe against Sonic's real `gpt-realtime-2.1` deployment (`probe_tool_choice_none.py`), with two
+failed `update_order` rounds' `function_call_output`s already in context, showed that the cap-notice
+`response.create` with `response.tool_choice: "none"` **alone** still let the model falsely tell the
+guest an item was added/changed in **2 of 3** runs, even though it correctly avoided calling a tool.
+Adding an explicit response-level `response.instructions` field stating that nothing was actually
+added or changed, and that the model should apologise and ask the guest to repeat their request, fixed
+the false claim in **3 of 3** runs.
+
+The cap-notice frame is therefore:
+
+```json
+{
+  "type": "response.create",
+  "response": {
+    "tool_choice": "none",
+    "instructions": "<brand-configured or built-in fallback text; see below>"
+  }
+}
+```
+
+- **Response-level `instructions` replace** (not merge with) the session's own `instructions` for that
+  one response only — the text must be self-contained; it cannot assume the rest of the system prompt
+  (menu, persona, etc.) still applies for this turn.
+- The exact wording is a brand-config concern
+  (`prompts/sonic/error_messages.yaml`'s `tool_failure_cap_instructions`, rendered through the prompt
+  loader), so other rebrand ports and the C# backend keep their own carhop-equivalent persona voice; a
+  built-in fallback string is used when no prompt loader is configured, or the brand config doesn't
+  (yet) define the key — deliberately **not** via `PromptLoader.render_error()`'s own generic "Unknown
+  error message key" fallback, since a visibly broken placeholder would be worse than a neutral default
+  as the model's *only* instructions for that response.
+- This frame is still entirely **server-authored**, never derived from browser input, so the #31
+  browser→upstream allow-list in `_filter_client_to_server` is unaffected — `response.tool_choice` and
+  `response.instructions` are stripped from *browser*-originated `response.create`/
+  `conversation.item.create` events by that allow-list (see the #31 backend contract section), but
+  this cap-notice frame is built and sent entirely by the middle tier itself.
+- Neither `response.tool_choice` nor `response.instructions` is field-validated by the fake upstream's
+  `GaSessionValidator` — only the top-level client event `type` is checked for `response.create`
+  (unlike `session.update`, which does have a top-level-key allow-list). Both fields are documented GA
+  fields on `response.create`'s `response` object (OpenAI Realtime API reference, "Client events" →
+  `response.create`), so the fake accepting them unvalidated matches upstream's real behaviour; no fake
+  code change was needed for this fix.
+- `ToolFailureCapAndTicketRefreshTests.Consecutive_tool_exceptions_suppress_the_auto_continue_at_the_cap`
+  asserts the cap-notice frame carries **both** `tool_choice == "none"` and a non-empty
+  `instructions` string (the exact wording is not pinned — only the middle tier's contract that some
+  real text is present).
+
+### Two probes pinning both entry points into layer 1 (PR #58 review round 2, S3)
+
+Rick's S3 asked for two black-box scenarios exercising layer 1's `except Exception` from two
+different directions, each asserting the same three things: a `function_call_output` reaches the
+server, the session survives (a further round trip / tool call still works), and no stray
+`extension.middle_tier_tool_response` for the failed call reaches the browser.
+
+1. **Non-numeric `price`** (`update_order(price:"cheap")`) — a genuine exception *inside* the tool
+   handler, after `tools.py`'s own layer-2 presence validation has already passed. This is
+   `ToolFailureCapAndTicketRefreshTests.A_genuine_tool_exception_refreshes_the_guests_ticket`,
+   already added and mutation-verified as part of S2 above (S2 and S3 share this one scenario —
+   deliberately not duplicated).
+2. **Malformed (non-JSON) `arguments`** (`"{not json"`) — the *other* way into layer 1: rtmt.py's
+   `args = json.loads(item["arguments"])` is itself the first line inside the `try` block, before
+   `tool.target(...)` is ever called, so a malformed argument string raises
+   `json.JSONDecodeError` without the tool handler (or `tools.py`'s layer-2 validation, which never
+   even runs — it only sees a `dict`, never the raw string) getting a chance to run at all. This is
+   `ToolMalformedArgumentsTests.Malformed_tool_arguments_produce_a_graceful_error_and_the_session_survives`.
+   Shown red by temporarily replacing rtmt.py's `except Exception:` with `except
+   ZeroDivisionError:` (bypassing the handler): the `JSONDecodeError` then propagates through
+   `_forward_messages`'s connection-wide catch-all and tears the socket down, so the scenario's
+   first assertion (`function_call_output is not null`) fails — confirming the scenario actually
+   exercises layer 1 and isn't vacuously true.
+
+### Background-task exception retrieval and a terminal `EchoSuppressor.close()` (PR #58 review round 2, F1; #59 completeness)
+
+Two Python-only implementation-detail fixes, neither of which has (or needs) a wire-level
+conformance scenario:
+
+1. **`_spawn`'s done callback now retrieves exceptions, not just discards the task.** #59 fixed
+   `EchoSuppressor`'s two fire-and-forget echo-clear sends specifically (untracked
+   `asyncio.ensure_future(...)` calls whose exceptions were never retrieved, producing noisy
+   `asyncio:Task exception was never retrieved` ERROR logs on ordinary disconnect races). F1 closes
+   the same gap for *every* task spawned via `rtmt.py`'s shared `_spawn()` helper (not just the two
+   #59 covered): the done callback (renamed `_on_background_task_done`, previously a bare
+   `_BACKGROUND_TASKS.discard` bound method) now also calls `task.exception()` — skipping cancelled
+   tasks — and logs any non-cancelled exception at DEBUG (retrieved and dropped, never re-raised).
+   `nudge_task` (the idle-nudge-after-silence timer) and `deadline_task` (the first-frame deadline
+   timer) were previously spawned with a raw `asyncio.ensure_future(...)` that bypassed `_spawn`
+   entirely (and its done-callback); both now go through `_spawn(...)` like every other background
+   task, so a future exception in either no longer surfaces as an unretrieved-exception log line.
+   Pytest: `SpawnTests.test_spawned_task_exception_is_retrieved_not_left_unretrieved` (uses
+   `loop.set_exception_handler` to capture what asyncio would otherwise log, forces `gc.collect()`
+   after `del`-ing the local `task` reference — see the note below on why the `del` is required for
+   soundness — and asserts nothing was captured),
+   `test_spawned_task_is_discarded_from_the_background_set_when_done`, and
+   `test_cancelled_spawned_task_does_not_raise_retrieving_exception`. Mutation: disabling the
+   `task.exception()` call turns the first test red (the mutated build reproduces the exact
+   `asyncio:Task exception was never retrieved` warning the fix is meant to suppress); the other two
+   are unaffected by that specific mutation, as expected.
+
+   **A mutation-check soundness pitfall worth recording:** the first version of
+   `test_spawned_task_exception_is_retrieved_not_left_unretrieved` held a local `task` variable across
+   the `gc.collect()` call (kept for a later assertion). That reference alone keeps the `Task` object
+   reachable, so CPython's GC never actually collects it — and asyncio only emits its
+   "exception was never retrieved" warning from a `Task.__del__` that runs on collection. The test
+   therefore passed identically whether or not the fix was in place: a vacuously true assertion, not a
+   real regression guard. The fix was to `del task` immediately before `gc.collect()`; re-running the
+   mutation afterwards showed the test correctly go red. Any future test in this style (asserting on
+   GC-triggered behaviour) must `del` its last local reference to the object under test before forcing
+   collection, and must be re-verified red-under-mutation after doing so — a passing test alone is not
+   evidence the check is sound.
+
+2. **`EchoSuppressor.close()` is now a one-way terminal transition.** Previously `close()` only
+   cancelled the pending delayed-flush `TimerHandle`; a *later* call to `on_audio_done()` on the same
+   (already-closed) `EchoSuppressor` would still schedule a brand-new flush send and a brand-new
+   `loop.call_later(...)`, undoing the point of closing it during connection teardown. `close()` now
+   also sets a `_closed` flag, and `on_audio_done()` checks it first and no-ops (no spawn, no
+   `call_later`) if set. Pytest:
+   `EchoSuppressorTests.test_close_is_terminal_a_later_on_audio_done_does_not_re_arm_the_flush`.
+   Mutation: bypassing the `_closed` check in `on_audio_done()` turns this test red (a second flush
+   send is spawned after `close()`), confirming the guard is load-bearing.
+
+Neither change has an observable wire-level effect distinguishable from the pre-fix behaviour in the
+happy path (a spawned task that never raises, or a suppressor that's never called again after
+`close()`, behave identically either way) — the whole point is what happens in the *unhappy* path
+(a background task raising, or a stray post-close call), which is exactly the kind of internal
+robustness property the "Backend logging is not a wire contract" reasoning above applies to. Both are
+therefore Python-unit-only contracts; a C# port only needs to reproduce the same *outcome*
+(no unretrieved-exception noise; no post-close resource use), not this specific mechanism.
+
+### Truncating and rate-limiting browser-triggered log volume (PR #58 review round 2, F2)
+
+Every per-frame validation WARNING logged while processing a browser→upstream frame (or an
+`extension.*` message) can, in the worst case, be triggered by every single frame on a connection —
+`input_audio_buffer.append` alone is ~10 frames/sec, so a client that (accidentally, or as an active
+probe) trips a validation failure on every frame can produce the same log volume as a busy connection
+serving normally. Two independent, narrowly-scoped fixes:
+
+1. **Value truncation (`_truncate_for_log`).** Any browser-supplied value quoted into a WARNING line
+   (previously via Python's `%r`) is rendered through `_truncate_for_log(value, max_len=64)` first:
+   `repr()` is computed, then truncated to at most 64 characters with a `"...(truncated, N chars
+   total)"` marker if longer. This closes the two spots Rick called out specifically —
+   `_filter_client_to_server`'s "Dropped disallowed client→server event type" line (the forged `type`
+   value) and the `extension.set_voice` handler's "unknown/invalid voice" line (the forged `voice`
+   value) — plus every other per-frame WARNING that echoes a browser-supplied value verbatim, so a
+   single forged multi-megabyte `type` or `voice` string can't turn one bad frame into a
+   multi-megabyte log line. `repr()` is always computed on the *original* value and only the
+   resulting text is truncated — truncating first and reprint-ing after would let a pathological
+   `__repr__` reintroduce the same unbounded cost.
+2. **Per-connection rate limiting (`_ClientFrameDropWarningLimiter`).** One instance is created per
+   connection (alongside `_SessionUpdateGuard`, same scope, same lifetime) and threaded through
+   `_filter_client_to_server`, `_sanitize_turn_detection`, `_dump_client_to_server`,
+   `_process_message_to_server`'s own drop paths, and the `extension.set_verbose_logging` /
+   `extension.set_log_to_file` / `extension.set_voice` handlers. It logs the first 5 per-frame
+   WARNINGs on a connection verbatim (each still names its own specific reason), then one summary
+   line ("Suppressing further per-frame drop/strip warnings on this connection after the first
+   5..."), then stays silent for the rest of that connection's lifetime — the underlying signal
+   ("this connection is sending something the allow-list rejects") is already established by the
+   first few lines. Passing `limiter=None` (the default everywhere, including every existing unit
+   test that calls `_filter_client_to_server` directly with no per-connection context) disables rate
+   limiting entirely, so those tests keep asserting on every individual warning unaffected.
+
+Both are Python-unit-only contracts (`TruncateForLogTests`, `ClientFrameDropWarningLimiterTests` in
+`test_rtmt.py`) with no wire-level conformance scenario: neither changes what's forwarded to the
+upstream or the browser, only how much (and how large) the backend's own log output is — the same
+"internal robustness, not a wire contract" reasoning as the "Backend logging is not a wire contract"
+note above. A C# port should reproduce the same outcome (bounded per-value log length; bounded
+per-connection per-frame-drop log volume), not this exact mechanism.
+
+## Client-controlled server logging must be gated off in production (#53)
+
+`extension.set_verbose_logging` and `extension.set_log_to_file` are two browser-sent extension
+types `rtmt.py` has always intercepted and consumed (never forwarded upstream). Both toggle
+**process-wide** state on the shared `sonic-verbose` logger (`audio_pipeline.vlogger`) — a
+`logging.Logger` instance, not anything scoped per-connection — so before this fix, *any* connected
+guest could flip verbose logging on for the whole worker process (raising log volume for every other
+connection sharing it) or attach a real `logging.FileHandler` that writes to disk under
+`app/backend/logs/` (a disk-filling and guest-data-in-logs risk with zero relation to *that guest's
+own* session).
+
+**The fix:** both handlers now consult `rtmt._client_log_control_allowed()` before touching any
+shared state. Off (frame dropped, `logger.warning(...)` logged, socket kept open, nothing forwarded)
+unless:
+- `conformance_hooks.hooks_enabled_now()` is true (live-rechecked every call, same reasoning as the
+  `response.create` S1 gate — see the browser→upstream allow-list contract above), **or**
+- an operator has explicitly opted in via `config.yaml`'s `security.allow_client_log_control: true`
+  (env override: `ALLOW_CLIENT_LOG_CONTROL=true|false`, checked live and taking precedence over the
+  config file when set to a non-empty value).
+
+Both are **off by default** in `config.yaml` — a real production deployment ignores both extension
+types entirely, exactly as if the frontend had never sent them, unless an operator has deliberately
+turned on debug-mode log control.
+
+### No conformance (wire-level) scenario for this gate — documented, not filed
+
+Unlike `response.create` (#31/G1), there is no wire-level signal a black-box test could observe here
+either way: these two extension types are **always** consumed and **never** forwarded to the fake
+upstream, whether the gate allows the toggle or drops it — so "did a frame reach the fake upstream"
+can't distinguish the gated case from the ungated one. The only observable effect of either branch is
+the backend's own internal `logging` module state (and, for `set_log_to_file`, a file written to
+disk) — inherently a Python-implementation detail, not a wire contract a future C# backend could be
+held to the same way (see the "Backend logging is not a wire contract" note above, and the
+`IBackendUnderTest.UnhandledErrorCount()` doc comment's identical reasoning for why this suite
+deliberately avoids coupling assertions to captured backend log *text*).
+
+Per this stream's own precedent (G1's "if the harness can't do it economically, document it as
+Python-unit-only, and file nothing"): **this contract is Python-unit-only.** It's pinned by
+`app/backend/tests/test_rtmt.py::ClientLogControlAllowedTests` (the gate function itself, all four
+precedence combinations) and `app/backend/tests/test_session_bootstrap.py::ClientLogControlGateTests`
+(full end-to-end: dropped-with-warning under production defaults, still-works under
+`CONFORMANCE_TEST_HOOKS=1`, still-works via the explicit config-flag opt-in with hooks off) — both
+mutation-checked (removing either handler's gate check independently turns the corresponding
+end-to-end test red; see the mutation table in the #53 commit). **A C# backend must implement the
+same gate itself** (off by default, `CONFORMANCE_TEST_HOOKS`-or-explicit-opt-in to enable) — there is
+no conformance scenario to hold it to, only this documented expectation.
+

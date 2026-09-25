@@ -293,5 +293,22 @@ public sealed record FunctionCallEvent(string Name, string ArgumentsJson, string
 /// asserts on it for a human-readable retry hint. <paramref name="ErrorType"/> is the field GA
 /// actually documents but the fake never sent until now -- see <see cref="ResponseScript"/>'s
 /// factory methods for what's fabricated versus GA-shaped.
+///
+/// <paramref name="Pace"/> (swigerb/SonicAIDriveThru#48 follow-up), like
+/// <see cref="AudioDeltaEvent"/>'s, is awaited (via the connection's <c>TimeProvider</c>)
+/// immediately before this event's `response.done` is sent -- lets a scenario keep a response
+/// "in progress" (no audio, no completion yet) for a bounded window so it can exercise barge-in
+/// against a genuinely still-open response without introducing any audio output. A
+/// `response.cancel` accepted during this wait interrupts it immediately (same
+/// <c>responseCts.Token</c>-linked cancellation <see cref="AudioDeltaEvent"/>'s pacing uses), so
+/// the scripted delay never actually elapses once a test cancels the response itself.
+///
+/// <paramref name="SuppressAudioDone"/> (PR #58 re-review "F1", pinning swigerb/SonicAIDriveThru#48
+/// S1): when true, this event's own automatic close-out of any still-open audio item (normally
+/// unconditional -- see the `CloseOpenAudioItemAsync()` call in the scripted-<see cref="DoneEvent"/>
+/// handler) is skipped, so `response.output_audio.done` is never sent for this response even
+/// though `AudioDeltaEvent`s were streamed first. Models a response that streamed real audio and
+/// then never completed it (cancelled/errored mid-stream) -- the one GA-legal shape
+/// `EchoSuppressor.on_response_done()`'s `_greeting_audio_seen` branch exists for.
 /// </summary>
-public sealed record DoneEvent(string Status = "completed", string? ErrorCode = null, string? ErrorMessage = null, string? ErrorType = null) : ResponseEvent;
+public sealed record DoneEvent(string Status = "completed", string? ErrorCode = null, string? ErrorMessage = null, string? ErrorType = null, TimeSpan? Pace = null, bool SuppressAudioDone = false) : ResponseEvent;

@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
+import aiohttp
 from aiohttp import web
 from azure.core.credentials import AzureKeyCredential
 
@@ -29,20 +30,27 @@ from audio_pipeline import (
     RESPONSE_CREATE_MSG,
     TYPE_RE,
     EchoSuppressor,
+    _best_effort_send,
 )
 from order_state import order_state_singleton
 from rtmt import (
+    _BACKGROUND_TASKS,
     _BOOTSTRAP_CLIENT_SESSION,
     _CLIENT_ALLOWED_TYPES,
     _CLIENT_APPEND_FAST_PATH_RE,
     _CLIENT_SESSION_KEYS,
     _CLIENT_TEST_ONLY_TYPES,
     _CLIENT_TOP_LEVEL_KEYS,
+    _TOOL_FAILURE_CAP,
+    _TOOL_FAILURE_CAP_INSTRUCTIONS_FALLBACK,
     RTMiddleTier,
     RTToolCall,
     Tool,
     ToolResult,
     ToolResultDirection,
+    _build_tool_failure_cap_notice_msg,
+    _client_log_control_allowed,
+    _ClientFrameDropWarningLimiter,
     _drop_from_client,
     _dump_client_to_server,
     _filter_client_to_server,
@@ -50,7 +58,12 @@ from rtmt import (
     _sanitize_turn_detection,
     _sanitize_voice,
     _SessionUpdateGuard,
+    _spawn,
     _to_ga_session,
+    _tool_failure_cap_instructions,
+    _ToolFailureTracker,
+    _truncate_for_log,
+    _truncate_key_list_for_log,
     create_hmac_token,
     validate_hmac_token,
 )
@@ -469,6 +482,511 @@ class EchoSuppressorTests(unittest.TestCase):
             target_ws.send_str.assert_called()
         asyncio.run(_run())
 
+    # ─── swigerb/SonicAIDriveThru#48: response.done is the fallback for a greeting that
+    # produced no audio at all (text-only fallback, cancelled/failed before any audio, a
+    # no-output rate-limited retry) — on_audio_done() is never reached for it otherwise, so
+    # the mic would stay muted until the guest physically interrupts. ───
+
+    def test_response_done_ends_pending_greeting_with_no_audio(self):
+        """A greeting's response.done with zero audio must clear ai_speaking (#48).
+
+        Nothing was ever rendered to the guest (no audio.done completed), so there is no
+        residual/echo risk — the mic must be released immediately, with no extra cooldown
+        and no flush sent to the upstream (nothing to flush): a bare, silent unmute, same
+        as an explicit browser barge-in.
+        """
+        async def _run():
+            echo = EchoSuppressor()
+            echo.start_greeting_suppression()
+            loop = asyncio.get_running_loop()
+            target_ws = MagicMock()
+            target_ws.closed = False
+            target_ws.send_str = AsyncMock()
+            echo.on_response_done(loop, target_ws)
+            self.assertFalse(echo.ai_speaking)
+            self.assertFalse(echo.greeting_in_progress)
+            self.assertEqual(echo.cooldown_end, 0.0)
+            target_ws.send_str.assert_not_called()
+        asyncio.run(_run())
+
+    def test_response_done_is_noop_without_a_pending_greeting(self):
+        """A non-greeting response.done must not touch suppression state at all.
+
+        `ai_speaking=True` here models a real, currently-speaking response completely
+        unrelated to any greeting (e.g. a late/duplicate response.done racing a genuinely
+        active later response) -- `on_response_done()` is scoped to the greeting fallback
+        only, so it must leave `ai_speaking` alone when `greeting_in_progress` is False,
+        never treating an unrelated in-flight response as its own to unmute.
+        """
+        echo = EchoSuppressor()
+        echo.on_audio_delta()  # ai_speaking=True, unrelated to any greeting
+        loop = MagicMock()
+        loop.time.return_value = 123.0
+        target_ws = MagicMock()
+        echo.on_response_done(loop, target_ws)
+        self.assertTrue(echo.ai_speaking)
+        self.assertFalse(echo.greeting_in_progress)
+        self.assertEqual(echo.cooldown_end, 0.0)
+        target_ws.send_str.assert_not_called()
+
+    def test_response_done_after_barge_in_only_clears_bookkeeping(self):
+        """If on_barge_in() already cleared ai_speaking, response.done must not re-arm cooldown."""
+        echo = EchoSuppressor()
+        echo.start_greeting_suppression()
+        echo.on_barge_in()
+        self.assertFalse(echo.ai_speaking)
+        self.assertTrue(echo.greeting_in_progress)  # on_barge_in() doesn't touch this flag
+        loop = MagicMock()
+        loop.time.return_value = 555.0
+        target_ws = MagicMock()
+        echo.on_response_done(loop, target_ws)
+        self.assertFalse(echo.ai_speaking)
+        self.assertFalse(echo.greeting_in_progress)
+        # No cooldown re-armed retroactively — on_barge_in() already reset it to 0.0.
+        self.assertEqual(echo.cooldown_end, 0.0)
+        target_ws.send_str.assert_not_called()
+
+    def test_response_done_is_noop_after_audio_done_already_ended_greeting(self):
+        """If a normal audio response already ended greeting suppression, response.done is inert."""
+        async def _run():
+            echo = EchoSuppressor()
+            echo.start_greeting_suppression()
+            loop = asyncio.get_running_loop()
+            target_ws = MagicMock()
+            target_ws.closed = False
+            target_ws.send_str = AsyncMock()
+            echo.on_audio_delta()
+            echo.on_audio_done(loop, target_ws)
+            cooldown_after_audio_done = echo.cooldown_end
+            echo.on_response_done(loop, target_ws)
+            self.assertEqual(echo.cooldown_end, cooldown_after_audio_done)
+            self.assertFalse(echo.greeting_in_progress)
+        asyncio.run(_run())
+
+    # ─── swigerb/SonicAIDriveThru#48 (PR #58 re-review, "S1"): greeting audio
+    # already streamed (at least one delta seen) but no audio.done ever
+    # arrived to complete it (e.g. cancelled/errored mid-stream) used to give
+    # an instant unmute -- "latched ⇒ nothing rendered" was wrong, since
+    # on_audio_delta() also latches ai_speaking. Some of that audio may
+    # already have reached the guest, so there IS residual echo risk, same as
+    # a normal on_audio_done() greeting completion. ───
+
+    def test_response_done_after_partial_audio_applies_doubled_cooldown_not_instant_unmute(self):
+        """Rick's repro: response.done after at least one greeting audio delta (but no
+        audio.done) must apply the same doubled post-greeting cooldown a normal completion
+        would, not the no-audio case's instant unmute.
+        """
+        echo = EchoSuppressor()
+        echo.start_greeting_suppression()
+        echo.on_audio_delta()
+        loop = MagicMock()
+        loop.time.return_value = 42.0
+        target_ws = MagicMock()
+        echo.on_response_done(loop, target_ws)
+        self.assertTrue(echo.should_suppress_audio(42.0))
+
+    def test_response_done_after_partial_audio_cooldown_is_the_doubled_amount(self):
+        """The extended cooldown must be exactly ECHO_COOLDOWN_SEC * 2, the same as a real
+        audio_done-completed greeting, not some other arbitrary extension.
+        """
+        echo = EchoSuppressor()
+        echo.start_greeting_suppression()
+        echo.on_audio_delta()
+        loop = MagicMock()
+        loop.time.return_value = 100.0
+        target_ws = MagicMock()
+        echo.on_response_done(loop, target_ws)
+        self.assertAlmostEqual(echo.cooldown_end, 100.0 + ECHO_COOLDOWN_SEC * 2, delta=0.01)
+        self.assertFalse(echo.greeting_in_progress)
+
+    # ─── swigerb/SonicAIDriveThru#48 (PR #58 re-review, "M1"): a rate-limited
+    # greeting's response.done correctly unmutes instantly (no audio was ever
+    # rendered), but RateLimitRecovery may then retry that same greeting with a
+    # bare response.create. Before this fix, nothing re-armed greeting
+    # suppression for the retry: its speech_started was no longer ignored (a
+    # false barge-in / regression from dev, where the flag stayed latched) and
+    # its own on_audio_done() applied only the normal, not doubled, cooldown. ───
+
+    def test_response_done_with_no_audio_then_retry_audio_reenters_greeting_suppression(self):
+        """Rick's repro: a rate-limited greeting's ladder retry must still be treated as the
+        greeting's own audio -- speech_started during the retry is ignored, and the retry's
+        own audio_done applies the doubled post-greeting cooldown, not the normal one.
+        """
+        async def _run():
+            echo = EchoSuppressor()
+            loop = asyncio.get_running_loop()
+            target_ws = MagicMock()
+            target_ws.closed = False
+            target_ws.send_str = AsyncMock()
+            t = loop.time()
+            echo.start_greeting_suppression()
+            echo.on_response_done(loop, target_ws)
+            echo.on_audio_delta()
+            self.assertTrue(echo.on_speech_started())  # should be ignored (greeting echo)
+            echo.on_audio_done(loop, target_ws)
+            self.assertGreaterEqual(echo.cooldown_end - t, ECHO_COOLDOWN_SEC * 2 - 0.05)
+        asyncio.run(_run())
+
+    def test_response_done_awaiting_retry_is_cancelled_by_genuine_guest_speech(self):
+        """If the guest speaks for real before any retry audio arrives, a later, unrelated
+        audio delta (e.g. the AI's actual reply to the guest) must not be mistaken for the
+        greeting's retry -- greeting_in_progress must stay False.
+        """
+        echo = EchoSuppressor()
+        echo.start_greeting_suppression()
+        loop = MagicMock()
+        loop.time.return_value = 10.0
+        target_ws = MagicMock()
+        echo.on_response_done(loop, target_ws)
+        self.assertFalse(echo.on_speech_started())  # genuine guest speech, not greeting echo
+        echo.on_audio_delta()  # the AI's real reply to the guest, unrelated to any greeting
+        self.assertFalse(echo.greeting_in_progress)
+
+    def test_response_done_awaiting_retry_is_cancelled_by_barge_in(self):
+        """An explicit browser response.cancel between the failed attempt and any retry audio
+        must also cancel the pending re-arm, same as genuine guest speech.
+        """
+        echo = EchoSuppressor()
+        echo.start_greeting_suppression()
+        loop = MagicMock()
+        loop.time.return_value = 10.0
+        target_ws = MagicMock()
+        echo.on_response_done(loop, target_ws)
+        echo.on_barge_in()
+        echo.on_audio_delta()
+        self.assertFalse(echo.greeting_in_progress)
+
+    def test_response_done_awaiting_retry_is_cancelled_by_an_external_response_create(self):
+        """PR #58 re-review Nit: rtmt.py calls RateLimitRecovery.on_external_response_create()
+        whenever someone other than the ladder itself (today: the browser's own
+        response.create) asks for a fresh response. That new response is not the ladder's
+        retry of the greeting -- its own first audio delta must not be mistaken for the
+        greeting's continuation, same as genuine guest speech or an explicit barge-in already
+        cancel the pending re-arm.
+        """
+        echo = EchoSuppressor()
+        echo.start_greeting_suppression()
+        loop = MagicMock()
+        loop.time.return_value = 10.0
+        target_ws = MagicMock()
+        echo.on_response_done(loop, target_ws)
+        echo.on_external_response_create()
+        echo.on_audio_delta()
+        self.assertFalse(echo.greeting_in_progress)
+
+    # ─── swigerb/SonicAIDriveThru#59: on_audio_done()'s two flush sends were a
+    # bare, unguarded `asyncio.ensure_future(target_ws.send_str(...))` — when the
+    # upstream closes right after response.output_audio.done (a routine race, not
+    # an edge case), the resulting ClientConnectionResetError was never retrieved
+    # by anything, producing an `ERROR:asyncio:Task exception was never
+    # retrieved` log on every such disconnect, in production too (reproducible on
+    # dev, not caused by A2). ───
+
+    def test_audio_done_flush_failure_is_not_an_unretrieved_exception(self):
+        """A send failing with ConnectionResetError because the upstream is
+        already closing must be swallowed, not merely delayed until asyncio's
+        default exception handler discovers it via garbage collection (#59).
+        """
+        async def _run():
+            echo = EchoSuppressor()
+            loop = asyncio.get_running_loop()
+            target_ws = MagicMock()
+            target_ws.closed = False
+            target_ws.send_str = AsyncMock(
+                side_effect=aiohttp.ClientConnectionResetError("Cannot write to closing transport")
+            )
+            captured_contexts = []
+            loop.set_exception_handler(lambda loop, context: captured_contexts.append(context))
+            try:
+                echo.on_audio_done(loop, target_ws)
+                # Let the fire-and-forget flush task run to completion.
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+                # A task's "exception was never retrieved" warning fires when
+                # the task is garbage-collected with an unretrieved exception
+                # still attached -- force that GC deterministically rather
+                # than relying on timing.
+                import gc
+                gc.collect()
+            finally:
+                loop.set_exception_handler(None)
+            self.assertEqual(captured_contexts, [])
+        asyncio.run(_run())
+
+    def test_audio_done_uses_provided_spawn(self):
+        """on_audio_done() must route the immediate flush through the caller's
+        own spawn/tracking (e.g. rtmt.py's `_spawn`) when one is supplied,
+        instead of always using a bare asyncio.ensure_future (#59).
+        """
+        echo = EchoSuppressor()
+        loop = MagicMock()
+        loop.time.return_value = 100.0
+        target_ws = MagicMock()
+        spawned = []
+
+        def fake_spawn(coro):
+            spawned.append(coro)
+            coro.close()  # avoid "coroutine was never awaited"
+            return MagicMock()
+
+        echo.on_audio_done(loop, target_ws, spawn=fake_spawn)
+        self.assertEqual(len(spawned), 1)  # the immediate flush, spawned synchronously
+
+    def test_close_cancels_pending_delayed_flush_timer(self):
+        """close() must cancel a still-pending delayed flush timer so it can
+        never fire (and attempt a send) after the connection has already torn
+        down (#59).
+        """
+        echo = EchoSuppressor()
+        loop = MagicMock()
+        loop.time.return_value = 100.0
+        fake_handle = MagicMock()
+        loop.call_later.return_value = fake_handle
+        target_ws = MagicMock()
+
+        def closing_spawn(coro):
+            coro.close()
+            return MagicMock()
+
+        echo.on_audio_done(loop, target_ws, spawn=closing_spawn)
+        fake_handle.cancel.assert_not_called()
+        echo.close()
+        fake_handle.cancel.assert_called_once()
+        self.assertIsNone(echo._flush_handle)
+
+    def test_close_is_terminal_a_later_on_audio_done_does_not_re_arm_the_flush(self):
+        """PR #58 re-review "F1": close() must be a one-way transition -- a
+        call to on_audio_done() arriving AFTER close() (e.g. a leftover
+        response.done racing the connection's own teardown) must not spawn a
+        new flush send or schedule a new delayed-flush timer.
+        """
+        echo = EchoSuppressor()
+        loop = MagicMock()
+        loop.time.return_value = 100.0
+        fake_handle = MagicMock()
+        loop.call_later.return_value = fake_handle
+        target_ws = MagicMock()
+        spawned = []
+
+        def spy_spawn(coro):
+            spawned.append(coro)
+            coro.close()  # avoid "coroutine was never awaited"
+            return MagicMock()
+
+        echo.on_audio_done(loop, target_ws, spawn=spy_spawn)
+        self.assertEqual(len(spawned), 1)  # the pre-close call still flushes normally
+        echo.close()
+
+        echo.on_audio_done(loop, target_ws, spawn=spy_spawn)
+        self.assertEqual(len(spawned), 1, "on_audio_done() after close() must not spawn a flush send.")
+        # call_later was used once (for the pre-close call); a second,
+        # post-close call must not schedule another delayed-flush timer.
+        self.assertEqual(loop.call_later.call_count, 1)
+
+
+class BestEffortSendTests(unittest.TestCase):
+    """swigerb/SonicAIDriveThru#59: `_best_effort_send()` is the shared helper
+    behind every advisory, fire-and-forget send to a possibly-closing socket.
+    It must never raise and never leave a task with an unretrieved exception.
+    """
+
+    def test_noop_when_already_closed(self):
+        async def _run():
+            ws = MagicMock()
+            ws.closed = True
+            ws.send_str = AsyncMock()
+            await _best_effort_send(ws, "msg")
+            ws.send_str.assert_not_called()
+        asyncio.run(_run())
+
+    def test_swallows_connection_reset_error(self):
+        async def _run():
+            ws = MagicMock()
+            ws.closed = False
+            ws.send_str = AsyncMock(
+                side_effect=aiohttp.ClientConnectionResetError("Cannot write to closing transport")
+            )
+            await _best_effort_send(ws, "msg")  # must not raise
+        asyncio.run(_run())
+
+    def test_swallows_plain_connection_reset_error(self):
+        async def _run():
+            ws = MagicMock()
+            ws.closed = False
+            ws.send_str = AsyncMock(side_effect=ConnectionResetError("reset"))
+            await _best_effort_send(ws, "msg")  # must not raise
+        asyncio.run(_run())
+
+    def test_sends_when_open(self):
+        async def _run():
+            ws = MagicMock()
+            ws.closed = False
+            ws.send_str = AsyncMock()
+            await _best_effort_send(ws, "msg")
+            ws.send_str.assert_called_once_with("msg")
+        asyncio.run(_run())
+
+
+class SpawnTests(unittest.TestCase):
+    """PR #58 re-review "F1" (#59 completeness): `_spawn`'s own done-callback
+    must retrieve (not just discard-from-the-tracking-set) any exception a
+    background task raises, or asyncio logs it as an unretrieved "Task
+    exception was never retrieved" ERROR -- the exact noisy-log shape #59
+    fixed for the echo flush specifically, generalised here to every task
+    `_spawn` is used for (nudge_task, deadline_task, and any future caller).
+    """
+
+    def test_spawned_task_exception_is_retrieved_not_left_unretrieved(self):
+        async def _run():
+            loop = asyncio.get_running_loop()
+            captured_contexts = []
+            loop.set_exception_handler(lambda loop, context: captured_contexts.append(context))
+
+            async def _boom():
+                raise RuntimeError("background task failure")
+
+            try:
+                task = _spawn(_boom())
+                # Let the task run to completion and its done callback fire.
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+                self.assertTrue(task.done())
+                # Drop the last strong reference to the task before forcing
+                # GC -- asyncio's "exception was never retrieved" detection
+                # only fires when the Task object itself is actually
+                # collected, so holding `task` alive here would make this
+                # assertion vacuously true regardless of whether the
+                # exception was ever retrieved.
+                del task
+                import gc
+                gc.collect()
+            finally:
+                loop.set_exception_handler(None)
+            self.assertEqual(captured_contexts, [])
+        asyncio.run(_run())
+
+    def test_spawned_task_is_discarded_from_the_background_set_when_done(self):
+        async def _run():
+            async def _noop():
+                return None
+
+            task = _spawn(_noop())
+            self.assertIn(task, _BACKGROUND_TASKS)
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            self.assertNotIn(task, _BACKGROUND_TASKS)
+        asyncio.run(_run())
+
+    def test_cancelled_spawned_task_does_not_raise_retrieving_exception(self):
+        async def _run():
+            async def _sleep_forever():
+                await asyncio.sleep(100)
+
+            task = _spawn(_sleep_forever())
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            self.assertNotIn(task, _BACKGROUND_TASKS)
+        asyncio.run(_run())
+
+
+class TruncateForLogTests(unittest.TestCase):
+    """PR #58 review round 2 ("F2"): browser-supplied values logged at
+    WARNING must be truncated so a forged, arbitrarily large value can't
+    turn one bad frame into a multi-megabyte log line.
+    """
+
+    def test_short_string_is_reprd_unchanged(self):
+        self.assertEqual(_truncate_for_log("hello"), "'hello'")
+
+    def test_long_string_is_truncated_with_marker(self):
+        long_value = "x" * 1000
+        rendered = _truncate_for_log(long_value, max_len=64)
+        self.assertLessEqual(len(rendered), 64 + len("...(truncated, 1000 chars total)"))
+        self.assertTrue(rendered.startswith("'xxxx"))
+        self.assertIn("truncated, 1002 chars total", rendered)  # 1000 chars + 2 quote chars from repr()
+
+    def test_non_string_value_is_reprd_then_truncated(self):
+        rendered = _truncate_for_log({"a": "b" * 1000})
+        self.assertIn("truncated", rendered)
+
+    def test_exactly_at_the_limit_is_not_marked_truncated(self):
+        # repr() of a 62-char string is 64 chars (two quote chars) -- exactly at max_len.
+        value = "y" * 62
+        rendered = _truncate_for_log(value, max_len=64)
+        self.assertNotIn("truncated", rendered)
+        self.assertEqual(rendered, repr(value))
+
+
+class TruncateKeyListForLogTests(unittest.TestCase):
+    """PR #58 re-review ("F2"): the browser-supplied key-NAME lists logged at
+    WARNING by `_filter_client_to_server` (stripped top-level keys) and
+    `_sanitize_turn_detection` (disallowed sub-keys) went through `%s`
+    unbounded -- a forged frame with a single multi-megabyte key name, or a
+    huge number of bogus keys, could still produce a multi-megabyte log line
+    even after `_truncate_for_log` capped every other browser-supplied value.
+    `_truncate_key_list_for_log` must bound both dimensions: any individual
+    key name's length, and how many key names are rendered at all.
+    """
+
+    def test_short_key_list_is_rendered_unchanged(self):
+        rendered = _truncate_key_list_for_log(["foo", "bar"])
+        self.assertEqual(rendered, "['foo', 'bar']")
+
+    def test_one_megabyte_key_name_gives_a_bounded_log_line(self):
+        huge_key = "k" * (1024 * 1024)
+        rendered = _truncate_key_list_for_log([huge_key])
+        # Comfortably less than the 1 MB input -- the per-key truncation applies even
+        # when there's only a single key, well under the max_items cap.
+        self.assertLess(len(rendered), 200)
+        self.assertIn("truncated", rendered)
+
+    def test_more_than_max_items_keys_are_capped_with_a_count(self):
+        keys = [f"key{i}" for i in range(25)]
+        rendered = _truncate_key_list_for_log(keys, max_items=10)
+        for i in range(10):
+            self.assertIn(f"'key{i}'", rendered)
+        for i in range(10, 25):
+            self.assertNotIn(f"'key{i}'", rendered)
+        self.assertIn("(+15 more)", rendered)
+
+    def test_many_huge_key_names_still_give_a_bounded_log_line(self):
+        keys = ["k" * (1024 * 1024) for _ in range(100)]
+        rendered = _truncate_key_list_for_log(keys, max_items=10)
+        self.assertLess(len(rendered), 2000)
+        self.assertIn("(+90 more)", rendered)
+
+
+class ClientFrameDropWarningLimiterTests(unittest.TestCase):
+    """PR #58 review round 2 ("F2"): a per-connection rate limiter for the
+    per-frame drop/strip WARNING logs, so a probing/misbehaving client can't
+    flood the backend's logs with one line per bad frame.
+    """
+
+    def test_logs_the_first_five_individually_then_one_summary_then_silence(self):
+        limiter = _ClientFrameDropWarningLimiter()
+        with self.assertLogs("sonic-drive-in", level="WARNING") as log:
+            for i in range(10):
+                limiter.warning("drop #%d", i)
+        # 5 individual + 1 summary = 6 WARNING lines, not 10.
+        self.assertEqual(len(log.output), 6)
+        for i in range(5):
+            self.assertIn(f"drop #{i}", log.output[i])
+        self.assertIn("Suppressing further", log.output[5])
+        # An 11th call must not log anything further.
+        with self.assertRaises(AssertionError):
+            with self.assertLogs("sonic-drive-in", level="WARNING"):
+                limiter.warning("drop #10")
+
+    def test_none_limiter_disables_rate_limiting_entirely(self):
+        # _warn_dropped_frame(None, ...) must log every single call -- this
+        # is what every existing unit test calling _filter_client_to_server
+        # directly (with no per-connection context) relies on.
+        with self.assertLogs("sonic-drive-in", level="WARNING") as log:
+            for i in range(10):
+                _filter_client_to_server({"type": f"bogus.type.{i}"})
+        self.assertEqual(len(log.output), 10)
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # AUDIO PIPELINE UTILITY TESTS
@@ -625,6 +1143,40 @@ class HMACTokenTests(unittest.TestCase):
         parts[0] = parts[0][:-1] + "X"
         tampered = ".".join(parts)
         self.assertFalse(validate_hmac_token(tampered, self.secret))
+
+
+class ClientLogControlAllowedTests(unittest.TestCase):
+    """swigerb/SonicAIDriveThru#53: `_client_log_control_allowed()` is the
+    single gate `extension.set_verbose_logging`/`extension.set_log_to_file`
+    must consult before touching the shared `vlogger`. Precedence, highest
+    first: live `CONFORMANCE_TEST_HOOKS` > live `ALLOW_CLIENT_LOG_CONTROL`
+    env override > `config.yaml`'s `security.allow_client_log_control`
+    (defaults to False, i.e. off in production)."""
+
+    def test_off_by_default(self):
+        with patch.dict(os.environ, {"CONFORMANCE_TEST_HOOKS": "", "ALLOW_CLIENT_LOG_CONTROL": ""}), \
+                patch("rtmt._security_cfg", {}):
+            self.assertFalse(_client_log_control_allowed())
+
+    def test_allowed_when_conformance_hooks_are_enabled(self):
+        with patch.dict(os.environ, {"CONFORMANCE_TEST_HOOKS": "1", "ALLOW_CLIENT_LOG_CONTROL": ""}), \
+                patch("rtmt._security_cfg", {}):
+            self.assertTrue(_client_log_control_allowed())
+
+    def test_allowed_via_env_override_with_hooks_off(self):
+        with patch.dict(os.environ, {"CONFORMANCE_TEST_HOOKS": "", "ALLOW_CLIENT_LOG_CONTROL": "true"}), \
+                patch("rtmt._security_cfg", {}):
+            self.assertTrue(_client_log_control_allowed())
+
+    def test_env_override_false_wins_over_config_flag_true(self):
+        with patch.dict(os.environ, {"CONFORMANCE_TEST_HOOKS": "", "ALLOW_CLIENT_LOG_CONTROL": "false"}), \
+                patch("rtmt._security_cfg", {"allow_client_log_control": True}):
+            self.assertFalse(_client_log_control_allowed())
+
+    def test_allowed_via_config_flag_with_hooks_and_env_off(self):
+        with patch.dict(os.environ, {"CONFORMANCE_TEST_HOOKS": "", "ALLOW_CLIENT_LOG_CONTROL": ""}), \
+                patch("rtmt._security_cfg", {"allow_client_log_control": True}):
+            self.assertTrue(_client_log_control_allowed())
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1921,6 +2473,234 @@ class ProcessMessageToClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client_payload["type"], "extension.middle_tier_tool_response")
         self.assertEqual(client_payload["tool_result"], '{"items":[]}')
 
+    async def test_tool_exception_returns_graceful_output_and_survives(self):
+        """swigerb/SonicAIDriveThru#36: an unhandled exception raised inside a tool's
+        target must not propagate out of _process_message_to_client (which would tear
+        down the whole guest WebSocket via _forward_messages's connection-wide
+        catch-all). Instead the model must get a neutral function_call_output.
+
+        PR #58 re-review "S2": the browser now *does* get a message for a failed call
+        -- not the tool's own (failed) result, but a fresh order-ticket refresh read
+        from order_state_singleton directly, in case the exception landed after the
+        order was already partially mutated and the guest's on-screen ticket would
+        otherwise go stale."""
+        rtmt = self._make_rtmt()
+        client_ws = _make_mock_ws()
+        server_ws = _make_mock_ws()
+        order_state_singleton.sessions = {}
+        rtmt._sessions.create_session(client_ws)
+
+        mock_tool_target = AsyncMock(side_effect=KeyError("item_name"))
+        rtmt.tools["exploding_tool"] = Tool(target=mock_tool_target, schema={"name": "exploding_tool"})
+
+        tools_pending = {"call-3": RTToolCall("call-3", "prev-3")}
+        msg = MagicMock()
+        msg.data = json.dumps({
+            "type": "response.output_item.done",
+            "item": {
+                "type": "function_call",
+                "name": "exploding_tool",
+                "call_id": "call-3",
+                "arguments": '{}'
+            }
+        })
+        with self.assertLogs("sonic-drive-in", level="ERROR"):
+            result = await rtmt._process_message_to_client(msg, client_ws, server_ws, tools_pending)
+        self.assertIsNone(result)
+        mock_tool_target.assert_called_once()
+        server_ws.send_json.assert_called_once()
+        server_payload = server_ws.send_json.call_args[0][0]
+        self.assertEqual(server_payload["type"], "conversation.item.create")
+        self.assertEqual(server_payload["item"]["type"], "function_call_output")
+        self.assertEqual(server_payload["item"]["call_id"], "call-3")
+        self.assertTrue(len(server_payload["item"]["output"]) > 0)
+        client_ws.send_json.assert_called_once()
+        client_payload = client_ws.send_json.call_args[0][0]
+        self.assertEqual(client_payload["type"], "extension.middle_tier_tool_response")
+        self.assertEqual(client_payload["tool_name"], "get_order")
+        self.assertEqual(client_payload["previous_item_id"], "prev-3")
+        # It's a real order summary, not the failed tool's own (never-produced) result.
+        json.loads(client_payload["tool_result"])
+
+    async def test_tool_exception_skips_ticket_refresh_when_order_state_unreadable(self):
+        """PR #58 re-review "S2": the ticket refresh is best-effort. If the session's
+        order state genuinely isn't readable (e.g. torn down out from under this call),
+        skip the refresh silently -- the guest still gets the function_call_output
+        either way, and this must never resurrect the old #36 crash-the-connection bug."""
+        rtmt = self._make_rtmt()
+        client_ws = _make_mock_ws()
+        server_ws = _make_mock_ws()
+        order_state_singleton.sessions = {}
+        session_id = rtmt._sessions.create_session(client_ws)
+        del order_state_singleton.sessions[session_id]  # simulate unreadable order state
+
+        mock_tool_target = AsyncMock(side_effect=KeyError("item_name"))
+        rtmt.tools["exploding_tool"] = Tool(target=mock_tool_target, schema={"name": "exploding_tool"})
+        tools_pending = {"call-9": RTToolCall("call-9", "prev-9")}
+        msg = MagicMock()
+        msg.data = json.dumps({
+            "type": "response.output_item.done",
+            "item": {
+                "type": "function_call",
+                "name": "exploding_tool",
+                "call_id": "call-9",
+                "arguments": '{}'
+            }
+        })
+        with self.assertLogs("sonic-drive-in", level="ERROR"):
+            result = await rtmt._process_message_to_client(msg, client_ws, server_ws, tools_pending)
+        self.assertIsNone(result)
+        server_ws.send_json.assert_called_once()  # the model still gets its function_call_output
+        client_ws.send_json.assert_not_called()
+
+    async def test_consecutive_failed_rounds_send_tool_choice_none_at_cap(self):
+        """PR #58 re-review "S1"/"S2": two consecutive *failed rounds* on one connection
+        (round = everything between one response.create and its response.done), with no
+        guest turn in between, must switch the auto-continue at the cap from a bare
+        response.create to a server-authored one with response.tool_choice="none" -- the
+        model still gets to speak (and apologise), but can't call a tool a third time in a
+        row. The model still gets both function_call_outputs either way."""
+        rtmt = self._make_rtmt()
+        client_ws = _make_mock_ws()
+        server_ws = _make_mock_ws()
+        order_state_singleton.sessions = {}
+        rtmt._sessions.create_session(client_ws)
+        tool_failures = _ToolFailureTracker()
+
+        mock_tool_target = AsyncMock(side_effect=KeyError("item_name"))
+        rtmt.tools["exploding_tool"] = Tool(target=mock_tool_target, schema={"name": "exploding_tool"})
+
+        async def _one_failed_round(call_id: str, tools_pending: dict):
+            call_msg = MagicMock()
+            call_msg.data = json.dumps({
+                "type": "response.output_item.done",
+                "item": {"type": "function_call", "name": "exploding_tool", "call_id": call_id, "arguments": "{}"},
+            })
+            with self.assertLogs("sonic-drive-in", level="ERROR"):
+                await rtmt._process_message_to_client(call_msg, client_ws, server_ws, tools_pending, tool_failures=tool_failures)
+            done_msg = MagicMock()
+            done_msg.data = json.dumps({"type": "response.done", "response": {"output": []}})
+            await rtmt._process_message_to_client(done_msg, client_ws, server_ws, tools_pending, tool_failures=tool_failures)
+
+        self.assertEqual(_TOOL_FAILURE_CAP, 2)  # the test below assumes exactly two rounds reaches the cap
+
+        tools_pending = {"call-a": RTToolCall("call-a", "prev-a")}
+        await _one_failed_round("call-a", tools_pending)
+        # round 1: not yet at cap, auto-continues with a bare response.create.
+        self.assertEqual(server_ws.send_str.call_count, 1)
+        server_ws.send_str.assert_called_with(RESPONSE_CREATE_MSG)
+
+        tools_pending = {"call-b": RTToolCall("call-b", "prev-b")}
+        await _one_failed_round("call-b", tools_pending)
+        # round 2: at the cap -- one more response.create, but with tool_choice="none".
+        self.assertEqual(server_ws.send_str.call_count, 2)
+        server_ws.send_str.assert_called_with(_build_tool_failure_cap_notice_msg(None))
+
+    async def test_tool_success_does_not_reset_the_failure_streak(self):
+        """PR #58 re-review "S1": Rick's core repro. A successful tool call between two
+        failed rounds must NOT reset the streak -- `get_order`, the very call our own
+        tool_execution_failed error text tells the model to make, must not be what
+        silently un-caps a broken retry loop. The streak is only cleared by an actual
+        guest turn (_ToolFailureTracker.reset_for_new_turn(), exercised separately
+        below and by the conformance-level guest-speech scenario)."""
+        rtmt = self._make_rtmt()
+        client_ws = _make_mock_ws()
+        server_ws = _make_mock_ws()
+        order_state_singleton.sessions = {}
+        rtmt._sessions.create_session(client_ws)
+        tool_failures = _ToolFailureTracker()
+
+        mock_tool_target = AsyncMock(side_effect=KeyError("item_name"))
+        rtmt.tools["exploding_tool"] = Tool(target=mock_tool_target, schema={"name": "exploding_tool"})
+        rtmt.tools["ok_tool"] = Tool(
+            target=AsyncMock(return_value=ToolResult("fine", ToolResultDirection.TO_SERVER)),
+            schema={"name": "ok_tool"},
+        )
+
+        async def _failed_round(call_id: str):
+            tools_pending = {call_id: RTToolCall(call_id, f"prev-{call_id}")}
+            call_msg = MagicMock()
+            call_msg.data = json.dumps({
+                "type": "response.output_item.done",
+                "item": {"type": "function_call", "name": "exploding_tool", "call_id": call_id, "arguments": "{}"},
+            })
+            with self.assertLogs("sonic-drive-in", level="ERROR"):
+                await rtmt._process_message_to_client(call_msg, client_ws, server_ws, tools_pending, tool_failures=tool_failures)
+            done_msg = MagicMock()
+            done_msg.data = json.dumps({"type": "response.done", "response": {"output": []}})
+            await rtmt._process_message_to_client(done_msg, client_ws, server_ws, tools_pending, tool_failures=tool_failures)
+
+        async def _successful_round(call_id: str):
+            tools_pending = {call_id: RTToolCall(call_id, f"prev-{call_id}")}
+            call_msg = MagicMock()
+            call_msg.data = json.dumps({
+                "type": "response.output_item.done",
+                "item": {"type": "function_call", "name": "ok_tool", "call_id": call_id, "arguments": "{}"},
+            })
+            await rtmt._process_message_to_client(call_msg, client_ws, server_ws, tools_pending, tool_failures=tool_failures)
+            done_msg = MagicMock()
+            done_msg.data = json.dumps({"type": "response.done", "response": {"output": []}})
+            await rtmt._process_message_to_client(done_msg, client_ws, server_ws, tools_pending, tool_failures=tool_failures)
+
+        await _failed_round("call-1")
+        self.assertEqual(tool_failures.count, 1)
+        await _successful_round("call-2")  # the model's prescribed "call get_order" retry
+        self.assertEqual(tool_failures.count, 1)  # unchanged -- NOT reset by the success
+        server_ws.send_str.reset_mock()
+        await _failed_round("call-3")
+        # Streak is now 2 -- at the cap, so the auto-continue is the tool_choice=none variant.
+        self.assertEqual(tool_failures.count, 2)
+        server_ws.send_str.assert_called_once_with(_build_tool_failure_cap_notice_msg(None))
+
+    async def test_third_failed_round_after_the_cap_notice_sends_nothing(self):
+        """PR #58 re-review "S1" repro (`ToolFailureCapNotResetByGetOrderTests`): the model
+        (or a dumb test double that ignores tool_choice) can keep calling tools every round
+        no matter what the previous response.create said. Once the ONE cap-notice
+        response.create has already gone out, every further round in the same streak (no
+        guest turn in between) must send nothing at all -- otherwise that very auto-continue
+        would itself trigger yet another tool call with zero guest input, defeating the cap."""
+        rtmt = self._make_rtmt()
+        client_ws = _make_mock_ws()
+        server_ws = _make_mock_ws()
+        order_state_singleton.sessions = {}
+        rtmt._sessions.create_session(client_ws)
+        tool_failures = _ToolFailureTracker()
+
+        mock_tool_target = AsyncMock(side_effect=KeyError("item_name"))
+        rtmt.tools["exploding_tool"] = Tool(target=mock_tool_target, schema={"name": "exploding_tool"})
+        rtmt.tools["ok_tool"] = Tool(
+            target=AsyncMock(return_value=ToolResult("fine", ToolResultDirection.TO_SERVER)),
+            schema={"name": "ok_tool"},
+        )
+
+        async def _round(name: str, call_id: str):
+            tools_pending = {call_id: RTToolCall(call_id, f"prev-{call_id}")}
+            call_msg = MagicMock()
+            call_msg.data = json.dumps({
+                "type": "response.output_item.done",
+                "item": {"type": "function_call", "name": name, "call_id": call_id, "arguments": "{}"},
+            })
+            if name == "exploding_tool":
+                with self.assertLogs("sonic-drive-in", level="ERROR"):
+                    await rtmt._process_message_to_client(call_msg, client_ws, server_ws, tools_pending, tool_failures=tool_failures)
+            else:
+                await rtmt._process_message_to_client(call_msg, client_ws, server_ws, tools_pending, tool_failures=tool_failures)
+            done_msg = MagicMock()
+            done_msg.data = json.dumps({"type": "response.done", "response": {"output": []}})
+            await rtmt._process_message_to_client(done_msg, client_ws, server_ws, tools_pending, tool_failures=tool_failures)
+
+        await _round("exploding_tool", "f1")   # round 1: fail -> count=1, bare response.create
+        await _round("ok_tool", "g1")           # round 2: succeed -> count unchanged (1)
+        server_ws.send_str.reset_mock()
+        await _round("exploding_tool", "f2")   # round 3: fail -> count=2, AT CAP -> one apology
+        server_ws.send_str.assert_called_once_with(_build_tool_failure_cap_notice_msg(None))
+        server_ws.send_str.reset_mock()
+        await _round("ok_tool", "g2")           # round 4: succeed, still at cap -> no notice left
+        server_ws.send_str.assert_not_called()
+        # With rtmt sending nothing, a real model (or the fake upstream in the conformance
+        # scenario) never gets another response.create to reply to, so a further tool call
+        # ("f3" in the conformance repro) never happens -- guest input is the only way out.
+
     async def test_error_message_logged_not_crashed(self):
         """OpenAI error messages should be logged, not crash the handler."""
         rtmt = self._make_rtmt()
@@ -2019,6 +2799,171 @@ class ProcessMessageToClientTests(unittest.IsolatedAsyncioTestCase):
         msg.data = '{"type": "session.created", INVALID JSON'
         with self.assertRaises(json.JSONDecodeError):
             await rtmt._process_message_to_client(msg, client_ws, server_ws, tools_pending)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TOOL FAILURE TRACKER TESTS (#36, PR #58 re-review "S1")
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class ToolFailureTrackerTests(unittest.TestCase):
+    """Direct unit tests of `_ToolFailureTracker`'s new round-based semantics, isolated
+    from the full `_process_message_to_client` plumbing (which
+    ToolFailureCapAndTicketRefreshTests/the tests above already cover end-to-end)."""
+
+    def test_round_with_no_failure_does_not_increment(self):
+        t = _ToolFailureTracker()
+        t.end_round()  # a round with only successful calls -- record_call_failure() never called.
+        self.assertEqual(t.count, 0)
+        self.assertFalse(t.at_cap())
+
+    def test_round_with_one_failure_increments_once(self):
+        t = _ToolFailureTracker()
+        t.record_call_failure()
+        t.end_round()
+        self.assertEqual(t.count, 1)
+        self.assertFalse(t.at_cap())
+
+    def test_round_with_two_parallel_failures_still_increments_once(self):
+        """PR #58 re-review "S1" related problem (b): a single round with two parallel
+        failing tool calls must count as ONE failed round, not two."""
+        t = _ToolFailureTracker()
+        t.record_call_failure()
+        t.record_call_failure()
+        t.end_round()
+        self.assertEqual(t.count, 1)
+
+    def test_consecutive_failed_rounds_reach_the_cap(self):
+        t = _ToolFailureTracker()
+        t.record_call_failure()
+        t.end_round()
+        t.record_call_failure()
+        t.end_round()
+        self.assertEqual(t.count, _TOOL_FAILURE_CAP)
+        self.assertTrue(t.at_cap())
+
+    def test_successful_round_between_failures_does_not_reset_count(self):
+        """PR #58 re-review "S1" related problem (a): Rick's core repro at the class
+        level -- a round with no failure (e.g. the model's prescribed get_order retry)
+        must NOT reset the streak, or the cap could never be reached."""
+        t = _ToolFailureTracker()
+        t.record_call_failure()
+        t.end_round()
+        self.assertEqual(t.count, 1)
+        t.end_round()  # a later round, no record_call_failure() call -- it succeeded.
+        self.assertEqual(t.count, 1)  # unchanged, not reset to 0.
+
+    def test_reset_for_new_turn_zeroes_count_and_pending_round_flag(self):
+        """Only genuine guest activity (speech_started / a completed transcription --
+        wired up in from_server_to_client(), since speech_started is a fast-path
+        passthrough type that never reaches _process_message_to_client's switch/case)
+        clears the streak."""
+        t = _ToolFailureTracker()
+        t.record_call_failure()
+        t.end_round()
+        t.record_call_failure()  # mid-round failure recorded, but end_round() not called yet.
+        t.reset_for_new_turn()
+        self.assertEqual(t.count, 0)
+        self.assertFalse(t.at_cap())
+        # The pending round flag was cleared too -- a later end_round() with no further
+        # record_call_failure() call must not resurrect the cleared failure.
+        t.end_round()
+        self.assertEqual(t.count, 0)
+
+    def test_consume_cap_notice_fires_once_then_suppresses_until_reset(self):
+        """PR #58 re-review "S1" repro (`ToolFailureCapNotResetByGetOrderTests`): the fake
+        upstream (like a real model that ignores tool_choice) can keep calling tools every
+        round regardless of what the previous response.create said. If every capped round
+        sent its own tool_choice="none" response.create, that auto-continue would itself
+        let a further scripted/model-chosen tool call run with no guest input at all --
+        exactly the unbounded loop the cap exists to stop. So only the FIRST response.done
+        that reaches the cap gets the one apology; every one after it (same streak, no
+        guest turn) must get nothing until reset_for_new_turn() runs."""
+        t = _ToolFailureTracker()
+        t.record_call_failure()
+        t.end_round()
+        t.record_call_failure()
+        t.end_round()
+        self.assertTrue(t.at_cap())
+        self.assertTrue(t.consume_cap_notice())  # first time at cap: one apology.
+        # Still at cap (e.g. a successful round afterwards leaves the streak unchanged) --
+        # no further notices without a guest turn.
+        t.end_round()
+        self.assertTrue(t.at_cap())
+        self.assertFalse(t.consume_cap_notice())
+        self.assertFalse(t.consume_cap_notice())
+        # A guest turn re-arms exactly one future notice.
+        t.reset_for_new_turn()
+        t.record_call_failure()
+        t.end_round()
+        t.record_call_failure()
+        t.end_round()
+        self.assertTrue(t.at_cap())
+        self.assertTrue(t.consume_cap_notice())
+
+
+class _FakePromptLoaderForCapNotice:
+    """Minimal PromptLoader double exposing only the two methods
+    `_tool_failure_cap_instructions`/`_build_tool_failure_cap_notice_msg` actually call."""
+
+    def __init__(self, error_messages: dict[str, str]):
+        self._error_messages = error_messages
+
+    def get_error_messages(self) -> dict:
+        return self._error_messages
+
+    def render_error(self, key: str, **kwargs) -> str:
+        return self._error_messages[key].format(**kwargs) if kwargs else self._error_messages[key]
+
+
+class ToolFailureCapNoticeInstructionsTests(unittest.TestCase):
+    """PR #58 re-review round 3: a live probe against gpt-realtime-2.1 showed
+    `tool_choice:"none"` alone still let the model falsely tell the guest an item was
+    added/changed in 2 of 3 runs, even though no tool call happened -- the cap notice must
+    also carry response-level `instructions` telling the model nothing was actually
+    changed, which fixed it in 3 of 3 runs. These tests pin the message-building helpers
+    directly, independent of the full `_process_message_to_client` plumbing already
+    covered by `ToolFailureCapAndTicketRefreshTests`/the tests above."""
+
+    def test_no_prompt_loader_uses_the_builtin_fallback_instructions(self):
+        """A connection with no prompt loader at all (e.g. these unit tests' `_make_rtmt()`,
+        or a brand config that hasn't set one up) must still get a real instruction, never
+        an empty one."""
+        instructions = _tool_failure_cap_instructions(None)
+        self.assertEqual(instructions, _TOOL_FAILURE_CAP_INSTRUCTIONS_FALLBACK)
+        self.assertTrue(instructions.strip())
+
+    def test_missing_key_falls_back_to_builtin_default_not_a_generic_placeholder(self):
+        """If the brand's error_messages.yaml doesn't (yet) define
+        `tool_failure_cap_instructions`, this must NOT fall through to
+        `PromptLoader.render_error()`'s own generic "Unknown error message key" /
+        "An error occurred (...)" placeholder -- that would be a worse, more visibly
+        broken instruction than just using the built-in default."""
+        loader = _FakePromptLoaderForCapNotice({"tool_execution_failed": "some other message"})
+        instructions = _tool_failure_cap_instructions(loader)
+        self.assertEqual(instructions, _TOOL_FAILURE_CAP_INSTRUCTIONS_FALLBACK)
+        self.assertNotIn("error occurred", instructions.lower())
+
+    def test_brand_prompt_loader_key_is_used_when_present(self):
+        """When the brand config does define the key, its (brand-voiced) text wins over
+        the generic built-in fallback."""
+        loader = _FakePromptLoaderForCapNotice({
+            "tool_failure_cap_instructions": "Brand-specific apology text, nothing changed.",
+        })
+        instructions = _tool_failure_cap_instructions(loader)
+        self.assertEqual(instructions, "Brand-specific apology text, nothing changed.")
+
+    def test_cap_notice_message_has_both_tool_choice_none_and_nonempty_instructions(self):
+        msg = json.loads(_build_tool_failure_cap_notice_msg(None))
+        self.assertEqual(msg["type"], "response.create")
+        self.assertEqual(msg["response"]["tool_choice"], "none")
+        self.assertTrue(msg["response"]["instructions"].strip())
+
+    def test_cap_notice_message_uses_the_brand_prompt_loader_when_given(self):
+        loader = _FakePromptLoaderForCapNotice({
+            "tool_failure_cap_instructions": "Brand apology.",
+        })
+        msg = json.loads(_build_tool_failure_cap_notice_msg(loader))
+        self.assertEqual(msg["response"]["instructions"], "Brand apology.")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -96,6 +96,16 @@ security:
   idle_timeout_seconds: 300
   allowed_origins: []  # empty = same-origin only; add URLs for cross-origin
   require_session_token: false  # set true to require HMAC session tokens
+  # #53: a browser can ask to enable server-side file logging
+  # (extension.set_log_to_file) or raise process log verbosity
+  # (extension.set_verbose_logging). Both are process-wide side effects (one
+  # connection's request affects every other connection on the same worker),
+  # so they are OFF by default in production regardless of what any one
+  # connection asks for. Only ever turn this on for a trusted debugging
+  # deployment. Env override: ALLOW_CLIENT_LOG_CONTROL=true|false. Also
+  # allowed whenever CONFORMANCE_TEST_HOOKS=1 (the conformance harness itself
+  # exercises these extensions under test).
+  allow_client_log_control: false
 
 # Order resume after a transport drop (Wi-Fi blip, LB reset, heartbeat miss).
 # An idle close (4000) is never resumable, and the idle clock

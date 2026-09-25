@@ -282,6 +282,72 @@ public sealed class BrowserClientLifecycleTests(ConformanceFixture fixture)
     }
 
     /// <summary>
+    /// #28 flake hunt (post-#54-merge, run 16/25 on <c>ResumeRehydrationAndNudgeTests</c>):
+    /// deterministic, zero-timing proof of the exact gap that failure exposed --
+    /// <see cref="AbortAsync"/> awaiting its reader task when that task's in-flight
+    /// <c>ReceiveAsync</c> observed the just-aborted socket as an <see cref="ObjectDisposedException"/>
+    /// rather than the two shapes already handled (<see cref="OperationCanceledException"/>,
+    /// <see cref="WebSocketException"/>). <see cref="ThrowingReceiveFakeSocket"/>'s
+    /// <c>ReceiveAsync</c> throws synchronously on its very first call, so this needs no real
+    /// abort race at all -- <see cref="RealtimeBrowserClient.StartReaderLoopForTesting"/> starts the
+    /// same reader loop <see cref="RealtimeBrowserClient.ConnectAsync"/> would, and whichever
+    /// exception the fake throws is what the loop -- and then <see cref="AbortAsync"/>'s await of
+    /// it -- has to tolerate.
+    ///
+    /// Mutation-check: removing <c>WebSocketJson.ReceiveJsonOrCloseAsync</c>'s new
+    /// <c>catch (ObjectDisposedException)</c> clause turns this test red (with exactly
+    /// <see cref="ThrowingReceiveFakeSocket"/>'s thrown exception, uncaught) -- see the two
+    /// companion shape tests just below, which prove the two *already-handled* shapes still pass
+    /// unaffected by that removal, so this test is the one actually pinning the new fix rather
+    /// than just re-proving the pre-existing behaviour.
+    /// </summary>
+    [Fact]
+    public async Task AbortAsync_does_not_throw_when_the_reader_observes_a_disposed_socket()
+    {
+        var browser = RealtimeBrowserClient.CreateForTesting(
+            new ThrowingReceiveFakeSocket(() => new ObjectDisposedException(nameof(ClientWebSocket))));
+        browser.StartReaderLoopForTesting();
+
+        await browser.AbortAsync();
+
+        Assert.Empty(browser.ReceivedFrames.Snapshot());
+    }
+
+    /// <summary>
+    /// Companion to <see cref="AbortAsync_does_not_throw_when_the_reader_observes_a_disposed_socket"/>:
+    /// the first of the two shapes <see cref="AbortAsync"/> already handled before the ODE fix,
+    /// exercised through the exact same deterministic seam so all three shapes are pinned the same
+    /// way instead of only the new one having a test.
+    /// </summary>
+    [Fact]
+    public async Task AbortAsync_does_not_throw_when_the_reader_observes_a_cancellation()
+    {
+        var browser = RealtimeBrowserClient.CreateForTesting(
+            new ThrowingReceiveFakeSocket(() => new OperationCanceledException("canceled")));
+        browser.StartReaderLoopForTesting();
+
+        await browser.AbortAsync();
+
+        Assert.Empty(browser.ReceivedFrames.Snapshot());
+    }
+
+    /// <summary>
+    /// Companion to <see cref="AbortAsync_does_not_throw_when_the_reader_observes_a_disposed_socket"/>:
+    /// the second of the two shapes <see cref="AbortAsync"/> already handled before the ODE fix.
+    /// </summary>
+    [Fact]
+    public async Task AbortAsync_does_not_throw_when_the_reader_observes_a_fault()
+    {
+        var browser = RealtimeBrowserClient.CreateForTesting(
+            new ThrowingReceiveFakeSocket(() => new WebSocketException("faulted")));
+        browser.StartReaderLoopForTesting();
+
+        await browser.AbortAsync();
+
+        Assert.Empty(browser.ReceivedFrames.Snapshot());
+    }
+
+    /// <summary>
     /// PR #52 CI follow-up (swigerb/SonicAIDriveThru#28 N10 aftermath, CI runs 36085091969):
     /// deterministic proof of the exact failure -- and exact fix -- for the resume scenarios'
     /// keepalive loops (<see cref="ResumeRehydrationClientVisibilityTests"/>,
@@ -596,5 +662,52 @@ public sealed class BrowserClientLifecycleTests(ConformanceFixture fixture)
         public override Task SendAsync(
             ArraySegment<byte> buffer, WebSocketMessageType messageType, bool endOfMessage, CancellationToken cancellationToken) =>
             throw new NotSupportedException($"{nameof(ThrowingCloseFakeSocket)} only rigs {nameof(CloseOutputAsync)}.");
+    }
+
+    /// <summary>
+    /// #28 flake hunt (post-#54-merge, run 16/25 on <c>ResumeRehydrationAndNudgeTests</c>): a
+    /// minimal <see cref="WebSocket"/> stand-in whose <see cref="ReceiveAsync"/> throws a
+    /// caller-supplied exception synchronously on every call -- standing in for a real
+    /// <see cref="ClientWebSocket"/>'s in-flight receive racing <see cref="Abort"/> and losing,
+    /// which can surface as any of three different exception shapes (see
+    /// <c>WebSocketJson.ReceiveJsonOrCloseAsync</c>'s doc comment). Since the fake throws on its
+    /// very first call rather than waiting for anything, there is no real timing dependency:
+    /// whichever shape the test configures is exactly what the reader loop -- started via
+    /// <see cref="RealtimeBrowserClient.StartReaderLoopForTesting"/> -- and then
+    /// <see cref="RealtimeBrowserClient.AbortAsync"/>'s await of it, must tolerate. Only
+    /// <see cref="ReceiveAsync"/> and <see cref="Abort"/> are exercised by the tests that use this
+    /// fake; every other member deliberately throws <see cref="NotSupportedException"/> rather than
+    /// silently no-op, matching <see cref="ThrowingCloseFakeSocket"/>'s convention above.
+    /// </summary>
+    private sealed class ThrowingReceiveFakeSocket(Func<Exception> makeException) : WebSocket
+    {
+        private WebSocketState _state = WebSocketState.Open;
+
+        public override WebSocketCloseStatus? CloseStatus => null;
+
+        public override string? CloseStatusDescription => null;
+
+        public override WebSocketState State => _state;
+
+        public override string? SubProtocol => null;
+
+        public override void Abort() => _state = WebSocketState.Aborted;
+
+        public override Task CloseAsync(
+            WebSocketCloseStatus closeStatus, string? statusDescription, CancellationToken cancellationToken) =>
+            throw new NotSupportedException($"{nameof(ThrowingReceiveFakeSocket)} only rigs {nameof(ReceiveAsync)}.");
+
+        public override Task CloseOutputAsync(
+            WebSocketCloseStatus closeStatus, string? statusDescription, CancellationToken cancellationToken) =>
+            throw new NotSupportedException($"{nameof(ThrowingReceiveFakeSocket)} only rigs {nameof(ReceiveAsync)}.");
+
+        public override void Dispose() => _state = WebSocketState.Closed;
+
+        public override Task<WebSocketReceiveResult> ReceiveAsync(ArraySegment<byte> buffer, CancellationToken cancellationToken) =>
+            throw makeException();
+
+        public override Task SendAsync(
+            ArraySegment<byte> buffer, WebSocketMessageType messageType, bool endOfMessage, CancellationToken cancellationToken) =>
+            throw new NotSupportedException($"{nameof(ThrowingReceiveFakeSocket)} only rigs {nameof(ReceiveAsync)}.");
     }
 }
