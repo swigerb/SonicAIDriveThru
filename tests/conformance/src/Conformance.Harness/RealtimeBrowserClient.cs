@@ -19,6 +19,14 @@ namespace Conformance.Harness;
 /// </summary>
 public sealed class RealtimeBrowserClient : IAsyncDisposable
 {
+    /// <summary>
+    /// #28 N10: bounds how long <see cref="DisposeAsync"/> waits for the reader loop to settle
+    /// on its own (peer answering the graceful close it just sent, or the connection otherwise
+    /// dropping) before falling back to cancelling its in-flight receive -- see
+    /// <see cref="DisposeAsync"/>'s doc comment for why that fallback still exists.
+    /// </summary>
+    private static readonly TimeSpan DisposeGracePeriod = TimeSpan.FromSeconds(2);
+
     private readonly ClientWebSocket _socket = new();
     private readonly CancellationTokenSource _readerCts = new();
     private readonly TaskCompletionSource _closed = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -43,6 +51,14 @@ public sealed class RealtimeBrowserClient : IAsyncDisposable
 
     /// <summary>The close reason text the backend sent, or null if no Close frame was observed yet.</summary>
     public string? CloseStatusDescription => _observedCloseStatusDescription;
+
+    /// <summary>
+    /// #28 N10: the underlying socket's own <see cref="WebSocketState"/> — exposed so a test can
+    /// tell a graceful close (<see cref="CloseAsync"/>, or plain disposal's now-graceful default)
+    /// apart from an abrupt one (<see cref="AbortAsync"/>, which drives this straight to
+    /// <see cref="WebSocketState.Aborted"/>) without needing the peer to answer at all.
+    /// </summary>
+    public WebSocketState SocketState => _socket.State;
 
     public static async Task<RealtimeBrowserClient> ConnectAsync(
         Uri backendBaseUri, bool offerDeflate = false, string? origin = null, CancellationToken cancellationToken = default)
@@ -154,6 +170,11 @@ public sealed class RealtimeBrowserClient : IAsyncDisposable
     /// in-flight <c>ReceiveAsync</c> and throws "there is already one outstanding read call".
     /// The server's answering Close frame is instead observed by that same reader loop, which
     /// signals <see cref="WaitForCloseAsync"/> once it arrives.
+    ///
+    /// #28 N10: for a scenario that specifically wants the backend to observe an abrupt,
+    /// no-close-frame disconnect instead (a browser crash or network drop), use
+    /// <see cref="AbortAsync"/>; plain disposal (<see cref="DisposeAsync"/>) now defaults to the
+    /// same graceful behaviour as this method.
     /// </summary>
     public async Task CloseAsync(
         WebSocketCloseStatus status = WebSocketCloseStatus.NormalClosure,
@@ -163,6 +184,40 @@ public sealed class RealtimeBrowserClient : IAsyncDisposable
         if (_socket.State is WebSocketState.Open or WebSocketState.CloseReceived)
         {
             await _socket.CloseOutputAsync(status, statusDescription, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// #28 N10: simulates a client disappearing with no WebSocket-level close handshake at all —
+    /// a browser crash or a network drop — rather than <see cref="CloseAsync"/>'s graceful Close
+    /// frame. <see cref="WebSocket.Abort"/> transitions the socket straight to
+    /// <see cref="WebSocketState.Aborted"/> and cancels its in-flight receive, which is exactly
+    /// the abrupt-disconnect signature the backend would observe from a real dropped connection.
+    /// Call this explicitly when a scenario's own subject matter *is* that abrupt-drop behaviour;
+    /// every other scenario should prefer <see cref="CloseAsync"/> or plain disposal, both of
+    /// which now default to a graceful close (see <see cref="DisposeAsync"/>'s doc comment for why
+    /// that distinction used to not exist).
+    /// </summary>
+    public async ValueTask AbortAsync()
+    {
+        _socket.Abort();
+
+        if (_readerTask is not null)
+        {
+            try
+            {
+                await _readerTask.ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // Expected: Abort() above cancels the reader loop's in-flight ReceiveAsync.
+            }
+            catch (WebSocketException)
+            {
+                // Expected: the reader loop's in-flight ReceiveAsync observes the now-aborted
+                // socket as a fault rather than a cancellation, depending on exactly where it was
+                // in its own receive when Abort() ran.
+            }
         }
     }
 
@@ -268,25 +323,24 @@ public sealed class RealtimeBrowserClient : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// #28 N10: this used to cancel the reader loop's in-flight <c>ReceiveAsync</c> *before*
+    /// attempting any close, which per <see cref="ClientWebSocket"/>'s own documented semantics
+    /// transitions the socket straight to <see cref="WebSocketState.Aborted"/> — so every
+    /// disposed client produced the same abrupt-drop (1006-equivalent) signature the backend
+    /// would see from a user's laptop losing network, whether or not a given scenario's own
+    /// subject matter had anything to do with that. The default is now deliberate: attempt the
+    /// same graceful Close frame <see cref="CloseAsync"/> would (best-effort — a scenario that
+    /// already called <see cref="CloseAsync"/> itself finds the socket no longer <c>Open</c> here
+    /// and this is a no-op), then give the reader loop up to <see cref="DisposeGracePeriod"/> to
+    /// settle on its own — cancelling its in-flight receive still aborts the socket the same as
+    /// before, so that only happens as a last-resort fallback if the peer hasn't answered within
+    /// the grace period, not on every disposal. A scenario whose own subject matter genuinely is
+    /// the abrupt-drop behaviour should call <see cref="AbortAsync"/> instead of relying on plain
+    /// disposal to produce it as a side effect.
+    /// </summary>
     public async ValueTask DisposeAsync()
     {
-        await _readerCts.CancelAsync().ConfigureAwait(false);
-
-        // Drain the reader loop before touching the socket ourselves: WebSocket only allows one
-        // outstanding ReceiveAsync at a time, and the reader loop's cancellation needs a moment to
-        // actually unblock its in-flight receive. Racing a close call against it throws
-        // "there is already one outstanding read call for this WebSocket instance."
-        if (_readerTask is not null)
-        {
-            try
-            {
-                await _readerTask.ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-            }
-        }
-
         try
         {
             if (_socket.State is WebSocketState.Open or WebSocketState.CloseReceived)
@@ -298,6 +352,32 @@ public sealed class RealtimeBrowserClient : IAsyncDisposable
         catch (WebSocketException)
         {
             // Best-effort close.
+        }
+
+        if (_readerTask is not null)
+        {
+            var settledOnItsOwn = await Task.WhenAny(_readerTask, Task.Delay(DisposeGracePeriod)).ConfigureAwait(false)
+                == _readerTask;
+            if (!settledOnItsOwn)
+            {
+                await _readerCts.CancelAsync().ConfigureAwait(false);
+            }
+
+            // Drain the reader loop before touching the socket ourselves: WebSocket only allows
+            // one outstanding ReceiveAsync at a time, and (in the fallback case above) the reader
+            // loop's cancellation needs a moment to actually unblock its in-flight receive. Racing
+            // a close call against it throws "there is already one outstanding read call for this
+            // WebSocket instance."
+            try
+            {
+                await _readerTask.ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // #28 N15: expected -- _readerCts.CancelAsync() above is what unblocks the
+                // reader loop's in-flight ReceiveAsync in the first place, so its task settling
+                // with this exception is disposal doing exactly what it asked for, not a fault.
+            }
         }
 
         _socket.Dispose();
