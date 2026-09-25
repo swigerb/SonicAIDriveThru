@@ -271,6 +271,28 @@ class OrderStateTests(unittest.TestCase):
         result = order_state_singleton.get_combo_requirements(session_id)
         self.assertTrue(result["is_complete"])
 
+    def test_reset_order_clears_absorbed_component_display(self):
+        """#41: reset_order previously cleared absorbed_sides/absorbed_drinks counts but not the
+        absorbed_side_display/absorbed_drink_display strings, so a brand-new combo after a reset
+        would still show the *previous* order's absorbed component names."""
+        session_id = order_state_singleton.create_session()
+        order_state_singleton.handle_order_update(session_id, "add", "SuperSONIC Cheeseburger Combo", "standard", 1, 8.49)
+        order_state_singleton.handle_order_update(session_id, "add", "Tots", "medium", 1, 2.79)
+        items = order_state_singleton.get_order_items(session_id)
+        combo_item = next(i for i in items if "combo" in i.item.lower())
+        self.assertIn("Tots", combo_item.display)
+
+        order_state_singleton.reset_order(session_id)
+
+        # New order, new combo, absorb only a drink this time -- the display must not mention
+        # "Tots" (leftover from the previous, now-reset order).
+        order_state_singleton.handle_order_update(session_id, "add", "SuperSONIC Cheeseburger Combo", "standard", 1, 8.49)
+        order_state_singleton.handle_order_update(session_id, "add", "Cherry Limeade", "medium", 1, 2.99)
+        items = order_state_singleton.get_order_items(session_id)
+        combo_item = next(i for i in items if "combo" in i.item.lower())
+        self.assertIn("Cherry Limeade", combo_item.display)
+        self.assertNotIn("Tots", combo_item.display, "Reset must clear absorbed_side_display, not just the absorbed_sides count")
+
     def test_combo_absorbs_only_one_side(self):
         """Two standalone sides, combo absorbs only one."""
         session_id = order_state_singleton.create_session()

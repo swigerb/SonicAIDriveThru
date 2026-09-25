@@ -64,6 +64,20 @@ class OrderState:
             cls._instance.sessions = {}
         return cls._instance
 
+    def _reset_order_state(self, session: dict) -> None:
+        """Clear every per-session order-state field (#41): the order lines themselves plus the
+        combo-absorption bookkeeping (counts *and* display strings). ``create_session`` and
+        ``reset_order`` both delegate here so they can never drift out of sync again — the
+        original bug was ``reset_order`` clearing the absorbed counts but not the absorbed
+        *display* strings, so a fresh combo's display after reset still showed the previous
+        order's absorbed component names.
+        """
+        session["order_state"] = []
+        session["absorbed_sides"] = 0
+        session["absorbed_drinks"] = 0
+        session["absorbed_side_display"] = ""
+        session["absorbed_drink_display"] = ""
+
     def _update_summary(self, session_id: str):
         session = self.sessions[session_id]
         order_items = session["order_state"]
@@ -87,17 +101,13 @@ class OrderState:
         session_token = str(uuid.uuid4())
         empty_summary = OrderSummary(items=[], total=0.0, tax=0.0, finalTotal=0.0)
         self.sessions[session_id] = {
-            "order_state": [],
             "order_summary": empty_summary,
             "order_summary_json": empty_summary.model_dump_json(),
             "session_token": session_token,
             "round_trip_index": 0,
             "round_trip_token": self._format_round_trip_token(session_token, 0),
-            "absorbed_sides": 0,
-            "absorbed_drinks": 0,
-            "absorbed_side_display": "",
-            "absorbed_drink_display": "",
         }
+        self._reset_order_state(self.sessions[session_id])
         logger.info("Session created: %s", session_id)
         return session_id
 
@@ -337,11 +347,9 @@ class OrderState:
         return f"I have {summary_str}. Your total is {total:.2f}. "
 
     def reset_order(self, session_id: str):
-        """Clears all items from the current session's order."""
+        """Clears all items and per-session order state from the current session's order (#41)."""
         session = self.sessions[session_id]
-        session["order_state"] = []
-        session["absorbed_sides"] = 0
-        session["absorbed_drinks"] = 0
+        self._reset_order_state(session)
         self._update_summary(session_id)
         logger.info("Order fully reset for session %s", session_id)
 
