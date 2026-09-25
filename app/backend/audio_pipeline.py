@@ -193,7 +193,13 @@ class EchoSuppressor:
     and handles greeting-specific echo blocking. Safe without locks in
     single-threaded asyncio.
     """
-    __slots__ = ("ai_speaking", "cooldown_end", "greeting_in_progress", "_flush_handle")
+    __slots__ = (
+        "ai_speaking",
+        "cooldown_end",
+        "greeting_in_progress",
+        "_flush_handle",
+        "_greeting_awaiting_retry",
+    )
 
     def __init__(self):
         self.ai_speaking = False
@@ -204,6 +210,16 @@ class EchoSuppressor:
         # instead of letting it fire (and attempt a send) after the
         # connection has already gone away.
         self._flush_handle: asyncio.TimerHandle | None = None
+        # swigerb/SonicAIDriveThru#48 (PR #58 re-review, "M1"): set by
+        # on_response_done() when a greeting's response.done arrives with no
+        # audio ever rendered -- the rate-limit ladder (RateLimitRecovery)
+        # may still retry that same greeting with a bare response.create. If
+        # it does, the retry's own first audio delta must re-enter greeting
+        # suppression (see on_audio_delta()) instead of being treated as an
+        # ordinary response -- otherwise speech_started during the retry's
+        # audio is no longer ignored, and on_audio_done() gives it only the
+        # normal cooldown instead of the doubled post-greeting one.
+        self._greeting_awaiting_retry = False
 
     def should_suppress_audio(self, loop_time: float) -> bool:
         """Return True if user audio should be dropped (AI speaking or cooldown active)."""
@@ -211,6 +227,13 @@ class EchoSuppressor:
 
     def on_audio_delta(self, verbose: bool = False) -> None:
         """AI started sending audio — begin suppression."""
+        if self._greeting_awaiting_retry:
+            # #48 M1: this audio belongs to the rate-limit ladder's retry of a
+            # greeting whose first attempt produced no audio at all -- treat
+            # it as the greeting's own audio (see on_response_done() and the
+            # class docstring above), not an ordinary response.
+            self._greeting_awaiting_retry = False
+            self.greeting_in_progress = True
         if not self.ai_speaking:
             logger.debug("Echo suppression: AI speaking — suppressing user audio")
             vlog(verbose, "─── [Echo] ai_speaking=True — suppressing user audio ───")
@@ -239,6 +262,7 @@ class EchoSuppressor:
         if self.greeting_in_progress:
             actual_cooldown = ECHO_COOLDOWN_SEC * 2
             self.greeting_in_progress = False
+            self._greeting_awaiting_retry = False
             logger.debug("Echo suppression: greeting audio done — extended cooldown %.1fs", actual_cooldown)
         else:
             actual_cooldown = ECHO_COOLDOWN_SEC
@@ -284,6 +308,11 @@ class EchoSuppressor:
             vlog(verbose, "─── [Echo] Barge-in — ai_speaking=False, cooldown reset ───")
         self.ai_speaking = False
         self.cooldown_end = 0.0
+        # #48 M1: genuine guest speech (not greeting echo, since the check above
+        # already returned) means the guest, not a rate-limit ladder retry, is
+        # what's actually happening next -- a pending retry no longer gets to
+        # re-claim greeting suppression for whatever audio follows.
+        self._greeting_awaiting_retry = False
         return False
 
     def on_barge_in(self, verbose: bool = False) -> None:
@@ -292,6 +321,9 @@ class EchoSuppressor:
         vlog(verbose, "─── [Client] response.cancel — barge-in, echo suppression OFF ───")
         self.ai_speaking = False
         self.cooldown_end = 0.0
+        # #48 M1: see on_speech_started() above -- an explicit browser barge-in
+        # is just as much "the guest, not a retry" as genuine speech is.
+        self._greeting_awaiting_retry = False
 
     def start_greeting_suppression(self, verbose: bool = False) -> None:
         """Pre-set suppression before greeting fires."""
@@ -310,6 +342,15 @@ class EchoSuppressor:
         `response.done` is the one event GA guarantees for every response regardless of
         status, so treat it as the fallback: end suppression here too, but only for the
         pending greeting, and only if nothing else already has.
+
+        A rate-limited greeting's `response.done` is exactly this "no audio at all" case,
+        and the mic is correctly released here -- but `RateLimitRecovery` may then retry
+        that same greeting with a bare `response.create` (PR #58 re-review, "M1"). If it
+        does, the greeting isn't actually over: this sets `_greeting_awaiting_retry` so the
+        retry's own first audio delta (`on_audio_delta()`) re-enters greeting suppression,
+        instead of the retry's `speech_started`/`response.done` being treated as an ordinary
+        mid-conversation response (which would fail to ignore echo during the retry's audio
+        and give it only the normal, not doubled, post-greeting cooldown).
         """
         if not self.greeting_in_progress:
             return  # no greeting pending, or on_audio_done() already ended it normally.
@@ -323,6 +364,14 @@ class EchoSuppressor:
             # multi-second mute after a greeting the guest never actually heard.
             self.ai_speaking = False
             self.cooldown_end = 0.0
+            # #48 (PR #58 re-review, "M1"): this failed/empty attempt may still be
+            # retried by the rate-limit ladder (RateLimitRecovery.on_response_done()
+            # schedules a bare response.create for a rate-limited response.done) --
+            # if it is, the retry's own first audio delta must re-enter greeting
+            # suppression (on_audio_delta()) instead of being treated as an ordinary
+            # response. Real guest speech or an explicit barge-in (both above) clear
+            # this first if either happens before any retry audio arrives.
+            self._greeting_awaiting_retry = True
             logger.debug("Echo suppression: greeting produced no audio — unmuting immediately")
             vlog(verbose, "─── [Echo] response.done, no audio — ai_speaking=False, no cooldown ───")
         # else: something else (on_barge_in(), a genuine mid-greeting interrupt) already

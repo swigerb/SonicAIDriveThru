@@ -1463,6 +1463,29 @@ pending greeting, and **only** if nothing else already ended it:
   this `response.done` arrived), only the `greeting_in_progress` bookkeeping flag is cleared — no
   cooldown is re-armed retroactively.
 
+**A rate-limited greeting may still be retried (#48, PR #58 re-review "M1").** The "no audio at
+all" case above legitimately includes a rate-limited `response.done` with no output — but
+`rate_limit.py`'s `RateLimitRecovery` ladder (see "Rate-limit recovery" below) can then retry that
+same greeting with a bare `response.create`. The greeting isn't actually over in that case, even
+though the mic was correctly (and still is) unmuted in the meantime: `on_response_done()` sets
+`_greeting_awaiting_retry = True` alongside the instant unmute, and `on_audio_delta()` checks it on
+the very next audio delta — if set, it re-enters `greeting_in_progress` instead of treating the
+retry's audio as an ordinary response. This matters because, without it, the retry's own
+`speech_started` would no longer be ignored as greeting echo (a false barge-in — a regression from
+`dev`, where the flag stayed latched for the whole greeting) and its own `on_audio_done()` would
+apply only the normal cooldown instead of the doubled post-greeting one. The pending re-arm is
+itself cancelled — by `on_speech_started()`'s genuine-speech path and by `on_barge_in()` — the
+instant anything other than a retry actually happens next (real guest speech, or an explicit
+browser interrupt), so a guest who starts talking during the unmuted gap before any retry audio
+arrives is never mistaken for the retry. `GreetingRateLimitRetryEchoSuppressionTests` is the
+black-box proof: it scripts the greeting's first attempt as a rate-limited failure, lets the
+ladder's own retry produce real audio, injects a synthetic `speech_started` during that retry's
+audio (bypassing the client→server filter entirely, the same way a real echoed/overlapping guest
+utterance would reach the model), and asserts both that a mic append sent immediately after is
+still suppressed (echo, not barge-in) and that one sent at 1.5× the plain cooldown is *still*
+suppressed (the doubled cooldown, not the normal one) while one sent after the full doubled
+cooldown is finally forwarded.
+
 Wired in `rtmt.py`'s `from_server_to_client` dispatch on a new `MARKER_RESPONSE_DONE` (`'"response.done"'`)
 raw-substring check, alongside the existing audio/speech markers (same substring-based dispatch
 style as the rest of that loop; the fragility of substring dispatch itself is tracked separately as

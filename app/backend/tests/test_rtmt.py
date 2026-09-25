@@ -553,6 +553,63 @@ class EchoSuppressorTests(unittest.TestCase):
             self.assertFalse(echo.greeting_in_progress)
         asyncio.run(_run())
 
+    # ─── swigerb/SonicAIDriveThru#48 (PR #58 re-review, "M1"): a rate-limited
+    # greeting's response.done correctly unmutes instantly (no audio was ever
+    # rendered), but RateLimitRecovery may then retry that same greeting with a
+    # bare response.create. Before this fix, nothing re-armed greeting
+    # suppression for the retry: its speech_started was no longer ignored (a
+    # false barge-in / regression from dev, where the flag stayed latched) and
+    # its own on_audio_done() applied only the normal, not doubled, cooldown. ───
+
+    def test_response_done_with_no_audio_then_retry_audio_reenters_greeting_suppression(self):
+        """Rick's repro: a rate-limited greeting's ladder retry must still be treated as the
+        greeting's own audio -- speech_started during the retry is ignored, and the retry's
+        own audio_done applies the doubled post-greeting cooldown, not the normal one.
+        """
+        async def _run():
+            echo = EchoSuppressor()
+            loop = asyncio.get_running_loop()
+            target_ws = MagicMock()
+            target_ws.closed = False
+            target_ws.send_str = AsyncMock()
+            t = loop.time()
+            echo.start_greeting_suppression()
+            echo.on_response_done(loop, target_ws)
+            echo.on_audio_delta()
+            self.assertTrue(echo.on_speech_started())  # should be ignored (greeting echo)
+            echo.on_audio_done(loop, target_ws)
+            self.assertGreaterEqual(echo.cooldown_end - t, ECHO_COOLDOWN_SEC * 2 - 0.05)
+        asyncio.run(_run())
+
+    def test_response_done_awaiting_retry_is_cancelled_by_genuine_guest_speech(self):
+        """If the guest speaks for real before any retry audio arrives, a later, unrelated
+        audio delta (e.g. the AI's actual reply to the guest) must not be mistaken for the
+        greeting's retry -- greeting_in_progress must stay False.
+        """
+        echo = EchoSuppressor()
+        echo.start_greeting_suppression()
+        loop = MagicMock()
+        loop.time.return_value = 10.0
+        target_ws = MagicMock()
+        echo.on_response_done(loop, target_ws)
+        self.assertFalse(echo.on_speech_started())  # genuine guest speech, not greeting echo
+        echo.on_audio_delta()  # the AI's real reply to the guest, unrelated to any greeting
+        self.assertFalse(echo.greeting_in_progress)
+
+    def test_response_done_awaiting_retry_is_cancelled_by_barge_in(self):
+        """An explicit browser response.cancel between the failed attempt and any retry audio
+        must also cancel the pending re-arm, same as genuine guest speech.
+        """
+        echo = EchoSuppressor()
+        echo.start_greeting_suppression()
+        loop = MagicMock()
+        loop.time.return_value = 10.0
+        target_ws = MagicMock()
+        echo.on_response_done(loop, target_ws)
+        echo.on_barge_in()
+        echo.on_audio_delta()
+        self.assertFalse(echo.greeting_in_progress)
+
     # ─── swigerb/SonicAIDriveThru#59: on_audio_done()'s two flush sends were a
     # bare, unguarded `asyncio.ensure_future(target_ws.send_str(...))` — when the
     # upstream closes right after response.output_audio.done (a routine race, not
