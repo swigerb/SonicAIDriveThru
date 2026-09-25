@@ -89,7 +89,8 @@ public sealed class SearchToolTests(ConformanceFixture fixture)
         "azure/search/documents/aio/_operations/_patch.py's __anext__), then \"Session ... " +
         "detached (client close code=None)\" -- no retry request was ever sent, and no " +
         "function_call_output reached the upstream socket. app/backend must not be modified " +
-        "from this stream; see the #9 report for details.")]
+        "from this stream; see the #9 report for details.",
+        SkipWhen = nameof(BackendUnderTest.IsPython), SkipType = typeof(BackendUnderTest))]
     public Task Search_retries_with_a_minimal_select_after_the_field_name_fallback_400() => fixture.RunAsync(async () =>
     {
         var ct = TestContext.Current.CancellationToken;
@@ -128,7 +129,8 @@ public sealed class SearchToolTests(ConformanceFixture fixture)
         "succeeding (see Search_retries_with_a_minimal_select_after_the_field_name_fallback_400's " +
         "Skip reason) -- the fallback's HttpResponseError propagates unhandled and tears down " +
         "the connection before a later update_order call could ever prove the session survives. " +
-        "app/backend must not be modified from this stream; see the #9 report for details.")]
+        "app/backend must not be modified from this stream; see the #9 report for details.",
+        SkipWhen = nameof(BackendUnderTest.IsPython), SkipType = typeof(BackendUnderTest))]
     public Task Session_survives_the_search_fallback_and_a_later_update_order_call_still_works() => fixture.RunAsync(async () =>
     {
         var ct = TestContext.Current.CancellationToken;

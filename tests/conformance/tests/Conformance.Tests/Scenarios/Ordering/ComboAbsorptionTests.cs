@@ -106,7 +106,8 @@ public sealed class ComboAbsorptionTests(HappyHourJustBeforeOpenFixture fixture)
     [Fact(Skip = "app/backend/order_state.py::reset_order clears order_state/absorbed_sides/" +
                  "absorbed_drinks but not the absorbed_side_display/absorbed_drink_display " +
                  "session strings, so the next combo's display carries over the previous order's " +
-                 "absorbed component names -- #41. Not fixing Python; tracked for the C# backend.")]
+                 "absorbed component names -- #41. Not fixing Python; tracked for the C# backend.",
+        SkipWhen = nameof(BackendUnderTest.IsPython), SkipType = typeof(BackendUnderTest))]
     public Task Reset_order_clears_the_previous_orders_absorbed_component_display() => fixture.RunAsync(async () =>
     {
         var ct = TestContext.Current.CancellationToken;

@@ -190,7 +190,8 @@ public sealed class VoicePickerTests(VoicePickerConformanceFixture fixture)
     /// bugs) for the C# backend to reproduce faithfully, and #43 explicitly is NOT something the
     /// C# backend should copy. Un-skip once #43 is fixed.
     /// </summary>
-    [Fact(Skip = "Known Python bug #43 (voice picker is process-wide across concurrent guests) -- not to be reproduced in the C# backend. Un-skip once #43 is fixed.")]
+    [Fact(Skip = "Known Python bug #43 (voice picker is process-wide across concurrent guests) -- not to be reproduced in the C# backend. Un-skip once #43 is fixed.",
+        SkipWhen = nameof(BackendUnderTest.IsPython), SkipType = typeof(BackendUnderTest))]
     public Task Two_concurrent_guests_voice_choices_do_not_leak_into_each_other() => fixture.RunAsync(async () =>
     {
         var ct = TestContext.Current.CancellationToken;

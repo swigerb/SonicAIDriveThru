@@ -55,7 +55,8 @@ public sealed class SpokenTotalTests(HappyHourJustBeforeOpenFixture fixture)
 public sealed class SpokenTotalHalfCentTests(HappyHourAtOpenFixture fixture)
 {
     [Fact(Skip = "Lands exactly on a half cent; Python's float `:.2f` formatting does not " +
-                 "reproduce any single consistent rounding convention for such totals -- #46.")]
+                 "reproduce any single consistent rounding convention for such totals -- #46.",
+        SkipWhen = nameof(BackendUnderTest.IsPython), SkipType = typeof(BackendUnderTest))]
     public Task Spoken_total_text_matches_the_exact_final_total_half_cent() => fixture.RunAsync(async () =>
     {
         var ct = TestContext.Current.CancellationToken;

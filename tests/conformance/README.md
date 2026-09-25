@@ -672,6 +672,33 @@ Consequences for how this suite is written:
   no `precision: 2` (or any other precision-based money assertion) anywhere under
   `Scenarios/Ordering/`.
 
+### Python-bug scenarios skip only against Python (PR #38 review should-fix 3)
+
+Every scenario documenting a "Known Python bug" — reproducing a genuine defect in `app/backend`
+that this stream is explicitly not allowed to fix (see the fan-out rules) — is marked
+`[Fact(Skip = "...", SkipWhen = nameof(BackendUnderTest.IsPython), SkipType =
+typeof(BackendUnderTest))]` rather than an unconditional `Skip`. `Conformance.Harness.
+BackendUnderTest.IsPython` reads `CONFORMANCE_BACKEND` (default `python`) the same way
+`BackendLauncherFactory` does, so this can never drift from which backend actually got launched
+(and stays correct in external mode too — `CONFORMANCE_BACKEND_URL` only changes *how* the backend
+is reached, never whether `CONFORMANCE_BACKEND` still says which language is running there).
+
+The consequence: **a new backend under test (`CONFORMANCE_BACKEND=dotnet`) actually runs these
+scenarios instead of silently skipping them.** A conforming C# backend must not reproduce these
+Python bugs, so the scenario is expected to *pass* there — an unconditional `Skip` would have hidden
+that expectation entirely, letting a backend with the exact same bug slip through green. The 9
+scenarios marked this way as of this commit: `SpokenTotalHalfCentTests` (#46),
+`ComboAbsorptionTests.Reset_order_clears_the_previous_orders_absorbed_component_display` (#41),
+`HappyHourBoundaryTests`'s Ched 'R' Peppers case (#39), `UpdateOrderAddRemoveModifyTests`'s two
+Route 44 alias cases (#40), `SearchToolTests`'s two fallback cases (#37),
+`ToolErrorSessionSurvivesTests.Session_survives_an_unhandled_tool_exception` (#36), and
+`VoicePickerTests.Two_concurrent_guests_voice_choices_do_not_leak_into_each_other` (#43).
+
+This is deliberately **not** applied to the Windows-only Job Object tests elsewhere in the suite
+(`WindowsJobObjectTests.cs`) — those are plain `[Fact]`s that call `Assert.Skip(...)` at runtime
+when `!OperatingSystem.IsWindows()`, a platform fact about the machine the suite itself is running
+on, not about which backend is under test, and are unrelated to `BackendUnderTest`.
+
 ### Tool-error unhandled-error-count contract (PR #38 review item 2)
 
 `ConformanceFixture.RunAsync(Func<Task> body)` asserts, by default, that a scenario introduces

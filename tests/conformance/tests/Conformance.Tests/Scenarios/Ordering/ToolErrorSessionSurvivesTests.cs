@@ -83,7 +83,8 @@ public sealed class ToolErrorSessionSurvivesTests(ConformanceFixture fixture)
         "result. Empirically confirmed: running this test unskipped produces the exact predicted " +
         "traceback (KeyError: 'item_name' at tools.py:325) and no function_call_output is ever " +
         "sent upstream -- the session does NOT survive. app/backend must not be modified from " +
-        "this stream; see the #9 report for details.")]
+        "this stream; see the #9 report for details.",
+        SkipWhen = nameof(BackendUnderTest.IsPython), SkipType = typeof(BackendUnderTest))]
     public Task Session_survives_an_unhandled_tool_exception() => fixture.RunAsync(async () =>
     {
         var ct = TestContext.Current.CancellationToken;
