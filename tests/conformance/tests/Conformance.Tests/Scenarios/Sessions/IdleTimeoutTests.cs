@@ -94,9 +94,8 @@ public sealed class IdleTimeoutTests(ShortTimersConformanceFixture fixture)
     public Task A_drop_close_to_the_idle_boundary_does_not_buy_a_full_fresh_grace_period() => fixture.RunAsync(async () =>
     {
         // Named for the invariant under test (the idle clock isn't reset by a drop), not for the
-        // exact rejection reason -- see the comment above the final assertion for why that
-        // reason is "unknown" rather than the "expired" this test originally (and incorrectly)
-        // expected before it was actually run against the real backend.
+        // exact rejection reason -- see the comment above the final assertion for why either
+        // "unknown" or "expired" is an acceptable outcome here.
         var ct = TestContext.Current.CancellationToken;
         var connectionTask = fixture.Realtime.WaitForNextConnectionAsync(FrameTimeout, ct);
         var browser = await RealtimeBrowserClient.ConnectAsync(fixture.Backend!.BaseUri, cancellationToken: ct);
@@ -128,16 +127,19 @@ public sealed class IdleTimeoutTests(ShortTimersConformanceFixture fixture)
         // grace_seconds a drop-resets-the-clock implementation would have granted. Waiting past
         // that 1.0s deadline before attempting a resume proves the idle clock (anchored to
         // last_activity, not to the drop) keeps running while detached, exactly as issue #10
-        // requires ("a drop cannot extend it") -- but the *rejection reason* this observes is
-        // "unknown", not "expired": ShortTimers' idle checker sweeps every
-        // sweep_interval_seconds=0.2s and ends *any* session (attached or detached) whose
-        // deadline has passed, popping its resume digest outright, same as
-        // Idle_closed_session_cannot_be_resumed_the_credential_is_gone above. By the time a test
-        // delays long enough past detached_expires_at to reliably attempt a resume (rather than
-        // racing the exact deadline instant), that sweep has already run and already removed the
-        // entry -- "expired" only exists in the narrow race between the deadline passing and the
-        // next sweep tick, which isn't something a black-box test can reliably observe without
-        // coupling itself to the sweep's own polling cadence.
+        // requires ("a drop cannot extend it") -- but the *rejection reason* this observes can be
+        // either "unknown" or "expired" (PR #54 review): ShortTimers' idle checker sweeps every
+        // sweep_interval_seconds=0.2s and ends *any* session (attached or detached) whose deadline
+        // has passed, popping its resume digest outright, same as
+        // Idle_closed_session_cannot_be_resumed_the_credential_is_gone above -- by the time this
+        // test's fixed delay has elapsed, that sweep has *usually* already run, giving "unknown".
+        // But "expired" is the real, legitimate black-box outcome of the narrow race between the
+        // deadline passing and the next sweep tick (session_manager.py's own age-based rejection
+        // for a still-registered-but-past-deadline resume id) -- and a fixed delay cannot
+        // guarantee which side of that race a run lands on under CI/scheduler jitter, so pinning
+        // one value alone couples this test to the sweep's own polling cadence rather than to the
+        // invariant it's actually proving (the idle clock keeps running while detached). Accept
+        // either.
         var elapsedSinceDrop = TimeSpan.FromMilliseconds(1350 - 600);
         await Task.Delay(elapsedSinceDrop, ct);
 
@@ -151,6 +153,8 @@ public sealed class IdleTimeoutTests(ShortTimersConformanceFixture fixture)
             f => f.Type == "extension.resume_rejected", FrameTimeout, ct);
         Assert.True(rejected is not null,
             "Expected extension.resume_rejected once the idle clock (not the grace hold) expired.");
-        Assert.Equal("unknown", rejected!.Json.GetProperty("reason").GetString());
+        var reason = rejected!.Json.GetProperty("reason").GetString();
+        Assert.True(reason is "unknown" or "expired",
+            $"Expected the idle-expired resume id to be rejected as \"unknown\" or \"expired\", got \"{reason}\".");
     });
 }
