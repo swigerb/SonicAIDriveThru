@@ -118,26 +118,47 @@ public sealed class RateLimitRecoveryTests(ShortTimersConformanceFixture fixture
         await using var browser = await RealtimeBrowserClient.ConnectAsync(fixture.Backend!.BaseUri, cancellationToken: ct);
         var connection = await ConnectAndGetPastGreetingAsync(connectionTask, browser, ct);
 
-        // First response.create fails and is silently retried once; the retry itself succeeds
-        // (nothing queued for it, so RealtimeScript's AutoRespond default answers it), ending the
-        // ladder quietly. Only one scripted failure is needed here -- the point of this test is
-        // the idle clock, not the ladder depth.
+        // PR #54 review: the previous version of this test only asserted the close arrived
+        // *within 6 seconds*, which cannot distinguish "the idle clock fired on schedule from the
+        // response.create" from "a retry silently touched the idle clock, delaying it" -- both
+        // easily land inside a 6s window. Two scripted failures push both of rate_limit.py's
+        // retries out (FIRST_RETRY_BOUNDS's ~0.2s, then SECOND_RETRY_BOUNDS's ~0.4s after that,
+        // i.e. ~0.6s total), giving a wide, robust gap between the two hypotheses: if retries are
+        // correctly NOT guest activity, idle_timeout=1s from the response.create below plus at
+        // most one 0.2s sweep pass closes by ~1.2s; if a retry wrongly touched the idle clock
+        // (rtmt.py's RateLimitRecovery is constructed with target_ws.send_str directly as
+        // _send_upstream, bypassing from_client_to_server's touch_activity entirely -- see class
+        // doc comment), last activity would reset to ~0.6s and the close would instead land no
+        // earlier than ~1.6s. A stopwatch started at the same response.create send and stopped
+        // when the close is observed measures which actually happened.
+        connection.Script.Enqueue(NoHintRateLimited());
         connection.Script.Enqueue(NoHintRateLimited());
 
         // This response.create is the *last real client activity* the idle clock will ever see --
         // sending it touches last_activity (rtmt.py: response.create is not an audio-append
         // marker, so from_client_to_server's touch_activity(session_id) call fires for it just
         // like any other non-audio client frame).
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
         await browser.SendResponseCreateAsync(ct);
 
-        // If the ladder's own retry (sent directly to the upstream socket, entirely bypassing
-        // from_client_to_server) counted as guest activity, the idle timer would restart around
-        // t=0.2s and this close would arrive correspondingly late. ShortTimers' idle_timeout=1s
-        // plus up to one 0.2s sweep pass, from the response.create above -- not from the 0.2s
-        // retry -- is the bound actually being asserted here.
+        // Confirm both retries actually ran (attempt:1 notification only fires on the *second*
+        // failure) before measuring the close -- otherwise a harness regression that silently
+        // drops a scripted failure could make this pass for the wrong reason (fewer retries than
+        // intended, less activity-touching opportunity for the mutation to expose).
+        var attempt1Notification = await browser.ReceivedFrames.WaitForAsync(
+            f => f.Type == "extension.rate_limited" && f.Json.GetProperty("attempt").GetInt32() == 1,
+            FrameTimeout, ct);
+        Assert.True(attempt1Notification is not null,
+            "Expected extension.rate_limited{attempt:1} after the second scripted failure.");
+
         await browser.WaitForCloseAsync(TimeSpan.FromSeconds(6), ct);
+        stopwatch.Stop();
         Assert.Equal((System.Net.WebSockets.WebSocketCloseStatus)4000, browser.CloseStatus);
         Assert.Equal("idle_timeout", browser.CloseStatusDescription);
+        Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(1.4),
+            $"Idle close took {stopwatch.Elapsed.TotalSeconds:F2}s after the response.create -- expected " +
+            "~1.0-1.2s (idle_timeout plus at most one sweep pass). Anything approaching ~1.6s+ would mean " +
+            "a retry reset the idle clock instead of being correctly ignored by it.");
     });
 
     [Fact]
