@@ -3,6 +3,10 @@ name: Conformance Suite
 "on":
   pull_request:
     branches: [dev, main]
+  push:
+    # Issue #24: catch anything that reached dev without going through this workflow as a
+    # PR check (e.g. an administrator merge, or a merge commit built from a stale base).
+    branches: [dev]
   workflow_dispatch: {}
 
 concurrency:
@@ -28,10 +32,10 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -47,7 +51,7 @@ jobs:
           pip install ruff==0.16.1 pytest==9.1.1 pytest-asyncio==1.4.0
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -69,7 +73,7 @@ jobs:
 
       - name: Upload pytest results on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: python-tests-results
           path: |
@@ -84,10 +88,10 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -109,7 +113,7 @@ jobs:
 
       - name: Upload frontend test output on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: frontend-tests-results
           path: |
@@ -136,10 +140,10 @@ jobs:
         backend: [python]
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -155,7 +159,7 @@ jobs:
           .venv/bin/python -m pip install -r app/backend/requirements.txt
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -168,17 +172,26 @@ jobs:
           npm run build
 
       - name: Set up .NET ${{ env.DOTNET_VERSION }}
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
       - name: Cache NuGet packages
-        uses: actions/cache@v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.nuget/packages
-          key: ${{ runner.os }}-nuget-${{ hashFiles('tests/conformance/Directory.Packages.props', 'tests/conformance/**/*.csproj') }}
+          key: ${{ runner.os }}-nuget-${{ hashFiles('tests/conformance/Directory.Packages.props', 'tests/conformance/**/*.csproj', 'tests/conformance/**/packages.lock.json') }}
           restore-keys: |
             ${{ runner.os }}-nuget-
+
+      - name: dotnet restore tests/conformance (locked mode)
+        working-directory: tests/conformance
+        # Issue #24: every project restores RestorePackagesWithLockFile=true (Directory.Build.props),
+        # so packages.lock.json fully pins the resolved graph including transitives. --locked-mode
+        # makes CI fail loudly instead of silently re-resolving if a committed lock file and
+        # Directory.Packages.props/*.csproj ever disagree (e.g. a version bump landed in one but
+        # not the other, or a feed started serving a different transitive graph).
+        run: dotnet restore Conformance.slnx --locked-mode
 
       - name: dotnet test tests/conformance
         working-directory: tests/conformance
@@ -188,6 +201,7 @@ jobs:
         run: |
           set -o pipefail
           dotnet test Conformance.slnx \
+            --no-restore \
             --logger "trx;LogFileName=conformance.trx" \
             --logger "console;verbosity=detailed" \
             --results-directory TestResults \
@@ -201,10 +215,39 @@ jobs:
 
       - name: Upload conformance test results on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: conformance-results-${{ matrix.backend }}
           path: |
             tests/conformance/TestResults
             tests/conformance/conformance-output.log
           retention-days: 7
+
+  # Issue #24: single aggregate required-status-check. Today branch protection still pins the
+  # three job names above directly (python-tests / frontend-tests / conformance's matrix name),
+  # so this job intentionally changes nothing about what merges are blocked on right now -- it
+  # only gives the coordinator one stable name to switch branch protection to later. Once that
+  # switch happens, growing the "conformance" matrix (e.g. adding backend: dotnet in S2) or adding
+  # a new job to `needs:` below never requires another branch-protection edit.
+  #
+  # `if: always()` is required so this job still runs (and can fail) even when an upstream job
+  # fails or is cancelled -- by default a failed dependency would skip this job instead, and a
+  # required check that never ran is not the same as a required check that explicitly failed.
+  conformance-gate:
+    name: conformance-gate
+    needs: [python-tests, frontend-tests, conformance]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check required jobs succeeded
+        run: |
+          if [ "${{ contains(needs.*.result, 'failure') }}" = "true" ] || \
+             [ "${{ contains(needs.*.result, 'cancelled') }}" = "true" ]; then
+            echo "One or more required jobs failed or was cancelled:"
+            echo "  python-tests:    ${{ needs.python-tests.result }}"
+            echo "  frontend-tests:  ${{ needs.frontend-tests.result }}"
+            echo "  conformance:     ${{ needs.conformance.result }}"
+            exit 1
+          fi
+          echo "All required jobs passed."
