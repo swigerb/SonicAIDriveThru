@@ -1,3 +1,4 @@
+using System.Linq;
 using System.Text.Json.Nodes;
 using Conformance.Fakes;
 using Conformance.Harness;
@@ -42,13 +43,15 @@ public sealed class AllowListBypassHardeningTests(ConformanceFixture fixture)
     private static readonly TimeSpan FrameTimeout = TimeSpan.FromSeconds(30);
 
     [Fact]
-    public Task Duplicate_top_level_type_key_is_resolved_by_last_value_not_first() => fixture.RunAsync(async () =>
+    public Task Duplicate_top_level_type_key_is_resolved_by_last_value_or_the_whole_frame_is_dropped() => fixture.RunAsync(async () =>
     {
         var ct = TestContext.Current.CancellationToken;
         var connectionTask = fixture.Realtime.WaitForNextConnectionAsync(FrameTimeout, ct);
         await using var browser = await RealtimeBrowserClient.ConnectAsync(fixture.Backend!.BaseUri, cancellationToken: ct);
         var connection = await connectionTask;
         Assert.True(connection is not null, "No upstream connection was accepted for the browser socket.");
+        var bootstrap = await connection!.ReceivedFrames.WaitForAsync(f => f.Sequence == 0, FrameTimeout, ct);
+        Assert.True(bootstrap is not null, "Bootstrap session.update never arrived.");
 
         // First "type" substring names a passthrough type with no "audio" key at all (so the old
         // bug, if still present, would forward these exact bytes upstream as a bare/malformed
@@ -58,12 +61,29 @@ public sealed class AllowListBypassHardeningTests(ConformanceFixture fixture)
             """{"type":"input_audio_buffer.append","type":"session.update","session":{"prompt":{"id":"forged_via_duplicate_key"}}}""",
             ct);
 
-        var sessionUpdate = await connection!.ReceivedFrames.WaitForAsync(
-            f => f.Sequence > 0 && f.Type == "session.update", FrameTimeout, ct);
-        Assert.True(sessionUpdate is not null,
-            "Expected the frame to reach upstream as session.update (the real, last-wins type), not as a bare audio-append.");
-        Assert.False(sessionUpdate!.Json.GetProperty("session").TryGetProperty("prompt", out _),
-            "The forged 'prompt' (a server-owned session key) must be stripped even though the duplicate-key trick was used.");
+        // C# note (PR #49 review round 5): a compliant backend may EITHER (a) resolve the
+        // duplicate top-level key per JSON "last value wins" semantics -- same as Python's
+        // json.loads -- and forward session.update with the forged 'prompt' stripped, OR (b)
+        // treat a duplicate top-level key as malformed and drop the whole frame outright (some
+        // strict JSON parsers, e.g. System.Text.Json in certain configurations, reject duplicate
+        // keys rather than silently keeping the last one). Both are safe outcomes for this
+        // contract: what must NEVER happen is forwarding the frame as a bare/malformed
+        // input_audio_buffer.append (the old bug, keyed on the FIRST "type") or letting the
+        // forged 'prompt' survive. Liveness is proven with a distinct frame type
+        // (input_audio_buffer.clear) so it can't be confused with the probe itself.
+        await browser.SendInputAudioClearAsync(ct);
+        var liveness = await connection.ReceivedFrames.WaitForAsync(
+            f => f.Sequence > bootstrap!.Sequence && f.Type == "input_audio_buffer.clear", FrameTimeout, ct);
+        Assert.True(liveness is not null,
+            "The socket must stay open and keep processing frames after the duplicate-key frame, regardless of whether that frame was forwarded or dropped.");
+
+        var sessionUpdate = connection.ReceivedFrames.Snapshot()
+            .FirstOrDefault(f => f.Sequence > bootstrap!.Sequence && f.Sequence < liveness!.Sequence && f.Type == "session.update");
+        if (sessionUpdate is not null)
+        {
+            Assert.False(sessionUpdate.Json.GetProperty("session").TryGetProperty("prompt", out _),
+                "If the duplicate-key frame was forwarded (last-value-wins), the forged 'prompt' (a server-owned session key) must still be stripped.");
+        }
 
         foreach (var frame in connection.ReceivedFrames.Snapshot())
         {
