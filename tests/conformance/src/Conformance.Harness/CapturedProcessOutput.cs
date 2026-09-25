@@ -14,6 +14,13 @@ public sealed class CapturedProcessOutput
     private readonly ConcurrentQueue<string> _lines = new();
     private int _count;
 
+    // #28 N13: this scan state and running total are updated incrementally, one line at a time,
+    // by Append (see CountUnhandledErrors's doc comment for why -- the dump buffer above is
+    // bounded and wraps, so re-deriving the count from it on every call is not an option).
+    private readonly Lock _scanGate = new();
+    private ErrorScanState _scanState = ErrorScanState.Idle;
+    private int _unhandledErrorCount;
+
     public void Attach(Process process)
     {
         process.OutputDataReceived += (_, e) => Append("OUT", e.Data);
@@ -32,6 +39,8 @@ public sealed class CapturedProcessOutput
         {
             _lines.TryDequeue(out _);
         }
+
+        ScanLine(stream, line);
     }
 
     public string Dump() => string.Join(Environment.NewLine, _lines);
@@ -50,39 +59,59 @@ public sealed class CapturedProcessOutput
     /// `logging.basicConfig`'s default `"%(levelname)s:%(name)s:%(message)s"` formatter) or a bare
     /// `ERROR:`-level log line with no attached traceback. An `ERROR:` line immediately followed by
     /// its own `Traceback (most recent call last):` block (the common case for
-    /// `logger.exception(...)`) counts as *one* incident, not two — the state machine below tracks
+    /// `logger.exception(...)`) counts as *one* incident, not two — <see cref="ScanLine"/> tracks
     /// that pairing explicitly instead of naively summing "lines starting with ERROR:" plus "lines
     /// starting with Traceback".
+    ///
+    /// #28 N13: this used to re-scan the whole <c>_lines</c> dump buffer from scratch on every
+    /// call. That buffer is a bounded ring (<see cref="MaxLines"/>) that silently evicts its
+    /// oldest lines once a long-running suite process crosses the cap — so a re-scan would forget
+    /// about incidents whose lines had already scrolled out, making the return value able to go
+    /// *down* between calls. <see cref="ConformanceFixture.RunAsync(Func{Task}, int)"/> depends on
+    /// this being monotonically non-decreasing (it asserts <c>actual &lt;= baseline + allowed</c>
+    /// across the scenario body) — a wrap partway through a suite run could otherwise make that
+    /// delta go negative and silently hide a real new backend error. The count is now accumulated
+    /// incrementally as each stderr line arrives (in <see cref="ScanLine"/>), independently of
+    /// whether its line has since been evicted from the dump buffer.
     /// </summary>
     public int CountUnhandledErrors()
     {
-        var count = 0;
-        var state = ErrorScanState.Idle;
-
-        foreach (var line in _lines)
+        lock (_scanGate)
         {
-            if (!TryGetStderrContent(line, out var content))
+            return _unhandledErrorCount;
+        }
+    }
+
+    /// <summary>Feeds one freshly-captured line into the incident-counting state machine (moved
+    /// here, off the dump buffer, per <see cref="CountUnhandledErrors"/>'s doc comment). Locked
+    /// because <see cref="Attach"/> wires stdout and stderr to independent process callbacks that
+    /// can run on different threads concurrently.</summary>
+    private void ScanLine(string stream, string content)
+    {
+        lock (_scanGate)
+        {
+            if (stream != "ERR")
             {
-                state = ErrorScanState.Idle;
-                continue;
+                _scanState = ErrorScanState.Idle;
+                return;
             }
 
             var isIndented = content.Length > 0 && char.IsWhiteSpace(content[0]);
             var isTracebackHeader = content is "Traceback (most recent call last):";
             var isErrorHeader = content.StartsWith("ERROR:", StringComparison.Ordinal);
 
-            switch (state)
+            switch (_scanState)
             {
                 case ErrorScanState.Idle:
                     if (isErrorHeader)
                     {
-                        count++;
-                        state = ErrorScanState.AfterErrorHeader;
+                        _unhandledErrorCount++;
+                        _scanState = ErrorScanState.AfterErrorHeader;
                     }
                     else if (isTracebackHeader)
                     {
-                        count++;
-                        state = ErrorScanState.InTracebackBody;
+                        _unhandledErrorCount++;
+                        _scanState = ErrorScanState.InTracebackBody;
                     }
                     break;
 
@@ -91,17 +120,17 @@ public sealed class CapturedProcessOutput
                     {
                         // Same incident: the ERROR: line was logger.exception(...)'s message, this
                         // is its attached traceback -- don't count it again.
-                        state = ErrorScanState.InTracebackBody;
+                        _scanState = ErrorScanState.InTracebackBody;
                     }
                     else if (isErrorHeader)
                     {
-                        count++;
-                        state = ErrorScanState.AfterErrorHeader;
+                        _unhandledErrorCount++;
+                        _scanState = ErrorScanState.AfterErrorHeader;
                     }
                     else
                     {
                         // The ERROR: line had no attached traceback -- already counted, done.
-                        state = ErrorScanState.Idle;
+                        _scanState = ErrorScanState.Idle;
                     }
                     break;
 
@@ -113,25 +142,23 @@ public sealed class CapturedProcessOutput
                     }
                     if (isErrorHeader)
                     {
-                        count++;
-                        state = ErrorScanState.AfterErrorHeader;
+                        _unhandledErrorCount++;
+                        _scanState = ErrorScanState.AfterErrorHeader;
                     }
                     else if (isTracebackHeader)
                     {
-                        count++;
-                        state = ErrorScanState.InTracebackBody;
+                        _unhandledErrorCount++;
+                        _scanState = ErrorScanState.InTracebackBody;
                     }
                     else
                     {
                         // The un-indented "ExceptionType: message" summary line that always
                         // terminates a Python traceback -- still this incident, now finished.
-                        state = ErrorScanState.Idle;
+                        _scanState = ErrorScanState.Idle;
                     }
                     break;
             }
         }
-
-        return count;
     }
 
     /// <summary>
@@ -143,7 +170,12 @@ public sealed class CapturedProcessOutput
     /// is skipped entirely instead of counted. Added for issue #10/#26's Browser scenarios -- see
     /// <see cref="Conformance.Tests.Scenarios.Browser.BrowserConformanceFixture"/>'s own doc
     /// comment for the one signature it actually filters and why. This overload never changes what
-    /// <see cref="CountUnhandledErrors()"/> itself returns for any existing caller.
+    /// <see cref="CountUnhandledErrors()"/> itself returns for any existing caller, and re-scans
+    /// <see cref="_lines"/> directly rather than sharing #28 N13's incremental <see cref="ScanLine"/>
+    /// state -- unlike that state, this overload's result is allowed to miss incidents that have
+    /// already scrolled out of the bounded ring buffer, because it's only ever used for a single
+    /// end-of-run assertion, not the monotonic-delta contract <see cref="CountUnhandledErrors()"/>
+    /// has to uphold.
     /// </summary>
     public int CountUnhandledErrors(Func<IReadOnlyList<string>, bool> isBenignIncident)
     {

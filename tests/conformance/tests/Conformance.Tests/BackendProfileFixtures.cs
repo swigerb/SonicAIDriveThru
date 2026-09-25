@@ -42,7 +42,9 @@ public sealed class RateLimitTimersConformanceCollection : ICollectionFixture<Ra
 /// <summary>
 /// See <see cref="BackendProfiles.ResumeTimers"/>'s doc comment: an 8-second idle/grace budget
 /// (instead of <see cref="ShortTimersConformanceFixture"/>'s 1-second one) for the multi-round-trip
-/// resume-handshake scenarios that aren't testing idle behaviour themselves.
+/// resume-handshake scenarios that aren't testing idle behaviour themselves. See that profile's
+/// doc comment for why this stays a separate collection/process from
+/// <see cref="ResumeMarginConformanceFixture"/> rather than sharing one.
 /// </summary>
 public sealed class ResumeTimersConformanceFixture : ConformanceFixture
 {
@@ -53,6 +55,22 @@ public sealed class ResumeTimersConformanceFixture : ConformanceFixture
 public sealed class ResumeTimersConformanceCollection : ICollectionFixture<ResumeTimersConformanceFixture>
 {
     public const string Name = "ConformanceResumeTimers";
+}
+
+/// <summary>
+/// PR #52 CI follow-up: dedicated collection/process for <see cref="BackendProfiles.ResumeMargin"/>
+/// — see that profile's doc comment for why the resume scenarios need their own idle/grace timing
+/// separate from <see cref="ShortTimersConformanceFixture"/>'s.
+/// </summary>
+public sealed class ResumeMarginConformanceFixture : ConformanceFixture
+{
+    protected override BackendProfile Profile => BackendProfiles.ResumeMargin;
+}
+
+[CollectionDefinition(Name)]
+public sealed class ResumeMarginConformanceCollection : ICollectionFixture<ResumeMarginConformanceFixture>
+{
+    public const string Name = "ConformanceResumeMargin";
 }
 
 /// <summary>

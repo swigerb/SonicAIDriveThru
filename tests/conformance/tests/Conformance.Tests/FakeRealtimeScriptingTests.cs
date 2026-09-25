@@ -47,6 +47,9 @@ public sealed class FakeRealtimeScriptingTests
         var error = response.GetProperty("status_details").GetProperty("error");
         Assert.Equal("rate_limit_exceeded", error.GetProperty("code").GetString());
         Assert.Contains("try again in 2s", error.GetProperty("message").GetString(), StringComparison.Ordinal);
+        // #28 N12: status_details.error.type was missing entirely -- GA documents it as one of
+        // exactly two properties on the error object (the other being `code`, asserted above).
+        Assert.Equal("invalid_request_error", error.GetProperty("type").GetString());
 
         await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
     }
@@ -249,6 +252,99 @@ public sealed class FakeRealtimeScriptingTests
         var secondDone = await WebSocketJson.ReceiveJsonAsync(socket, TestContext.Current.CancellationToken);
         Assert.NotNull(secondDone);
         Assert.Equal("sonic_mt_first0001", secondDone!.Value.GetProperty("previous_item_id").GetString());
+
+        await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
+    }
+
+    /// <summary>
+    /// Self-test for #28 N18: before this fix, `conversation.item.retrieve` matched
+    /// <see cref="GaSessionValidator.GaClientEventTypes"/>'s allow-list (so it never hit the
+    /// "unrecognised type" rejection) but had no case in `HandleFrameAsync`'s switch, so the fake
+    /// silently swallowed it -- leaving the backend's `conversation.item.retrieved` scrub
+    /// (rtmt.py) provable only by Python unit test, never black-box. Creates a real item first so
+    /// retrieval has real, previously-observed content to return, then asserts the retrieved item
+    /// echoes that exact content back.
+    /// </summary>
+    [Fact]
+    public async Task Conversation_item_retrieve_returns_the_previously_created_item()
+    {
+        await using var fake = new FakeRealtimeUpstreamServer();
+        await fake.StartAsync(TestContext.Current.CancellationToken);
+
+        using var socket = new ClientWebSocket();
+        var wsUri = new Uri($"ws://{fake.BaseUri.Host}:{fake.BaseUri.Port}/openai/v1/realtime?model=gpt-realtime-test");
+        await socket.ConnectAsync(wsUri, TestContext.Current.CancellationToken);
+        Assert.NotNull(await WebSocketJson.ReceiveJsonAsync(socket, TestContext.Current.CancellationToken)); // session.created
+
+        await WebSocketJson.SendAsync(socket, new JsonObject
+        {
+            ["type"] = "conversation.item.create",
+            ["item"] = new JsonObject
+            {
+                ["id"] = "sonic_mt_retrieve0001",
+                ["type"] = "message",
+                ["role"] = "user",
+                ["content"] = new JsonArray { new JsonObject { ["type"] = "input_text", ["text"] = "large fries" } },
+            },
+        }, TestContext.Current.CancellationToken);
+        Assert.NotNull(await WebSocketJson.ReceiveJsonAsync(socket, TestContext.Current.CancellationToken)); // .added
+        Assert.NotNull(await WebSocketJson.ReceiveJsonAsync(socket, TestContext.Current.CancellationToken)); // .done
+
+        await WebSocketJson.SendAsync(socket, new JsonObject
+        {
+            ["type"] = "conversation.item.retrieve",
+            ["event_id"] = "evt_retrieve_1",
+            ["item_id"] = "sonic_mt_retrieve0001",
+        }, TestContext.Current.CancellationToken);
+
+        // Bounded (not TestContext.Current.CancellationToken) so a regression that makes the fake
+        // silently swallow conversation.item.retrieve again fails fast with a clear timeout
+        // instead of hanging the run indefinitely.
+        using var retrieveTimeout = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        retrieveTimeout.CancelAfter(FrameTimeout);
+        var retrieved = await WebSocketJson.ReceiveJsonAsync(socket, retrieveTimeout.Token);
+        Assert.NotNull(retrieved);
+        Assert.Equal("conversation.item.retrieved", retrieved!.Value.GetProperty("type").GetString());
+        Assert.Equal("sonic_mt_retrieve0001", retrieved.Value.GetProperty("item_id").GetString());
+        var item = retrieved.Value.GetProperty("item");
+        Assert.Equal("sonic_mt_retrieve0001", item.GetProperty("id").GetString());
+        Assert.Equal("user", item.GetProperty("role").GetString());
+        Assert.Equal("large fries", item.GetProperty("content")[0].GetProperty("text").GetString());
+
+        await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
+    }
+
+    /// <summary>
+    /// Self-test for #28 N18's other half: GA responds with an error, not a silent no-op or a
+    /// crash, when the requested item id was never seen on this connection.
+    /// </summary>
+    [Fact]
+    public async Task Conversation_item_retrieve_for_an_unknown_id_returns_an_error()
+    {
+        await using var fake = new FakeRealtimeUpstreamServer();
+        await fake.StartAsync(TestContext.Current.CancellationToken);
+
+        using var socket = new ClientWebSocket();
+        var wsUri = new Uri($"ws://{fake.BaseUri.Host}:{fake.BaseUri.Port}/openai/v1/realtime?model=gpt-realtime-test");
+        await socket.ConnectAsync(wsUri, TestContext.Current.CancellationToken);
+        Assert.NotNull(await WebSocketJson.ReceiveJsonAsync(socket, TestContext.Current.CancellationToken)); // session.created
+
+        await WebSocketJson.SendAsync(socket, new JsonObject
+        {
+            ["type"] = "conversation.item.retrieve",
+            ["event_id"] = "evt_retrieve_2",
+            ["item_id"] = "sonic_mt_never_existed",
+        }, TestContext.Current.CancellationToken);
+
+        // See the sibling test's comment: bounded so a swallowed conversation.item.retrieve
+        // fails fast instead of hanging.
+        using var errorTimeout = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        errorTimeout.CancelAfter(FrameTimeout);
+        var error = await WebSocketJson.ReceiveJsonAsync(socket, errorTimeout.Token);
+        Assert.NotNull(error);
+        Assert.Equal("error", error!.Value.GetProperty("type").GetString());
+        Assert.Equal("item_not_found", error.Value.GetProperty("error").GetProperty("code").GetString());
+        Assert.Equal("evt_retrieve_2", error.Value.GetProperty("error").GetProperty("event_id").GetString());
 
         await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
     }

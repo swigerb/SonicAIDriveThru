@@ -123,6 +123,19 @@ public static class BackendProfiles
     /// per README's config table) -- the 0.5s value left ResumeHandshakeTests'
     /// WellUnderFirstFrameTimeout bound (400ms) only ~100ms of margin under the same load, which
     /// is exactly the kind of thin-margin flake this profile already exists to eliminate.
+    ///
+    /// PR #52 review ("reconcile ResumeTimers with ResumeMargin"): <see cref="ResumeMargin"/>
+    /// below addresses the same root cause (session-setup scheduling slowness racing a short
+    /// idle/grace budget) for a different, non-overlapping set of scenarios
+    /// (<c>ResumeRehydrationClientVisibilityTests</c>, <c>WholeSessionLeakTests</c>' resume case)
+    /// that don't exercise first-frame-timeout or rate-limit-retry timing at all. This profile
+    /// is kept separate rather than folded into <see cref="ResumeMargin"/> because its consumers
+    /// *do* need FIRST_FRAME_TIMEOUT and the two RATE_LIMIT_RETRY_DELAY vars held short (they're
+    /// asserted on directly) -- adopting ResumeMargin's narrower env-var set (idle/grace/nudge/
+    /// sweep only, everything else at production defaults) here would silently put those
+    /// assertions back on multi-second production timers. Conversely, widening ResumeMargin to
+    /// this profile's full var set would give its own consumers timers they never asked for and
+    /// don't need, without fixing anything for them.
     /// </summary>
     public static BackendProfile ResumeTimers { get; } = new("ResumeTimers", new Dictionary<string, string>
     {
@@ -134,6 +147,41 @@ public static class BackendProfiles
         ["CONFORMANCE_GREETING_TIMEOUT_SECONDS"] = "1",
         ["CONFORMANCE_RATE_LIMIT_RETRY_DELAY_SECONDS"] = "0.2",
         ["CONFORMANCE_RATE_LIMIT_SECOND_RETRY_DELAY_SECONDS"] = "0.4",
+        ["CONFORMANCE_SWEEP_INTERVAL_SECONDS"] = "0.2",
+    });
+
+    /// <summary>
+    /// PR #52 CI follow-up (swigerb/SonicAIDriveThru#28 N10 aftermath): <see cref="ShortTimers"/>'s
+    /// equal 1s idle timeout and 1s grace both being genuinely tight enough to encounter under
+    /// realistic wall-clock work is exactly the point for the scenarios that use it today (the
+    /// idle-close and greeting-timeout tests *want* a ~1s window they can wait out). But
+    /// <c>session_manager.py</c> computes a detached session's expiry as
+    /// <c>min(detached_at + grace_seconds, last_activity + idle_timeout_seconds)</c> — the second
+    /// term only leaves real headroom if whatever the scenario does *before* detaching (here:
+    /// establishing the session, and for the whole-session-leak scenario also a voice change and a
+    /// full tool round trip) reliably finishes in well under a second. On a loaded CI runner it
+    /// doesn't: CI run 36085091969 logged "holding order for 0s" on detach, meaning
+    /// <c>last_activity + 1s</c> had already elapsed (or nearly had) by the time the *first*
+    /// connection's own pre-detach setup finished — so the resume that follows races an
+    /// already-expired (or about-to-expire) grace window purely from ordinary scheduling
+    /// slowness, not from anything the scenario is actually testing. This profile keeps
+    /// <see cref="ShortTimers"/>'s ~1s nudge timer (the resume scenarios' own causal wait depends
+    /// on that staying fast) but gives idle timeout and grace real margin above what session
+    /// setup should ever take, even under load — a profile with headroom, not a sleep, per the
+    /// investigation's own ask. Used by <c>ResumeRehydrationClientVisibilityTests</c> and
+    /// <c>WholeSessionLeakTests</c>' resume scenario, both via their own dedicated collection so
+    /// this doesn't touch <see cref="ShortTimers"/>'s existing ~1s guarantees for its other
+    /// scenarios (the idle-close and greeting-timeout tests).
+    ///
+    /// See <see cref="ResumeTimers"/>'s own doc comment for why that (older, #10/#26) profile
+    /// stays separate rather than being unified with this one.
+    /// </summary>
+    public static BackendProfile ResumeMargin { get; } = new("ResumeMargin", new Dictionary<string, string>
+    {
+        ["CONFORMANCE_TEST_HOOKS"] = "1",
+        ["CONFORMANCE_IDLE_TIMEOUT_SECONDS"] = "5",
+        ["CONFORMANCE_GRACE_SECONDS"] = "5",
+        ["CONFORMANCE_NUDGE_AFTER_SECONDS"] = "1",
         ["CONFORMANCE_SWEEP_INTERVAL_SECONDS"] = "0.2",
     });
 

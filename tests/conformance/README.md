@@ -8,6 +8,36 @@ HTTP and WebSocket; never imports backend source.
 > This file documents the GA realtime protocol validation fidelity work (PR #22 review item 9)
 > and the neutral `BackendContract` (PR #22 review item 13).
 
+## Restoring packages (locked mode) — issue #24
+
+Every project here restores with `RestorePackagesWithLockFile=true` (set repo-wide in
+`Directory.Build.props`), so each project's committed `packages.lock.json` fully pins the
+resolved package graph, including transitive dependencies. CI restores with
+`dotnet restore Conformance.slnx --locked-mode`, which fails loudly instead of silently
+re-resolving if a committed lock file is missing or doesn't match `Directory.Packages.props`/the
+`.csproj` files — this is what makes the NuGet cache key
+(`hashFiles('tests/conformance/Directory.Packages.props', 'tests/conformance/**/*.csproj',
+'tests/conformance/**/packages.lock.json')` in `conformance.yml`) trustworthy.
+
+**Regenerating a lock file** after changing a package reference or `Directory.Packages.props`:
+
+```powershell
+dotnet restore Conformance.slnx --force-evaluate
+```
+
+`--force-evaluate` re-resolves the full dependency graph and rewrites every project's
+`packages.lock.json` in place, even though the lock files already exist — plain `dotnet restore`
+alone will *not* update a lock file it can already satisfy, and deleting the lock files first is
+unnecessary and just means restore has to resolve at CI/local-locked-mode time too. Commit the
+updated `packages.lock.json` file(s) alongside the dependency change.
+
+**When you need this:** if `dotnet restore --locked-mode` (or CI) fails with
+**NU1004: The packages lock file is not present. Run "dotnet restore" to generate a new lock
+file.**, or with a restore error naming a mismatch between the lock file and the resolved graph
+(e.g. after bumping a version in `Directory.Packages.props` without regenerating), run the
+`--force-evaluate` command above, verify the suite still restores cleanly with `--locked-mode`,
+and commit the regenerated lock file(s).
+
 ## Choosing a backend: `CONFORMANCE_BACKEND` / `CONFORMANCE_BACKEND_URL`
 
 `BackendLauncherFactory` (`src/Conformance.Harness/BackendLauncherFactory.cs`) picks the backend
@@ -37,6 +67,15 @@ under test:
   `AZURE_OPENAI_REALTIME_DEPLOYMENT` its operator gave it, which the harness cannot know or
   change, so running (say) the "reasoning is never sent for 1.5" assertions against it would pass
   or fail for the wrong reason instead of skipping.
+- **#28 N24:** `CONFORMANCE_BACKEND_URL` only changes *how* the backend is reached — it never
+  implies *which* backend is running there. Pointing `CONFORMANCE_BACKEND_URL` at an
+  already-running C# backend instance **also** requires setting `CONFORMANCE_BACKEND=dotnet`
+  alongside it; without that, the suite still assumes Python (the default), which means the wrong
+  money tolerance (`0.000001m` instead of the exact `0m` a `decimal`-based .NET backend must meet —
+  see "Exact-decimal money contract" below) and the wrong set of "Known Python bug" scenarios being
+  skipped instead of run (see "Python-bug scenarios skip only against Python" below). Both `env`
+  vars must be set together; there is no auto-detection from the URL or from a live probe of the
+  backend.
 - `CONFORMANCE_BACKEND=python` (the default) — launch `app/backend` via `.venv`.
 - `CONFORMANCE_BACKEND=dotnet` — the S2 .NET backend placeholder (issue #7; the backend doesn't
   exist yet). **This FAILS the suite by default** (PR #22 review item 15) — CI must never silently
@@ -671,6 +710,20 @@ Consequences for how this suite is written:
   rule is about presentation text, never about how wire/golden values are compared.) There must be
   no `precision: 2` (or any other precision-based money assertion) anywhere under
   `Scenarios/Ordering/`.
+
+### Tool-argument price trust (#28 N23)
+
+`SpokenTotalTests`'s two golden spoken-total cases for "Cherry Limeade medium" use `2.99`/`3.79`
+as the unit price, while `golden-order-pricing.json`'s menu prices that size at `2.89`. This is
+deliberate, not a stale fixture: it is this suite's explicit contract rule that **the backend
+trusts whatever unit price the `update_order` tool call's own argument carries and never
+re-prices, re-validates, or cross-checks it against its own menu lookup.** A scenario asserting a
+spoken total is therefore free to pick any unit price for its `update_order` fixture — including
+one that deliberately does not match the menu — specifically to prove the total is derived from
+the tool-call argument, not silently recomputed server-side from a menu re-lookup a real customer
+order would never trigger. Do not "fix" a scenario's price to match the menu; if a genuinely
+menu-matching golden case is later wanted for its own reasons, add a new case rather than
+resolving this apparent mismatch in the existing one.
 
 ### Python-bug scenarios skip only against Python (PR #38 review should-fix 3)
 

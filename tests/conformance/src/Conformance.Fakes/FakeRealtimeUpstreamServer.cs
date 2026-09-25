@@ -552,7 +552,7 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
 
         try
         {
-            await connection.SendAsync(BuildSessionCreated(), ct).ConfigureAwait(false);
+            await connection.SendAsync(BuildSessionCreated(deployment), ct).ConfigureAwait(false);
 
             while (socket.State == WebSocketState.Open)
             {
@@ -591,6 +591,18 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
             connection.TeardownCancellation.Cancel();
             await AwaitOutstandingHandlersAsync().ConfigureAwait(false);
             _connections.NotifyClosed(connection);
+
+            // #28 N16: connection.TeardownCancellation was never disposed -- every connection this
+            // fake ever handled leaked its CancellationTokenSource for the process's lifetime.
+            // teardownOnAbort is disposed explicitly (unregistering its ct.Register callback)
+            // *before* the CTS it closes over, rather than relying on its own `using`'s
+            // compiler-emitted dispose at the end of this method: ct (context.RequestAborted) can
+            // fire on a different thread than this request's own continuation, so leaving that
+            // ordering implicit would allow a hostile timing window where ct fires after
+            // TeardownCancellation is disposed but before teardownOnAbort unregisters, running the
+            // registered callback against an already-disposed CancellationTokenSource.
+            teardownOnAbort.Dispose();
+            connection.TeardownCancellation.Dispose();
         }
     }
 
@@ -640,6 +652,9 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
                 break;
             case "response.cancel":
                 await HandleResponseCancelAsync(connection, frame, ct).ConfigureAwait(false);
+                break;
+            case "conversation.item.retrieve":
+                await HandleConversationItemRetrieveAsync(connection, frame, ct).ConfigureAwait(false);
                 break;
         }
 
@@ -767,6 +782,49 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
         connection.ActiveResponseCancellation?.Cancel();
     }
 
+    // #28 N18: GA (Conversation Item Retrieve Event, part of the OpenAI Realtime API reference
+    // cited atop GaSessionValidator.cs) — "Send this event when you want to retrieve the server's
+    // representation of a specific item in the conversation history... The server will respond
+    // with a conversation.item.retrieved event, unless the item does not exist in the
+    // conversation history, in which case the server will respond with an error." Retrieval is
+    // answered purely from this connection's own mirror (RealtimeSessionState.ConversationItemsById)
+    // — the fake never had a real upstream conversation to ask, so "exists" here means "this fake
+    // sent or accepted it earlier on this connection". Duplicate-id rejection and
+    // previous_item_id tracking on the create path are #30's concern, not this handler's.
+    private static async Task HandleConversationItemRetrieveAsync(FakeRealtimeConnection connection, RecordedFrame frame, CancellationToken ct)
+    {
+        var itemId = TryGetString(frame.Json, "item_id");
+        var eventId = TryGetString(frame.Json, "event_id");
+
+        if (itemId is not null && connection.SessionState.ConversationItemsById.TryGetValue(itemId, out var item))
+        {
+            await connection.SendAsync(new JsonObject
+            {
+                ["type"] = "conversation.item.retrieved",
+                ["event_id"] = FakeRealtimeConnection.NewEventId(),
+                ["item_id"] = itemId,
+                ["item"] = item.DeepClone(),
+            }, ct).ConfigureAwait(false);
+            return;
+        }
+
+        // The GA reference does not name the not-found error's exact `code` in the page fetched
+        // for this fix (2026-09-24, same reference cited atop GaSessionValidator.cs) -- NOT
+        // independently live-verified, same caveat as response.cancel's error codes (see README
+        // "Response cancel — GA semantics and unverified error codes"). `item_not_found` is this
+        // fake's best-available placeholder; a scenario must not assert this exact string as a
+        // GA-verified contract.
+        await SendValidationErrorAsync(
+            connection,
+            SessionUpdateValidationResult.Rejected(
+                "item_not_found",
+                "item_id",
+                $"Item '{itemId}' not found.",
+                echoEventId: true),
+            eventId,
+            ct).ConfigureAwait(false);
+    }
+
     private async Task RespondAsync(FakeRealtimeConnection connection, CancellationToken ct)
     {
         var state = connection.SessionState;
@@ -860,6 +918,8 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
                 ["previous_item_id"] = state.LastConversationItemId,
                 ["item"] = completedItem.DeepClone(),
             }, ct).ConfigureAwait(false);
+            // #28 N18: overwrite the in-progress mirror with the finalized content.
+            state.ConversationItemsById[audioItemId] = (JsonObject)completedItem.DeepClone()!;
 
             output.Add(completedItem.DeepClone());
             outputIndex++;
@@ -926,6 +986,9 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
                                 ["item"] = openItem.DeepClone(),
                             }, ct).ConfigureAwait(false);
                             state.LastConversationItemId = audioItemId;
+                            // #28 N18: mirror the in-progress item so a retrieve mid-response
+                            // gets whatever content had actually gone out by then.
+                            state.ConversationItemsById[audioItemId] = (JsonObject)openItem.DeepClone()!;
                             await connection.SendAsync(new JsonObject
                             {
                                 ["type"] = "response.content_part.added",
@@ -990,6 +1053,9 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
                             ["item"] = openCallItem.DeepClone(),
                         }, ct).ConfigureAwait(false);
                         state.LastConversationItemId = callItemId;
+                        // #28 N18: mirror the in-progress item so a retrieve mid-response gets
+                        // whatever content had actually gone out by then.
+                        state.ConversationItemsById[callItemId] = (JsonObject)openCallItem.DeepClone()!;
 
                         await connection.SendAsync(new JsonObject
                         {
@@ -1034,6 +1100,8 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
                             ["previous_item_id"] = state.LastConversationItemId,
                             ["item"] = completedCallItem.DeepClone(),
                         }, ct).ConfigureAwait(false);
+                        // #28 N18: overwrite the in-progress mirror with the finalized content.
+                        state.ConversationItemsById[callItemId] = (JsonObject)completedCallItem.DeepClone()!;
 
                         output.Add(completedCallItem.DeepClone());
                         outputIndex++;
@@ -1051,12 +1119,17 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
                         };
                         if (done.ErrorCode is not null)
                         {
+                            // #28 N12: `error.type` was missing entirely -- GA's
+                            // RealtimeResponseStatus.error is `{ code, type }` (see DoneEvent's
+                            // doc comment for the exact citation); `message` is an extra field
+                            // kept for an existing scenario, not part of the documented shape.
                             responseBody["status_details"] = new JsonObject
                             {
                                 ["type"] = done.Status,
                                 ["error"] = new JsonObject
                                 {
                                     ["code"] = done.ErrorCode,
+                                    ["type"] = done.ErrorType,
                                     ["message"] = done.ErrorMessage,
                                 },
                             };
@@ -1149,7 +1222,34 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
         };
     }
 
-    private static JsonObject BuildSessionCreated() => new()
+    /// <summary>
+    /// #33: the real GA endpoint's `session.created` echoes a fully-populated default session —
+    /// not just `id`/`object` — so a client can read the server-assigned defaults ("the server
+    /// sets default instructions which will be used if this field is not set and are visible in
+    /// the `session.created` event at the start of the session") before ever sending a
+    /// `session.update`. This was previously stubbed down to two keys, which meant the backend's
+    /// `session.created` scrub path (`RTMiddleTier._scrub_session_for_client`, called from
+    /// `_process_message_to_client`'s `case "session.created"`) was never exercised by anything
+    /// with real secrets to strip — see <see cref="ScrubHardeningTests"/>.
+    ///
+    /// Shape sourced from the OpenAI Realtime API reference's `RealtimeSessionCreateRequest`
+    /// (fields: type, audio, instructions, max_output_tokens, model, output_modalities,
+    /// tool_choice, tools, tracing, truncation) —
+    /// https://developers.openai.com/api/reference/resources/realtime (fetched 2026-09-24), same
+    /// primary source <see cref="GaSessionValidator"/> already cites; Azure's reference confirms
+    /// it follows the OpenAI spec verbatim —
+    /// https://learn.microsoft.com/en-us/azure/foundry/openai/realtime-audio-reference (fetched
+    /// 2026-09-24). `id`/`object`/`model` are server-assigned exactly like `session.updated`
+    /// stamps them (see `HandleSessionUpdateAsync`). The literal default `instructions` text
+    /// itself is NOT published anywhere in the reference (only that the field exists and is
+    /// non-empty) — the string below is a clearly-synthetic placeholder that satisfies the
+    /// "present, non-empty, default" contract without claiming to reproduce OpenAI's actual
+    /// (undisclosed) default prompt. `reasoning` is deliberately omitted here: whether it appears
+    /// is a per-deployment concern the bootstrap `session.update`/`session.updated` round trip
+    /// covers (see ReasoningByDeploymentTests.cs), not something a brand-new, unconfigured
+    /// session would carry.
+    /// </summary>
+    private static JsonObject BuildSessionCreated(string deployment) => new()
     {
         ["type"] = "session.created",
         ["event_id"] = FakeRealtimeConnection.NewEventId(),
@@ -1157,6 +1257,39 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
         {
             ["id"] = "sess_fake",
             ["object"] = "realtime.session",
+            ["model"] = deployment,
+            ["type"] = "realtime",
+            ["instructions"] = "You are a helpful voice assistant. (fake GA default placeholder — real default text is not published)",
+            ["tools"] = new JsonArray(),
+            ["tool_choice"] = "auto",
+            ["max_output_tokens"] = "inf",
+            ["output_modalities"] = new JsonArray("audio"),
+            ["truncation"] = "auto",
+            ["tracing"] = null,
+            ["audio"] = new JsonObject
+            {
+                ["input"] = new JsonObject
+                {
+                    ["format"] = new JsonObject { ["type"] = "audio/pcm", ["rate"] = 24000 },
+                    ["noise_reduction"] = null,
+                    ["transcription"] = null,
+                    ["turn_detection"] = new JsonObject
+                    {
+                        ["type"] = "server_vad",
+                        ["threshold"] = 0.5,
+                        ["prefix_padding_ms"] = 300,
+                        ["silence_duration_ms"] = 500,
+                        ["create_response"] = true,
+                        ["interrupt_response"] = true,
+                    },
+                },
+                ["output"] = new JsonObject
+                {
+                    ["format"] = new JsonObject { ["type"] = "audio/pcm", ["rate"] = 24000 },
+                    ["speed"] = 1.0,
+                    ["voice"] = "marin",
+                },
+            },
         },
     };
 

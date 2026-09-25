@@ -125,6 +125,30 @@ public sealed class CapturedProcessOutputTests
         return (output.CountUnhandledErrors(), output.CountUnhandledErrors(isBenignIncident));
     }
 
+    /// <summary>
+    /// #28 N13: <see cref="CapturedProcessOutput"/>'s dump buffer is capped at 4000 lines and
+    /// silently evicts its oldest entries once a process prints past that — before this fix,
+    /// <c>CountUnhandledErrors</c> re-derived its answer by re-scanning that same bounded buffer
+    /// on every call, so an error logged early enough to have since scrolled out of the buffer
+    /// would stop being counted, and the running total could go *down* between calls. Prints one
+    /// incident, then enough harmless stderr lines to wrap the 4000-line buffer several times
+    /// over, then asserts the incident is still counted -- this fails against the old
+    /// whole-buffer-rescan implementation (see this fix's mutation check) and passes against the
+    /// incremental, Append-time count.
+    /// </summary>
+    [Fact]
+    public async Task CountUnhandledErrors_survives_the_dump_buffer_wrapping_around_it()
+    {
+        const int linesAfterTheIncident = 4500; // comfortably past the 4000-line dump buffer cap
+        var script =
+            "import sys\n" +
+            "print('ERROR:sonic-drive-in:boom before the wrap', file=sys.stderr)\n" +
+            $"for i in range({linesAfterTheIncident}):\n" +
+            "    print(f'ordinary diagnostic line {i}', file=sys.stderr)\n";
+
+        Assert.Equal(1, await RunAndCountAsync(script));
+    }
+
     private static async Task<int> RunAndCountAsync(string pythonScript)
     {
         var repoRoot = RepoPaths.FindRepoRoot();

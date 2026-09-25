@@ -98,8 +98,11 @@ public sealed class ResumeRehydrationAndNudgeTests(ResumeTimersConformanceFixtur
     private async Task<(RealtimeBrowserClient Browser, FakeRealtimeConnection Connection)> AbortAndResumeAsync(
         RealtimeBrowserClient oldBrowser, string resumeId, CancellationToken ct)
     {
-        oldBrowser.Abort();
-        await oldBrowser.WaitForCloseAsync(FrameTimeout, ct);
+        // #52 re-merge: this used to call the now-removed synchronous RealtimeBrowserClient.Abort()
+        // plus a separate WaitForCloseAsync. #52 landed its own AbortAsync() doing the same thing
+        // more robustly (it also awaits the reader loop settling before returning), so this switches
+        // to that rather than keeping two ways to sever a connection abruptly side by side.
+        await oldBrowser.AbortAsync();
         Assert.True(oldBrowser.CloseStatus is null,
             "An abrupt abort must not produce a Close frame -- CloseStatus should stay null, " +
             "otherwise this scenario isn't actually exercising the abnormal-close code path.");
@@ -187,7 +190,7 @@ public sealed class ResumeRehydrationAndNudgeTests(ResumeTimersConformanceFixtur
     /// PR #52 review ("F1"): every other resume scenario in this file drops the old connection
     /// gracefully (<see cref="DropAndResumeAsync"/>). A real Wi-Fi blip never sends a Close
     /// frame at all -- <see cref="AbortAndResumeAsync"/> reproduces that with
-    /// <see cref="RealtimeBrowserClient.Abort"/>, which severs the socket the way
+    /// <see cref="RealtimeBrowserClient.AbortAsync"/>, which severs the socket the way
     /// <c>ClientWebSocket.Abort()</c> does (no close handshake, in-flight receive faults). This
     /// otherwise mirrors <see cref="Resuming_mid_conversation_rehydrates_the_order_with_no_greeting"/>
     /// exactly -- same order-restore, same no-greeting, same rehydration-upstream assertions --
