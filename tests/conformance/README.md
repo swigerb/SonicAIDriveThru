@@ -747,7 +747,7 @@ summary:
 ```json
 {
   "items": [
-    { "item": "<name>", "size": "<display size, or empty>", "quantity": <int>, "price": <number>, "display": "<full display string>" }
+    { "item": "<name>", "size": "<canonical size key, or empty>", "quantity": <int>, "price": <number>, "display": "<full display string>" }
   ],
   "total": <number>,
   "tax": <number>,
@@ -757,6 +757,20 @@ summary:
   "finalTotalDisplay": "<$0.00 string>"
 }
 ```
+
+**`items[].size` is the canonical size key, not the raw spelling or the display string (#40, PR #50
+review follow-up)**: `order_state.handle_order_update` runs every incoming size through
+`menu_utils.canonical_size_key()` *before* constructing the `OrderItem`, so this field is always the
+lowercase, alias-resolved key used for order-line matching/merging/removal — `"route 44"`, `"xl"`,
+`"medium"`, `"standard"`, etc. — never the guest's raw spelling (`"RT. 44"`, `"Route-44"`,
+`"44 oz"`, `"Extra Large"` all canonicalize to `"route 44"`/`"xl"` respectively) and never the
+human-readable prefix that appears in `display`/`normalize_size()` (`"Route 44"`, `"Extra Large"`).
+`canonical_size_key` and `normalize_size` share the same alias-resolution table and the same
+punctuation/whitespace-stripping compact-key lookup, so the matching key and the display prefix can
+never disagree about which physical size a given spelling means. See
+`app/backend/tests/test_tool_calling.py::CanonicalSizeKeyTests` and
+`GoldenOrderPricingData.Route44.Aliases`/`Route44AliasCases` in this suite for the full alias list
+(now including the punctuation variants `"44 oz"`, `"Route-44"`, `"rt. 44"`).
 
 All four money fields (`items[].price`, `total`, `tax`, `finalTotal`) are numbers on the wire (not
 quoted, unlike the golden file's storage format) and must always be parsed via

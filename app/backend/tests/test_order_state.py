@@ -698,6 +698,36 @@ class OrderStateTests(unittest.TestCase):
         items = order_state_singleton.get_order_items(session_id)
         self.assertEqual(len(items), 0, "Removing with a different alias should still find and remove the line")
 
+    def test_route_44_punctuation_aliases_also_merge_with_the_others(self):
+        """PR #50 review follow-up (X3): "Route-44" and "rt. 44" are new spellings that must
+        merge with the plain-spelling Route 44 aliases, not create their own separate line."""
+        session_id = order_state_singleton.create_session()
+        order_state_singleton.handle_order_update(session_id, "add", "Cherry Limeade", "rt44", 1, 3.79)
+        order_state_singleton.handle_order_update(session_id, "add", "Cherry Limeade", "Route-44", 1, 3.79)
+        order_state_singleton.handle_order_update(session_id, "add", "Cherry Limeade", "rt. 44", 1, 3.79)
+
+        items = order_state_singleton.get_order_items(session_id)
+        self.assertEqual(len(items), 1, "Punctuation variants of Route 44 must merge with the other aliases")
+        self.assertEqual(items[0].quantity, 3)
+        self.assertEqual(items[0].display, "Route 44 Cherry Limeade")
+
+    def test_wire_item_size_is_the_canonical_lowercase_key_not_the_raw_spelling(self):
+        """items[].size on the order-summary payload is documented as the canonical, lowercase,
+        alias-resolved key (see README) -- never the raw spoken/typed spelling. This is the
+        matching key, distinct from `display`, which is the human-readable "Route 44 ..." prefix
+        form. Regression-tests every alias family used elsewhere in this file so the contract is
+        pinned regardless of which spelling the caller used."""
+        session_id = order_state_singleton.create_session()
+        order_state_singleton.handle_order_update(session_id, "add", "Cherry Limeade", "RT. 44", 1, 3.79)
+        order_state_singleton.handle_order_update(session_id, "add", "Tots", "Extra Large", 1, 2.79)
+        order_state_singleton.handle_order_update(session_id, "add", "Onion Rings", "MEDIUM", 1, 2.99)
+
+        items = order_state_singleton.get_order_items(session_id)
+        sizes_by_item = {item.item: item.size for item in items}
+        self.assertEqual(sizes_by_item["Cherry Limeade"], "route 44")
+        self.assertEqual(sizes_by_item["Tots"], "xl")
+        self.assertEqual(sizes_by_item["Onion Rings"], "medium")
+
 
 if __name__ == "__main__":
     unittest.main()

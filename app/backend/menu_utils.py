@@ -43,6 +43,9 @@ SIZE_ALIASES: dict[str, str] = {
     "s": "small",
     "m": "medium",
     "l": "large",
+    "extralarge": "xl",  # PR #50 review follow-up: "Extra Large" must canonicalize to "xl", the
+                         # same key its own short form already uses -- matched via the punctuation-
+                         # and-whitespace-stripped compact key below, same as the Route 44 aliases.
     "rt 44": "route 44",
     "rt44": "route 44",
     "44": "route 44",
@@ -53,9 +56,24 @@ SIZE_ALIASES: dict[str, str] = {
 # Sizes that should be hidden in display strings (no prefix)
 _NO_DISPLAY_SIZES = frozenset({"", "standard", "n/a", "na", "none", "n.a."})
 
+# Punctuation ignored when compacting a size string for alias lookup (PR #50 review follow-up):
+# "Route-44" and "rt. 44" must resolve identically to "route44"/"rt44" -- whitespace alone wasn't
+# enough to catch the hyphen or period variants.
+_SIZE_ALIAS_IGNORED_CHARS = frozenset(" .-")
+
+
+def _compact_size_key(size: str) -> str:
+    key = (size or "").strip().lower()
+    return "".join(ch for ch in key if ch not in _SIZE_ALIAS_IGNORED_CHARS)
+
 
 def normalize_size(size: str) -> str:
     """Return a human-readable size string, or ``""`` for hidden/standard sizes.
+
+    Delegates alias resolution to ``canonical_size_key`` so the display prefix and the
+    order-matching key can never disagree (PR #50 review follow-up) -- e.g. adding a drink with
+    size ``"44 oz"`` must display "Route 44 ..." exactly like ``"rt44"`` does, not silently drop
+    the size prefix because that specific spelling wasn't in ``SIZE_ALIASES`` verbatim.
 
     >>> normalize_size("rt44")
     'Route 44'
@@ -67,33 +85,37 @@ def normalize_size(size: str) -> str:
     key = (size or "").strip().lower()
     if key in _NO_DISPLAY_SIZES:
         return ""
-    # Resolve aliases first
-    canonical = SIZE_ALIASES.get(key, key)
-    return SIZE_MAP.get(canonical, "")
+    return SIZE_MAP.get(canonical_size_key(size), "")
 
 
 def canonical_size_key(size: str) -> str:
     """Return the canonical, alias-resolved key used to match/merge/remove order lines (#40).
 
     All spellings of the same physical size must collapse to one key *before* any order-state
-    matching happens, so e.g. ``"rt44"``, ``"route44"``, ``"44 oz"``, ``"RT 44"`` and
-    ``"Route 44"`` are all treated as the same line item. This mirrors the alias resolution
-    ``normalize_size`` already does for its display string, but returns the lookup key itself
-    (not a human-readable label) and is case/whitespace-normalised even for sizes with no known
-    alias, so callers get consistent matching regardless of input casing.
+    matching happens, so e.g. ``"rt44"``, ``"route44"``, ``"44 oz"``, ``"Route-44"``, ``"rt. 44"``,
+    ``"RT 44"`` and ``"Route 44"`` are all treated as the same line item, and ``"Extra Large"``
+    collapses onto the same key as ``"xl"``. This mirrors the alias resolution ``normalize_size``
+    already does for its display string, but returns the lookup key itself (not a human-readable
+    label) and is case/whitespace/punctuation-normalised even for sizes with no known alias, so
+    callers get consistent matching regardless of input casing or spacing.
 
     >>> canonical_size_key("rt44")
     'route 44'
-    >>> canonical_size_key("Route44")
+    >>> canonical_size_key("Route-44")
+    'route 44'
+    >>> canonical_size_key("rt. 44")
     'route 44'
     >>> canonical_size_key("44 oz")
     'route 44'
+    >>> canonical_size_key("Extra Large")
+    'xl'
     >>> canonical_size_key(" Medium ")
     'medium'
     """
     key = (size or "").strip().lower()
-    # Collapse internal whitespace so "44 oz" and "44oz" resolve the same way as a plain "44".
-    compact_key = "".join(key.split())
+    # Collapse whitespace/periods/hyphens so "44 oz", "Route-44" and "rt. 44" all resolve the same
+    # way as their tighter spellings ("44oz", "route44", "rt44").
+    compact_key = _compact_size_key(size)
     if compact_key in SIZE_ALIASES:
         return SIZE_ALIASES[compact_key]
     return SIZE_ALIASES.get(key, key)

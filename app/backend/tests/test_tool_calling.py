@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, patch
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from menu_utils import (
+    canonical_size_key,
     infer_category,
     normalize_size,
 )
@@ -556,6 +557,22 @@ class NormalizeSizeTests(unittest.TestCase):
         self.assertEqual(normalize_size("44"), "Route 44")
         self.assertEqual(normalize_size("44oz"), "Route 44")
 
+    def test_punctuation_and_spelling_aliases_still_display_route_44(self):
+        """PR #50 review follow-up: "Route-44" and "rt. 44" must display like every other Route
+        44 spelling -- these previously fell through to "" because normalize_size looked up
+        SIZE_ALIASES verbatim instead of sharing canonical_size_key's punctuation-stripped lookup.
+        """
+        self.assertEqual(normalize_size("Route-44"), "Route 44")
+        self.assertEqual(normalize_size("rt. 44"), "Route 44")
+        self.assertEqual(normalize_size("44 oz"), "Route 44")
+
+    def test_extra_large_alias_displays_extra_large(self):
+        """PR #50 review follow-up: "Extra Large" must resolve through the same alias table as
+        its own short form "xl" so the two spellings can never end up on different order lines.
+        """
+        self.assertEqual(normalize_size("Extra Large"), "Extra Large")
+        self.assertEqual(normalize_size("xl"), "Extra Large")
+
     def test_hidden_sizes_return_empty(self):
         self.assertEqual(normalize_size("standard"), "")
         self.assertEqual(normalize_size("n/a"), "")
@@ -579,6 +596,32 @@ class NormalizeSizeTests(unittest.TestCase):
 
     def test_none_input_returns_empty(self):
         self.assertEqual(normalize_size(None), "")
+
+
+class CanonicalSizeKeyTests(unittest.TestCase):
+    """canonical_size_key is the wire contract: items[].size on the order-summary payload is
+    documented (README, tests/conformance) to always be this canonical, lowercase, alias-resolved
+    key -- never the raw spoken/typed spelling and never the human-readable display string. These
+    tests pin every known Route 44 spelling (including the punctuation variants added by PR #50
+    review item X3) and the Extra Large/xl pair onto a single key each, so two different spellings
+    of the same size can never land on two different order lines.
+    """
+
+    def test_route_44_aliases_all_collapse_to_one_key(self):
+        aliases = ["rt44", "rt 44", "44", "44oz", "44 oz", "route44", "Route-44", "rt. 44", "Route 44", "ROUTE 44"]
+        for alias in aliases:
+            with self.subTest(alias=alias):
+                self.assertEqual(canonical_size_key(alias), "route 44")
+
+    def test_extra_large_and_xl_collapse_to_one_key(self):
+        self.assertEqual(canonical_size_key("Extra Large"), "xl")
+        self.assertEqual(canonical_size_key("xl"), "xl")
+        self.assertEqual(canonical_size_key("XL"), "xl")
+
+    def test_key_is_always_lowercase(self):
+        for raw in ["MEDIUM", "Small", "  Large  ", "RT44"]:
+            with self.subTest(raw=raw):
+                self.assertEqual(canonical_size_key(raw), canonical_size_key(raw).lower())
 
 
 class InferCategoryTests(unittest.TestCase):

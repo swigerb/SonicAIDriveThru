@@ -97,9 +97,9 @@
     }
   ],
   "route44": {
-    "aliases": ["rt44", "rt 44", "route 44", "44", "44oz", "RT44", "Route 44"],
+    "aliases": ["rt44", "rt 44", "route 44", "44", "44oz", "44 oz", "RT44", "Route 44", "Route-44", "rt. 44"],
     "expectedDisplayPrefix": "Route 44",
-    "source": "app/backend/tests/test_combo_orders.py::TestRoute44WithCombos::test_route_44_size_aliases_all_work; the mixed/upper-case entries (RT44, Route 44) were added per PR #38 review item 4 (Rick's M5) to prove size-alias matching is genuinely case-insensitive, not just coincidentally lowercase in every existing case"
+    "source": "app/backend/tests/test_combo_orders.py::TestRoute44WithCombos::test_route_44_size_aliases_all_work; the mixed/upper-case entries (RT44, Route 44) were added per PR #38 review item 4 (Rick's M5) to prove size-alias matching is genuinely case-insensitive; the punctuation variants (44 oz, Route-44, rt. 44) were added per PR #50 review follow-up item X3 -- normalize_size previously looked up SIZE_ALIASES verbatim and silently dropped the display prefix for any spelling with an internal period/hyphen, even though canonical_size_key's matching key already resolved it correctly"
   },
   "sizeDisplayCases": [
     { "item": "Latte", "size": "small", "expectedDisplay": "Small Latte" },
