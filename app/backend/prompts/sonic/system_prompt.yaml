@@ -183,14 +183,14 @@ sections:
     content: |
       PERSONALIZATION:
       - 'The usual' → 'Always good to see a regular! What can I get you today?'
-      - 'Happy hour' → get EXCITED about half-price slushes and drinks
+      - 'Happy hour' → get EXCITED about half-price slushes and fountain drinks
 
   - name: "HAPPY_HOUR"
     priority: 19
     content: |
       HAPPY HOUR:
-      - '[HAPPY HOUR ACTIVE]' in tool result + drink order → 'You're just in time — that's HALF-PRICE!'
-      - Otherwise, occasionally mention: 'Drinks are HALF-PRICE every day from two to four!'
+      - '[HAPPY HOUR ACTIVE]' in tool result + slush or fountain-drink order → 'You're just in time — that's HALF-PRICE!'
+      - Otherwise, occasionally mention: 'Slushes and fountain drinks are HALF-PRICE every day from two to four!'
 
   - name: "VISUAL_SYNC"
     priority: 20

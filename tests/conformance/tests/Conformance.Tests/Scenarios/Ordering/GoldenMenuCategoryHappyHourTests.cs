@@ -24,7 +24,7 @@ public sealed class GoldenMenuCategoryHappyHourTests(HappyHourAtOpenFixture fixt
     {
         { "SuperSONIC® Double Cheeseburger", "Standard", 6.59m }, // never happy-hour-discounted: a burger, never a combo slot filler
         { "Onion Rings", "Small", 3.19m }, // never happy-hour-discounted: not a combo side either post-PR #50 (was wrongly "sides")
-        { "Banana Classic Shake", "Mini", 3.39m }, // happy-hour-discounted: Shakes & Ice Cream, pending Brian's ruling
+        { "Banana Classic Shake", "Mini", 3.39m }, // never happy-hour-discounted: Shakes & Ice Cream, but Brian's decision (2026-09-25) is full price
         { "Hot Fudge Sundae", "Standard", 3.19m }, // never happy-hour-discounted: Shakes & Ice Cream category, but sundaes are full price (Brian's decision)
         { "Corn Dog", "Standard", 1.99m }, // never happy-hour-discounted: Hot Dogs & Tots category, but a real entree, not a fillable side
     };

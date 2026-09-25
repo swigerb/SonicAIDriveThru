@@ -304,13 +304,14 @@ class HappyHourPricingTests(unittest.TestCase):
 
     @patch("order_state.is_happy_hour", return_value=True)
     def test_happy_hour_multiple_drink_types(self, _mock_hh):
-        """All drink-category items are discounted during happy hour."""
+        """Fountain drinks and slushes are discounted during happy hour; Shakes & Blasts are not
+        (Brian's decision, 2026-09-25 -- see menu_utils._SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED)."""
         session_id = order_state_singleton.create_session()
         self._add_item(session_id, "Cherry Limeade", "medium", 1, 2.99)
         self._add_item(session_id, "Ocean Water", "large", 1, 3.49)
         self._add_item(session_id, "Classic Vanilla Shake", "large", 1, 4.99)
         summary = order_state_singleton.get_order_summary(session_id)
-        expected_subtotal = (2.99 * 0.5) + (3.49 * 0.5) + (4.99 * 0.5)
+        expected_subtotal = (2.99 * 0.5) + (3.49 * 0.5) + 4.99
         self.assertTrue(math.isclose(summary.total, expected_subtotal, rel_tol=1e-9))
 
     @patch("order_state.is_happy_hour", return_value=True)

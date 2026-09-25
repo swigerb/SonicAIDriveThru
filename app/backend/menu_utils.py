@@ -276,10 +276,10 @@ def infer_category(item_name: str) -> str:
 # These are two SEPARATE questions and must never be derived from one shared bucket (Rick's PR
 # #50 review): "can this item fill a combo's included side/drink slot" (``infer_combo_component``)
 # vs. "does this item get the happy-hour discount" (``is_happy_hour_discounted``). They agree on
-# almost everything today, but that's incidental, not structural -- e.g. Shakes & Blasts are
-# currently happy-hour-discounted pending Brian's ruling (see the single flag below) regardless of
-# whether they can ever fill a combo's drink slot, and a future change to one must not silently
-# change the other.
+# almost everything today, but that's incidental, not structural -- e.g. Shakes & Blasts are NOT
+# happy-hour-discounted (Brian's decision, 2026-09-25 -- see the single flag below) even though
+# they DO fill a combo's drink slot, and a future change to one must not silently change the
+# other.
 # ---------------------------------------------------------------------------
 
 # Combo SIDE slot: the menu's own combo description says "your choice of a side (Tots or Fries)
@@ -291,6 +291,40 @@ def infer_category(item_name: str) -> str:
 # all being silently absorbed for free into a combo's side slot instead of charged in full
 # (measured regression: Cheeseburger Combo + Crispy Tenders 5pc totalled $8.49 instead of $15.98).
 _COMBO_SIDE_ITEMS = frozenset({"tots", "groovy fries"})
+
+# Brian's decision (2026-09-25, new issue #60): any spoken name-variant of PLAIN Tots -- "Tot",
+# "Tots", "Tater Tot(s)", the common misspelling "Tator Tot(s)" -- fills the combo side slot
+# exactly like the real "Tots" menuItems.json item does. This is an explicit alias -> canonical
+# map, resolved with an EXACT match, NOT a substring check -- Rick's PR #50 revenue rule still
+# applies: "Chili Cheese Tots" and "Cheese Tots" are separate, real menuItems.json items, and an
+# off-menu near-miss like "Loaded Tots Supreme" or the misspelled "chilli cheese tots" must all
+# still fall through to full price, because none of those five names is an exact match here.
+# Scoped to combo-SIDE-slot classification only (#60) -- it does not touch ``infer_category``
+# (the pre-existing "tot"/"tots" substring keyword fallback there already categorises every one
+# of these spoken variants as "sides" on its own) or happy-hour-discount eligibility (Tots was
+# never a drink, discounted or not).
+#
+# PR #61 review, must-fix 3: also accept the one-word forms ("tatertot(s)", "tatortot(s)") and
+# the hyphenated forms ("tater-tot(s)", "tator-tot(s)") explicitly. ``_menu_key`` does NOT collapse
+# a hyphen to a space -- a hyphen is not whitespace, so neither ``strip_modifiers``'s
+# ``.split()``/``" ".join(...)`` pass nor any of ``_menu_key``'s three symbol-replacements (``®``,
+# ``™``, curly apostrophe) touch it (confirmed: ``_menu_key("Tater-Tot") == "tater-tot"``, NOT
+# "tater tot"). So the hyphenated forms need their own keys here; they are not already covered by
+# the space-separated "tater tot"/"tator tot" entries. "Totts" (typo) and "Tater Tot's" (stray
+# apostrophe) are deliberately NOT included -- they stay charged in full.
+_TOTS_ALIASES = frozenset({
+    "tot", "tots",
+    "tater tot", "tater tots", "tator tot", "tator tots",
+    "tatertot", "tatertots", "tatortot", "tatortots",
+    "tater-tot", "tater-tots", "tator-tot", "tator-tots",
+})
+
+
+def _resolve_combo_side_alias(normalized: str) -> str:
+    """Resolve a spoken Tots alias to its canonical combo-side-slot key. Called with the result
+    of ``_menu_key`` (so a bracketed modifier, e.g. "Tater Tots (Extra Crispy)", is already
+    stripped before this exact-match lookup runs)."""
+    return "tots" if normalized in _TOTS_ALIASES else normalized
 
 # Combo DRINK slot: unchanged from dev's original behaviour (confirmed via git history) -- every
 # "Slushes & Drinks" item, plus every "Shakes & Ice Cream" item except the two sundaes (Brian's
@@ -354,11 +388,20 @@ def _keyword_fallback_happy_hour_discounted(normalized: str) -> bool:
     """Happy-hour-discount fallback for items that aren't in menuItems.json at all. Fountain
     drinks are always discounted; shakes/blasts/malts obey
     ``_SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED`` so that flag is the single switch for every
-    shake/blast, on-menu or off, plain or customised (PR #50 review)."""
-    if _DR_PEPPER_RE.search(normalized) or _FOUNTAIN_DRINK_KEYWORD_RE.search(normalized):
-        return True
+    shake/blast, on-menu or off, plain or customised (PR #50 review).
+
+    Checks the shake/blast/malt regex FIRST (PR #61 review, must-fix 1): an off-menu name can
+    contain both a shake/blast word AND a fountain word -- e.g. "Cherry Limeade Shake" ("limeade"
+    + "shake"), "Sweet Tea Blast" ("tea" + "blast"), "Dr Pepper Shake" -- and must resolve as a
+    shake/blast for the DISCOUNT question (obeying the flag) even though it would also match the
+    fountain branch. This precedence is deliberately the opposite of
+    ``_keyword_fallback_combo_drink``, which is an unconditional OR across all three regexes and
+    is NOT order-dependent -- these same names must still fill the combo drink slot regardless of
+    which keyword "wins" the discount question."""
     if _SHAKE_BLAST_KEYWORD_RE.search(normalized):
         return _SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED
+    if _DR_PEPPER_RE.search(normalized) or _FOUNTAIN_DRINK_KEYWORD_RE.search(normalized):
+        return True
     return False
 
 
@@ -372,10 +415,13 @@ def infer_combo_component(item_name: str) -> str:
     ``menuItems.json`` first; keyword fallback only applies to items that aren't in the menu at
     all (#39). *item_name* may carry a parenthesized customization suffix (e.g. "Tots (Extra
     Crispy)") -- ``_menu_key`` strips it before any lookup so a customised item classifies
-    identically to its base item (PR #50 review).
+    identically to its base item (PR #50 review). Any spoken alias of plain Tots ("Tot",
+    "Tater Tot(s)", "Tator Tot(s)") resolves to the same side slot as "Tots" -- an explicit,
+    exact-match alias map, never a substring check (Brian's decision, 2026-09-25, #60; see
+    ``_TOTS_ALIASES`` above).
     """
     normalized = _menu_key(item_name)
-    if normalized in _COMBO_SIDE_ITEMS:
+    if _resolve_combo_side_alias(normalized) in _COMBO_SIDE_ITEMS:
         return "sides"
     if normalized in _SUNDAES:
         return ""
@@ -394,18 +440,17 @@ def infer_combo_component(item_name: str) -> str:
     return ""
 
 
-# Pending Brian's ruling (#39 follow-up / PR #50 review): Shakes & Blasts are currently
-# happy-hour-discounted, matching dev's existing behaviour. Flip this ONE flag to ``False`` the
-# moment he decides otherwise (leaving Slushes & Drinks discounted) -- no other code needs to
-# change.
-_SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED = True
+# Brian's decision (2026-09-25, #39 follow-up): Shakes & Blasts are NOT happy-hour discounted --
+# full price, unlike Slushes & Drinks. This flag was left as a single, obvious switch specifically
+# so his eventual answer would be a one-line change (PR #50 review) -- this is that line.
+_SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED = False
 
 
 def is_happy_hour_discounted(item_name: str) -> bool:
     """Whether *item_name* gets the happy-hour discount -- a SEPARATE question from
     ``infer_combo_component`` above (PR #50 review): don't derive one from the other. Sundaes are
-    never discounted (Brian's #39 decision). See ``_SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED``
-    above for the one open question (Shakes & Blasts, pending Brian). *item_name* may carry a
+    never discounted (Brian's #39 decision), and neither are Shakes & Blasts (Brian's decision,
+    2026-09-25) -- see ``_SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED`` above. *item_name* may carry a
     parenthesized customization suffix -- ``_menu_key`` strips it before any lookup so a
     customised drink is discounted (or not) exactly like its base item (PR #50 review)."""
     normalized = _menu_key(item_name)
