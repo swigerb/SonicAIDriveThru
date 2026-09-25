@@ -11,7 +11,14 @@ name: Conformance Suite
 
 concurrency:
   group: conformance-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # #28 S1 (Rick's PR #52 review): only cancel in-progress runs for pull_request events. Without
+  # this, the push-to-dev trigger (#24) shares the same concurrency group as its branch ref, so
+  # rapid successive merges to dev cancel each other's runs -- the earlier commit's run goes
+  # `cancelled` and shows red, even though nothing about that commit failed. #24 added the push
+  # trigger specifically so every commit that reaches dev gets checked; a merge cancelling that
+  # check defeats the purpose. PR runs (one ref per open PR, only the latest push matters) still
+  # get the superseded-run cancellation benefit.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
