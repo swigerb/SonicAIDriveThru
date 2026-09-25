@@ -96,6 +96,73 @@ public sealed class CustomisedItemMenuLookupTests
                 OrderScenarioHelpers.AssertMoneyEqual(BaseComboPrice, OrderScenarioHelpers.GetOrderTotal(result.ToolResultJson!));
                 Assert.Equal(1, OrderScenarioHelpers.GetOrderItemCount(result.ToolResultJson!));
             });
+
+        /// <summary>PR #50 review (third round): pins that an unrecognised/off-menu side-like
+        /// name NEVER fills the combo side slot -- this is the shared-suite gap Rick's mutation
+        /// (b) exposed. Reintroducing a substring fallback ("if 'tots' in name or 'fries' in
+        /// name: return 'sides'") ahead of/instead of the deleted one makes Python's own unit
+        /// test fail, but nothing in this C# suite noticed, because every existing conformance
+        /// case here used either a real allow-listed side or a real non-side menu item -- never
+        /// an off-menu name that merely LOOKS like a side. These three names are deliberately
+        /// off-menu (not in menuItems.json at all, so category inference can't rescue them
+        /// either) yet contain "tots"/"fries" substrings that the old, deleted fallback would
+        /// have matched.</summary>
+        [Theory]
+        [InlineData("Loaded Tots Supreme")]
+        [InlineData("Crispy Fries Basket")]
+        [InlineData("chilli cheese tots")] // misspelling of "Chili Cheese Tots" -- still off-menu verbatim
+        public Task Off_menu_side_like_item_is_charged_in_full_alongside_a_combo_not_absorbed(string item) =>
+            fixture.RunAsync(async () =>
+            {
+                var ct = TestContext.Current.CancellationToken;
+                const decimal unitPrice = 3.79m; // arbitrary placeholder -- update_order's price is
+                                                  // caller-supplied and never menu-validated for an
+                                                  // off-menu name; only comboSlot behaviour is under test.
+
+                var (browser, connection, roundTripIndex) = await OrderScenarioHelpers.ConnectAndGreetAsync(fixture, ct);
+                await using var _ = browser;
+
+                var result = await OrderScenarioHelpers.RunOrderStepsAsync(
+                    connection, browser,
+                    [
+                        ("add", BaseComboName, BaseComboSize, 1, BaseComboPrice),
+                        ("add", item, "medium", 1, unitPrice),
+                    ],
+                    roundTripIndex, ct);
+
+                OrderScenarioHelpers.AssertMoneyEqual(
+                    BaseComboPrice + unitPrice,
+                    OrderScenarioHelpers.GetOrderTotal(result.ToolResultJson!),
+                    $"'{item}' is off-menu and must never silently fill the combo side slot.");
+                Assert.Equal(2, OrderScenarioHelpers.GetOrderItemCount(result.ToolResultJson!));
+            });
+
+        /// <summary>PR #50 review (third round): pins the OTHER side of the same fallback split
+        /// -- the drink keyword fallback for genuinely off-menu fountain drinks is intentionally
+        /// KEPT (unlike the deleted side fallback), so an off-menu fountain drink still fills a
+        /// combo's drink slot for free. Deleting `_keyword_fallback_combo_drink` must fail this.</summary>
+        [Fact]
+        public Task Off_menu_fountain_drink_still_absorbs_into_the_combo_drink_slot() =>
+            fixture.RunAsync(async () =>
+            {
+                var ct = TestContext.Current.CancellationToken;
+                const string item = "Dr Pepper Zero"; // off-menu variant, not a literal menuItems.json entry
+                const decimal unitPrice = 2.29m; // placeholder -- see comment above
+
+                var (browser, connection, roundTripIndex) = await OrderScenarioHelpers.ConnectAndGreetAsync(fixture, ct);
+                await using var _ = browser;
+
+                var result = await OrderScenarioHelpers.RunOrderStepsAsync(
+                    connection, browser,
+                    [
+                        ("add", BaseComboName, BaseComboSize, 1, BaseComboPrice),
+                        ("add", item, "medium", 1, unitPrice),
+                    ],
+                    roundTripIndex, ct);
+
+                OrderScenarioHelpers.AssertMoneyEqual(BaseComboPrice, OrderScenarioHelpers.GetOrderTotal(result.ToolResultJson!));
+                Assert.Equal(1, OrderScenarioHelpers.GetOrderItemCount(result.ToolResultJson!));
+            });
     }
 
     [Collection(HappyHourAtOpenCollection.Name)]

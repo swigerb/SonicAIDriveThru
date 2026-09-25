@@ -36,6 +36,7 @@ from tools import (
     reset_order,
     search,
     update_order,
+    validate_customization,
 )
 
 # ── Helpers ──
@@ -772,6 +773,32 @@ class ExtrasValidationTests(unittest.TestCase):
             "size": "standard", "quantity": 1, "price": 0.79,
         }, sid))
         self.assertEqual(result.destination, ToolResultDirection.TO_SERVER)
+
+
+class ValidateCustomizationTests(unittest.TestCase):
+    """PR #50 review (third round, minor): validate_customization() used to strip parenthesized
+    modifiers itself via item_name.split("(")[0] — a second, independent implementation of the
+    same rule already centralized as menu_utils.strip_modifiers(). It now reuses that one helper."""
+
+    def test_customised_item_name_is_recognised_by_category_lookup(self):
+        # "Cherry Limeade (Light Ice)" must classify the same as "Cherry Limeade" so the
+        # forbidden-mod list for slushes/drinks (which includes "cheese") still applies.
+        error = validate_customization("Cherry Limeade (Light Ice)", "extra cheese")
+        self.assertIsNotNone(error)
+
+    def test_error_message_base_name_excludes_the_modifier_suffix(self):
+        error = validate_customization("Cherry Limeade (Light Ice)", "extra cheese")
+        self.assertNotIn("(Light Ice)", error)
+        self.assertIn("Cherry Limeade", error)
+
+    def test_plain_item_name_without_modifiers_is_unaffected(self):
+        error = validate_customization("Cherry Limeade", "extra cheese")
+        self.assertIsNotNone(error)
+        self.assertIn("Cherry Limeade", error)
+
+    def test_valid_customization_returns_none(self):
+        error = validate_customization("Cherry Limeade (Light Ice)", "extra cherries")
+        self.assertIsNone(error)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -11,7 +11,11 @@ from azure.search.documents.aio import SearchClient
 from azure.search.documents.models import VectorizableTextQuery
 
 from config_loader import get_config
-from menu_utils import infer_category as _infer_category, normalize_size
+from menu_utils import (
+    infer_category as _infer_category,
+    normalize_size,
+    strip_modifiers,
+)
 from order_state import is_happy_hour, order_state_singleton
 from rtmt import RTMiddleTier, Tool, ToolResult, ToolResultDirection
 
@@ -115,7 +119,11 @@ def _is_extra_item(item_name: str) -> bool:
 
 def validate_customization(item_name: str, mods_string: str) -> str | None:
     """Return an error message if the mods are nonsensical for the item category, else None."""
-    base_name = item_name.split("(")[0].strip()
+    # PR #50 review (third round, minor): reuse the one shared strip_modifiers() helper instead of
+    # a second, independent ad-hoc `.split("(")[0]` implementation of the same paren-stripping rule
+    # (menu_utils.py's classification functions and order_state.py's combo-conversion logic already
+    # route through it).
+    base_name = strip_modifiers(item_name)
     category = _infer_category(base_name)
     mods_lower = mods_string.lower()
     for cat_key, forbidden_list in INVALID_MODS.items():
