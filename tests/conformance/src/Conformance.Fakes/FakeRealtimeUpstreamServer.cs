@@ -76,6 +76,57 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
         }
     }
 
+    private readonly Lock _vadDefaultsGate = new();
+    private bool _clearVadDefaultsOnNextConnection;
+
+    /// <summary>
+    /// Arms a one-shot switch: the *next* connection accepted (not any connection already open)
+    /// is constructed with its <see cref="FakeRealtimeConnection.Script"/> rules already cleared
+    /// -- i.e. <see cref="RealtimeScript.WithVadDefaults"/>'s two auto-reply rules are removed
+    /// before the socket is even accepted, so it is architecturally impossible for *any*
+    /// `input_audio_buffer.append` this connection ever receives (including the very first one,
+    /// racing arbitrarily close behind the handshake) to get a synthetic `speech_started` reply.
+    ///
+    /// Exists because calling <see cref="FakeRealtimeConnection.Script"/>.<see
+    /// cref="RealtimeScript.ClearRules"/> from a test *after* <c>WaitForNextConnectionAsync</c>
+    /// resolves is still racy: <see cref="FakeRealtimeConnection"/> installs the VAD defaults at
+    /// construction time (<see cref="ConnectionRegistry.Create"/>), strictly before the socket is
+    /// accepted/attached/published -- so real network audio (a resumed browser's mic
+    /// auto-restart) can arrive and be dispatched against the still-armed default rule in the
+    /// window between "socket published to the test" and "the test's own continuation resumes
+    /// and calls ClearRules()". That window is usually microseconds, which is exactly why this
+    /// was an intermittent (~1 in 25-40 runs), not constant, conformance-suite failure: root-
+    /// caused via repeated (40x) Browser-category repro after the WinError 10054 fix (see
+    /// BrowserConformanceFixture/CapturedProcessOutput's IsBenignProactorTeardownIncident) still
+    /// showed a distinct, non-proactor failure -- "Expected exactly one nudge..." with the backend
+    /// log showing "Resume nudge cancelled: guest speech" ~90ms after resume, i.e. essentially
+    /// immediately, well within normal browser/audio-pipeline jitter. rtmt.py's resume nudge is a
+    /// one-shot task cancelled permanently by any `speech_started` (never rescheduled), so even a
+    /// single stray auto-reply here silently and permanently prevents the nudge this scenario
+    /// asserts on. Consumed by <see cref="HandleConnectionAsync"/> at the same point, and via the
+    /// same one-shot pattern, as <see cref="SuppressSessionUpdatedOnNextConnection"/>.
+    /// </summary>
+    public void ClearVadDefaultsOnNextConnection()
+    {
+        lock (_vadDefaultsGate)
+        {
+            _clearVadDefaultsOnNextConnection = true;
+        }
+    }
+
+    private bool ConsumeVadDefaultsClearForNewConnection()
+    {
+        lock (_vadDefaultsGate)
+        {
+            if (!_clearVadDefaultsOnNextConnection)
+            {
+                return false;
+            }
+            _clearVadDefaultsOnNextConnection = false;
+            return true;
+        }
+    }
+
     private readonly Lock _sessionUpdateRejectionGate = new();
     private int _pendingSessionUpdateRejections;
     private string _sessionUpdateRejectionCode = "invalid_value";
@@ -205,6 +256,21 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
                 "previous scenario likely called it but never actually sent that many session.update " +
                 "frames afterwards, leaving it armed to silently reject an unrelated later scenario's " +
                 "session.update.");
+        }
+
+        bool vadClearArmed;
+        lock (_vadDefaultsGate)
+        {
+            vadClearArmed = _clearVadDefaultsOnNextConnection;
+        }
+        if (vadClearArmed)
+        {
+            throw new InvalidOperationException(
+                "A pending ClearVadDefaultsOnNextConnection() call was never consumed by a " +
+                "connection attempt in the scenario that armed it -- a previous scenario likely " +
+                "called it but never actually opened a new connection afterwards, leaving it " +
+                "armed to silently strip VAD-default auto-replies from an unrelated later " +
+                "scenario's connection.");
         }
     }
 
@@ -365,6 +431,13 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
         if (ConsumeSessionUpdatedSuppressionForNewConnection())
         {
             connection.SuppressAllSessionUpdated = true;
+        }
+        if (ConsumeVadDefaultsClearForNewConnection())
+        {
+            // Strictly before AcceptWebSocketAsync/AttachSocket/Publish below -- no frame can
+            // possibly have been dispatched against this connection's Script yet, so this closes
+            // the race window completely (see ClearVadDefaultsOnNextConnection's doc comment).
+            connection.Script.ClearRules();
         }
         using var socket = await context.WebSockets.AcceptWebSocketAsync().ConfigureAwait(false);
         connection.AttachSocket(socket);

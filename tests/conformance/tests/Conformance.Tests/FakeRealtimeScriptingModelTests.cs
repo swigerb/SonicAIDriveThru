@@ -157,6 +157,109 @@ public sealed class FakeRealtimeScriptingModelTests
     }
 
     [Fact]
+    public async Task AssertNoPendingOneShotSwitches_throws_when_a_vad_defaults_clear_arm_was_never_consumed()
+    {
+        await using var fake = new FakeRealtimeUpstreamServer();
+        await fake.StartAsync(TestContext.Current.CancellationToken);
+
+        fake.ClearVadDefaultsOnNextConnection();
+
+        var ex = Assert.Throws<InvalidOperationException>(fake.AssertNoPendingOneShotSwitches);
+        Assert.Contains("ClearVadDefaultsOnNextConnection", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AssertNoPendingOneShotSwitches_does_not_throw_once_a_connection_consumed_the_vad_defaults_clear()
+    {
+        await using var fake = new FakeRealtimeUpstreamServer();
+        await fake.StartAsync(TestContext.Current.CancellationToken);
+
+        fake.ClearVadDefaultsOnNextConnection();
+        using var socket = new ClientWebSocket();
+        var wsUri = new Uri($"ws://{fake.BaseUri.Host}:{fake.BaseUri.Port}/openai/v1/realtime?model=gpt-realtime-test");
+        await socket.ConnectAsync(wsUri, TestContext.Current.CancellationToken);
+        Assert.NotNull(await ReceiveJsonWithTimeoutAsync(socket, TestContext.Current.CancellationToken)); // session.created
+
+        fake.AssertNoPendingOneShotSwitches();
+
+        await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
+    }
+
+    /// <summary>
+    /// The deterministic regression for the Browser-category flake root-caused via repeated
+    /// (40x) repro: without <see cref="FakeRealtimeUpstreamServer.ClearVadDefaultsOnNextConnection"/>,
+    /// even the *very first* `input_audio_buffer.append` a fresh connection ever receives gets a
+    /// synthetic `speech_started` reply (WithVadDefaults' whole point) -- calling
+    /// <see cref="RealtimeScript.ClearRules"/> from a test only *after* observing that connection
+    /// is too late to prevent a reply to a frame the receive loop already dispatched against the
+    /// still-armed rule. Arming the switch *before* the connection is even created (this test's
+    /// point) proves the very first append gets no reply at all -- no timing/race dependency, no
+    /// flakiness possible, because the assertion is "nothing arrives within a bounded wait",
+    /// which is stable regardless of scheduler jitter.
+    /// </summary>
+    [Fact]
+    public async Task ClearVadDefaultsOnNextConnection_suppresses_the_reply_to_the_very_first_append()
+    {
+        await using var fake = new FakeRealtimeUpstreamServer();
+        await fake.StartAsync(TestContext.Current.CancellationToken);
+        fake.ClearVadDefaultsOnNextConnection();
+
+        using var socket = new ClientWebSocket();
+        var wsUri = new Uri($"ws://{fake.BaseUri.Host}:{fake.BaseUri.Port}/openai/v1/realtime?model=gpt-realtime-test");
+        var connectionTask = fake.WaitForNextConnectionAsync(FrameTimeout, TestContext.Current.CancellationToken);
+        await socket.ConnectAsync(wsUri, TestContext.Current.CancellationToken);
+        var connection = await connectionTask;
+        Assert.NotNull(connection);
+        Assert.NotNull(await ReceiveJsonWithTimeoutAsync(socket, TestContext.Current.CancellationToken)); // session.created
+
+        await WebSocketJson.SendAsync(socket, new JsonObject
+        {
+            ["type"] = "input_audio_buffer.append",
+            ["audio"] = "dGVzdA==",
+        }, TestContext.Current.CancellationToken);
+
+        // Prove the append was actually received (not just "nothing sent yet") before asserting
+        // silence, so this can't pass for the wrong reason (e.g. the send itself failing).
+        var appendSeen = await UntilTrueAsync(
+            () => connection!.ReceivedFrames.Snapshot().Any(f => f.Type == "input_audio_buffer.append"),
+            FrameTimeout, TestContext.Current.CancellationToken);
+        Assert.True(appendSeen, "The fake never recorded the append we just sent.");
+
+        // Cancelling a pending ReceiveAsync aborts the ManagedWebSocket (it moves to the
+        // 'Aborted' state, which cannot be gracefully closed afterward) -- that's fine here since
+        // the assertion itself is exactly "no reply ever showed up", so we deliberately don't
+        // attempt a graceful CloseAsync afterward.
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        cts.CancelAfter(TimeSpan.FromMilliseconds(500));
+        await Assert.ThrowsAsync<TimeoutException>(async () =>
+        {
+            try
+            {
+                await WebSocketJson.ReceiveJsonAsync(socket, cts.Token);
+            }
+            catch (OperationCanceledException) when (!TestContext.Current.CancellationToken.IsCancellationRequested)
+            {
+                throw new TimeoutException("expected -- no reply should ever arrive");
+            }
+        });
+    }
+
+    private static async Task<bool> UntilTrueAsync(Func<bool> predicate, TimeSpan timeout, CancellationToken ct)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            if (predicate())
+            {
+                return true;
+            }
+            ct.ThrowIfCancellationRequested();
+            await Task.Delay(20, ct).ConfigureAwait(false);
+        }
+        return predicate();
+    }
+
+    [Fact]
     public async Task Input_audio_buffer_append_triggers_the_default_vad_like_acknowledgement_sequence()
     {
         await using var fake = new FakeRealtimeUpstreamServer();
