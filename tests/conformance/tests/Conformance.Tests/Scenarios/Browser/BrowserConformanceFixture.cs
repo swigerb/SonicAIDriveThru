@@ -147,10 +147,16 @@ public sealed class BrowserConformanceFixture : IAsyncLifetime
     /// raise happens inside asyncio's own default unhandled-callback-exception handler, entirely
     /// outside rtmt.py's <c>_forward_messages</c> (whose own <c>except ConnectionResetError:
     /// pass</c> only guards its own coroutine body, never event-loop machinery scheduled
-    /// separately from it) -- no application-code change could ever catch it, and the equivalent
-    /// Linux/macOS <c>SelectorEventLoop</c> transport-close path has no such call at all, so this
-    /// exact race cannot manifest there. See https://github.com/python/cpython/issues/83413
-    /// (still open).
+    /// separately from it). rtmt.py could theoretically intercept this -- installing a custom
+    /// <c>loop.set_exception_handler(...)</c> (asyncio's documented hook for exactly this "handler
+    /// called for an unhandled exception in a callback" case), or switching Windows off the
+    /// default Proactor event-loop policy in favour of the Selector one -- but both would mean
+    /// reaching into asyncio's event-loop plumbing to paper over an upstream-acknowledged CPython
+    /// bug that has nothing to do with anything rtmt.py itself gets wrong, purely to keep a test
+    /// harness quiet; we choose not to make that change to production code for that reason, and
+    /// filter the known-benign symptom here instead. The equivalent Linux/macOS
+    /// <c>SelectorEventLoop</c> transport-close path has no such call at all, so this exact race
+    /// cannot manifest there -- see https://github.com/python/cpython/issues/83413 (still open).
     ///
     /// Because of asyncio's specific "Exception in callback" log shape (as opposed to a plain
     /// <c>logger.exception(...)</c>), this single Python-side event is actually logged as *two*
@@ -164,6 +170,15 @@ public sealed class BrowserConformanceFixture : IAsyncLifetime
     /// </summary>
     internal static bool IsBenignProactorTeardownIncident(IReadOnlyList<string> incidentLines)
     {
+        // PR #54 review: this signature is Windows-only by construction (ProactorEventLoop only
+        // runs there), but gate explicitly rather than relying on the content check alone -- a
+        // non-Windows runner can then never match this filter, full stop, even if some future
+        // incident's text happened to coincidentally contain the same substrings.
+        if (!OperatingSystem.IsWindows())
+        {
+            return false;
+        }
+
         if (incidentLines is [
                 "ERROR:asyncio:Exception in callback _ProactorBasePipeTransport._call_connection_lost(None)",
             ])
