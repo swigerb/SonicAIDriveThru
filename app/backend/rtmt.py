@@ -1423,15 +1423,20 @@ class RTMiddleTier:
 
         return updated_message
 
-    async def _process_message_to_server(self, msg: str, ws: web.WebSocketResponse, verbose: bool = False, voice_locked: bool = False, guard: "_SessionUpdateGuard | None" = None, voice: str | None = _VOICE_UNSET) -> str | None:
+    async def _process_message_to_server(self, msg: str, ws: web.WebSocketResponse, verbose: bool = False, voice_locked: bool = False, guard: "_SessionUpdateGuard | None" = None, voice: str | None = _VOICE_UNSET) -> "tuple[str | None, str | None]":
         """Validate and forward one browser→upstream frame, or drop it.
 
-        Returns the exact string to forward, or `None` if the frame must be
-        dropped -- never raises, and never closes the caller's socket (PR #49
-        review round 2, "S2": every malformed-frame shape below used to raise
-        an uncaught exception out of this coroutine, which propagated up
-        through `_forward_messages` and tore down that guest's own session).
-        Callers must not assume the return value `is` (identical object to)
+        Returns `(forwarded, sent_type)`: `forwarded` is the exact string to
+        forward, or `None` if the frame must be dropped -- never raises, and
+        never closes the caller's socket (PR #49 review round 2, "S2": every
+        malformed-frame shape below used to raise an uncaught exception out
+        of this coroutine, which propagated up through `_forward_messages`
+        and tore down that guest's own session). `sent_type` is the
+        already-validated type of that same frame (or `None` iff `forwarded`
+        is `None`) -- callers key their own side effects (idle reset, nudge
+        cancel, greeting trigger, barge-in) on it directly instead of
+        re-`json.loads`-ing `forwarded` themselves (PR #49 review round 5,
+        "F4"). Callers must not assume `forwarded` `is` (identical object to)
         `msg.data` -- see "M2" below.
         """
         data = msg.data
@@ -1443,7 +1448,7 @@ class RTMiddleTier:
         # falls through to the slow path, which parses, validates and rebuilds
         # it from scratch.
         if _CLIENT_APPEND_FAST_PATH_RE.fullmatch(data):
-            return data
+            return data, "input_audio_buffer.append"
 
         session_id = self._sessions.get_session_id(ws)
 
@@ -1454,29 +1459,29 @@ class RTMiddleTier:
             message = json.loads(data)
         except (json.JSONDecodeError, ValueError):
             logger.warning("Dropped unparseable client→server frame (session=%s)", session_id)
-            return None
+            return None, None
         if not isinstance(message, dict):
             logger.warning(
                 "Dropped non-object client→server frame of type %s (session=%s)",
                 type(message).__name__, session_id)
-            return None
+            return None, None
         if not isinstance(message.get("type"), str):
             # Also covers `{"type": ["x"]}`: an unhashable `type` would raise
             # TypeError on _filter_client_to_server's frozenset membership
             # test below if it weren't caught here first.
             logger.warning(
                 "Dropped client→server frame with a non-string/missing type (session=%s)", session_id)
-            return None
+            return None, None
 
         filtered = _filter_client_to_server(message, session_id=session_id)
         if filtered is None:
-            return None
+            return None, None
         msg_type = filtered["type"]
         # M2: always rebuilt from the allow-listed dict -- never the browser's
         # original bytes/object -- so no extra top-level key can survive.
         updated_message = _dump_client_to_server(filtered, session_id)
         if updated_message is None:
-            return None
+            return None, None
         _vlog(verbose, "─── [Client → Server] %s ───", msg_type)
 
         if msg_type == "session.update":
@@ -1484,7 +1489,7 @@ class RTMiddleTier:
             if not isinstance(client_session, dict):
                 logger.warning(
                     "Dropped session.update with a missing/invalid session object (session=%s)", session_id)
-                return None
+                return None, None
             # M3: keep only the session keys the frontend actually sends;
             # everything server-owned is applied fresh by _build_session below.
             session_in = {k: v for k, v in client_session.items() if k in _CLIENT_SESSION_KEYS}
@@ -1514,7 +1519,7 @@ class RTMiddleTier:
                   len(session["tools"]), tool_names, session["tool_choice"])
             updated_message = _dump_client_to_server(filtered, session_id)
             if updated_message is None:
-                return None
+                return None, None
             # Track system message + tool schemas in context window
             ctx_monitor = self._sessions.get_context_monitor(session_id)
             if ctx_monitor:
@@ -1522,7 +1527,7 @@ class RTMiddleTier:
                 for tool_schema in session.get("tools", []):
                     ctx_monitor.add_content(json.dumps(tool_schema))
 
-        return updated_message
+        return updated_message, msg_type
 
     async def _forward_messages(self, ws: web.WebSocketResponse):
         # Per-connection tool tracking — prevents cross-connection interference
@@ -1869,7 +1874,7 @@ class RTMiddleTier:
                                 if (verbose or _VERBOSE_GLOBAL) and audio_frame_count % 50 == 0:
                                     _vlog(verbose, "─── [Client → Server] Audio frame #%d ───", audio_frame_count)
                             # Forward client message to OpenAI.
-                            new_msg = await self._process_message_to_server(msg, ws, verbose, voice_locked=assistant_audio_seen, guard=guard, voice=voice)
+                            new_msg, sent_type = await self._process_message_to_server(msg, ws, verbose, voice_locked=assistant_audio_seen, guard=guard, voice=voice)
                             # PR #49 review round 2, "F1": idle reset, nudge
                             # cancel and the greeting trigger used to be keyed
                             # on raw substring checks against msg.data,
@@ -1878,18 +1883,16 @@ class RTMiddleTier:
                             # (e.g. one merely *containing* the substring
                             # "response.cancel" or "session.update" somewhere,
                             # without actually being that type) could still
-                            # trigger them. They're now keyed on `sent_type`,
-                            # parsed from the already-validated/rebuilt
-                            # `new_msg` this coroutine forwards -- never from
-                            # the browser's raw bytes -- so a dropped or
-                            # malformed frame triggers nothing.
-                            sent_type = None
+                            # trigger them. They're now keyed on the
+                            # already-validated `sent_type` returned directly
+                            # by `_process_message_to_server` (PR #49 review
+                            # round 5, "F4" -- previously this line
+                            # re-`json.loads`-ed `new_msg` itself to recover
+                            # the type) -- never from the browser's raw
+                            # bytes -- so a dropped or malformed frame
+                            # triggers nothing.
                             if new_msg is not None:
                                 await target_ws.send_str(new_msg)
-                                try:
-                                    sent_type = json.loads(new_msg).get("type")
-                                except (json.JSONDecodeError, AttributeError):
-                                    sent_type = None
                             # Guest activity drives the idle clock. Mic frames
                             # stream constantly (silence included), so they
                             # don't count; the guest actually speaking does
