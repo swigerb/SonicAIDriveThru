@@ -1623,14 +1623,21 @@ class RTMiddleTier:
                                     )
                                     send_to_client = False
                                     client_text = None
-                                    # #36 S2: refresh the guest-visible order ticket from the
-                                    # server's own source of truth (order_state_singleton), not
-                                    # from the failed tool's result -- the exception may have
-                                    # landed after the order was already partially mutated, so
-                                    # the ticket the guest sees must reflect what's actually
-                                    # there, not go stale. Best-effort: if the order state isn't
-                                    # readable for this session either, skip it -- the guest
-                                    # still gets the function_call_output below regardless.
+                                    # #36 S2 (PR #58 re-review "F3"): refresh the guest-visible
+                                    # order ticket from order_state_singleton's CACHED order
+                                    # summary (get_order_summary_json returns order_summary_json,
+                                    # refreshed by _update_summary() at the end of the *previous*
+                                    # successful mutation) -- not from the failed tool's own
+                                    # result. This is still strictly better than doing nothing:
+                                    # it reflects every mutation that completed successfully
+                                    # before this call, so a guest speaking again after an earlier
+                                    # order change isn't shown a stale pre-that-change ticket. It
+                                    # is NOT a live re-read of order_state -- if this call's own
+                                    # exception landed after some in-place mutation but before its
+                                    # own _update_summary() ran, that partial change won't be in
+                                    # the cache either. Best-effort: if the order state isn't
+                                    # readable for this session at all, skip it -- the guest still
+                                    # gets the function_call_output below regardless.
                                     if session_id is not None:
                                         try:
                                             ticket_json = order_state_singleton.get_order_summary_json(session_id)
