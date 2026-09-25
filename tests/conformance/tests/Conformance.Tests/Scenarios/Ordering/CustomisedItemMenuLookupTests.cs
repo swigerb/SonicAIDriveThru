@@ -214,9 +214,19 @@ public sealed class CustomisedItemMenuLookupTests
         /// Tots" (size word in the name text) is charged in full, while "Tater Tots (Large)"
         /// (size word as a bracketed modifier) still absorbs into the combo side slot -- the
         /// modifier is stripped before the alias lookup runs, exactly like any other
-        /// modifier.</summary>
+        /// modifier.
+        ///
+        /// PR #61 delta review: the original version of this test ordered BOTH items alongside
+        /// one combo, so a single combo side slot absorbs at most one of them either way -- the
+        /// total (combo + one unit price) was identical whether "Large Tater Tots" or "Tater Tots
+        /// (Large)" was the one actually absorbed, so the test could not tell them apart and did
+        /// not pin the fail-safe it claimed to. Split into two independent scenarios, each with
+        /// the combo plus exactly one item, so the total unambiguously reveals whether that one
+        /// item absorbed or not. Rick's S1 mutation (stripping a leading "large " token before the
+        /// alias match, so "Large Tater Tots" would also resolve to the Tots alias) now fails the
+        /// first scenario below.</summary>
         [Fact]
-        public Task Size_word_in_the_name_vs_as_a_modifier() =>
+        public Task Size_word_in_the_name_is_charged_in_full_not_absorbed() =>
             fixture.RunAsync(async () =>
             {
                 var ct = TestContext.Current.CancellationToken;
@@ -230,18 +240,41 @@ public sealed class CustomisedItemMenuLookupTests
                     [
                         ("add", BaseComboName, BaseComboSize, 1, BaseComboPrice),
                         ("add", "Large Tater Tots", "large", 1, unitPrice),
+                    ],
+                    roundTripIndex, ct);
+
+                OrderScenarioHelpers.AssertMoneyEqual(
+                    BaseComboPrice + unitPrice,
+                    OrderScenarioHelpers.GetOrderTotal(result.ToolResultJson!),
+                    "'Large Tater Tots' (size word in the name text) does not match the Tots " +
+                    "alias and must be charged in full alongside the combo.");
+                Assert.Equal(2, OrderScenarioHelpers.GetOrderItemCount(result.ToolResultJson!));
+            });
+
+        [Fact]
+        public Task Size_word_as_a_bracketed_modifier_still_absorbs() =>
+            fixture.RunAsync(async () =>
+            {
+                var ct = TestContext.Current.CancellationToken;
+                const decimal unitPrice = 2.79m;
+
+                var (browser, connection, roundTripIndex) = await OrderScenarioHelpers.ConnectAndGreetAsync(fixture, ct);
+                await using var _ = browser;
+
+                var result = await OrderScenarioHelpers.RunOrderStepsAsync(
+                    connection, browser,
+                    [
+                        ("add", BaseComboName, BaseComboSize, 1, BaseComboPrice),
                         ("add", "Tater Tots (Large)", "large", 1, unitPrice),
                     ],
                     roundTripIndex, ct);
 
-                // Combo (absorbs "Tater Tots (Large)" into its side slot) + "Large Tater Tots"
-                // charged in full = combo price + one unit price, not two.
                 OrderScenarioHelpers.AssertMoneyEqual(
-                    BaseComboPrice + unitPrice,
+                    BaseComboPrice,
                     OrderScenarioHelpers.GetOrderTotal(result.ToolResultJson!),
-                    "'Large Tater Tots' (size word in the name) is charged in full; " +
-                    "'Tater Tots (Large)' (size word as a modifier) absorbs into the combo side slot.");
-                Assert.Equal(2, OrderScenarioHelpers.GetOrderItemCount(result.ToolResultJson!));
+                    "'Tater Tots (Large)' (size word as a bracketed modifier) is stripped before " +
+                    "the alias lookup and absorbs into the combo side slot for free.");
+                Assert.Equal(1, OrderScenarioHelpers.GetOrderItemCount(result.ToolResultJson!));
             });
 
 

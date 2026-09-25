@@ -1240,8 +1240,13 @@ So `"Large Tater Tots"` (the size word is part of the name text) is **charged in
 not match any `_TOTS_ALIASES` key — while `"Tater Tots (Large)"` (the size word is a bracketed
 modifier) **absorbs into the combo side slot** — `strip_modifiers()` removes `"(Large)"` first,
 leaving `"Tater Tots"`, which does match. Both are pinned as regression tests; see
-`test_menu_utils.py::SizeWordFailSafeTests` and `Size_word_in_the_name_vs_as_a_modifier` in
-`CustomisedItemMenuLookupTests.cs`.
+`test_menu_utils.py::SizeWordFailSafeTests` and, in `CustomisedItemMenuLookupTests.cs`, two
+independent scenarios — `Size_word_in_the_name_is_charged_in_full_not_absorbed` and
+`Size_word_as_a_bracketed_modifier_still_absorbs` — each with the combo plus exactly *one* item.
+(PR #61 delta review: a single earlier scenario ordered both items alongside one combo, but a
+combo has only one side slot, so the total was identical — combo price + one unit price — whether
+`"Large Tater Tots"` or `"Tater Tots (Large)"` was the one actually absorbed; the test could not
+tell them apart. Splitting into two single-item scenarios makes each total unambiguous.)
 
 **The exact `_menu_key()` normalisation algorithm (PR #50 review, round 4 — state it precisely so
 C# does the same thing, not just "something similar")**, applied in this order to *every* raw
