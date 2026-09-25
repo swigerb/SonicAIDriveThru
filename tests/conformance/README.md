@@ -1450,15 +1450,27 @@ pending greeting, and **only** if nothing else already ended it:
   ran normally for it), `on_response_done()` is a pure no-op — it must never touch a genuinely
   unrelated in-flight response's `ai_speaking` (e.g. a late/duplicate `response.done` racing a
   different, still-active response).
-- If `ai_speaking` is still `True` (the no-audio case — `on_audio_done()` never ran), clear it
-  **immediately, with no cooldown**: nothing was ever actually rendered to the guest, so there is no
-  residual/echo risk that would warrant `on_audio_done()`'s extended post-greeting cooldown
-  (`ECHO_COOLDOWN_SEC * 2`). This is deliberately the same "instant, no cooldown" behaviour as
-  `on_barge_in()`, not a delegation to `on_audio_done()` — an earlier draft of this fix *did*
-  delegate to `on_audio_done()`, which reintroduced an artificial multi-second mute after a greeting
-  the guest never actually heard (caught by `GreetingWithoutAudioUnmutesTests`, whose single
-  post-greeting mic append landed inside that unwarranted cooldown window and was dropped forever,
-  since a dropped mic frame is never retried/requeued by the browser at that point in the flow).
+- If `ai_speaking` is still `True` (`on_audio_done()` never ran for this response — no completed
+  `audio.done`), `on_response_done()` now splits on whether the guest actually heard anything, via
+  a dedicated `_greeting_audio_seen` flag set by `on_audio_delta()` — **not** on `ai_speaking`
+  itself, which `start_greeting_suppression()`'s own pre-set makes `True` before any audio exists,
+  so it can't tell the two cases apart on its own (PR #58 re-review, "S1"; an earlier version of
+  this fix conflated them: "latched ⇒ nothing rendered" was wrong):
+  - **No audio ever seen** (`_greeting_audio_seen` is `False` — a text-only fallback, or cancelled
+    before the first delta): clear `ai_speaking` **immediately, with no cooldown**. Nothing was
+    ever actually rendered to the guest, so there is no residual/echo risk that would warrant
+    `on_audio_done()`'s extended post-greeting cooldown (`ECHO_COOLDOWN_SEC * 2`). This is
+    deliberately the same "instant, no cooldown" behaviour as `on_barge_in()`, not a delegation to
+    `on_audio_done()` — an earlier draft of this fix *did* delegate to `on_audio_done()`, which
+    reintroduced an artificial multi-second mute after a greeting the guest never actually heard
+    (caught by `GreetingWithoutAudioUnmutesTests`, whose single post-greeting mic append landed
+    inside that unwarranted cooldown window and was dropped forever, since a dropped mic frame is
+    never retried/requeued by the browser at that point in the flow).
+  - **At least one audio delta was seen** (`_greeting_audio_seen` is `True` — the greeting's audio
+    started streaming but was cancelled/errored mid-stream, with no completing `audio.done`):
+    apply the **same doubled post-greeting cooldown** `on_audio_done()` would, not the instant
+    unmute above. Partial audio already reached the guest, carrying the same residual echo risk a
+    normal completion does.
 - If `ai_speaking` is already `False` (a real barge-in, `on_barge_in()`, already cleared it before
   this `response.done` arrived), only the `greeting_in_progress` bookkeeping flag is cleared — no
   cooldown is re-armed retroactively.

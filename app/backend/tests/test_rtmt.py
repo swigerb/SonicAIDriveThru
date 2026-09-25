@@ -553,6 +553,42 @@ class EchoSuppressorTests(unittest.TestCase):
             self.assertFalse(echo.greeting_in_progress)
         asyncio.run(_run())
 
+    # ─── swigerb/SonicAIDriveThru#48 (PR #58 re-review, "S1"): greeting audio
+    # already streamed (at least one delta seen) but no audio.done ever
+    # arrived to complete it (e.g. cancelled/errored mid-stream) used to give
+    # an instant unmute -- "latched ⇒ nothing rendered" was wrong, since
+    # on_audio_delta() also latches ai_speaking. Some of that audio may
+    # already have reached the guest, so there IS residual echo risk, same as
+    # a normal on_audio_done() greeting completion. ───
+
+    def test_response_done_after_partial_audio_applies_doubled_cooldown_not_instant_unmute(self):
+        """Rick's repro: response.done after at least one greeting audio delta (but no
+        audio.done) must apply the same doubled post-greeting cooldown a normal completion
+        would, not the no-audio case's instant unmute.
+        """
+        echo = EchoSuppressor()
+        echo.start_greeting_suppression()
+        echo.on_audio_delta()
+        loop = MagicMock()
+        loop.time.return_value = 42.0
+        target_ws = MagicMock()
+        echo.on_response_done(loop, target_ws)
+        self.assertTrue(echo.should_suppress_audio(42.0))
+
+    def test_response_done_after_partial_audio_cooldown_is_the_doubled_amount(self):
+        """The extended cooldown must be exactly ECHO_COOLDOWN_SEC * 2, the same as a real
+        audio_done-completed greeting, not some other arbitrary extension.
+        """
+        echo = EchoSuppressor()
+        echo.start_greeting_suppression()
+        echo.on_audio_delta()
+        loop = MagicMock()
+        loop.time.return_value = 100.0
+        target_ws = MagicMock()
+        echo.on_response_done(loop, target_ws)
+        self.assertAlmostEqual(echo.cooldown_end, 100.0 + ECHO_COOLDOWN_SEC * 2, delta=0.01)
+        self.assertFalse(echo.greeting_in_progress)
+
     # ─── swigerb/SonicAIDriveThru#48 (PR #58 re-review, "M1"): a rate-limited
     # greeting's response.done correctly unmutes instantly (no audio was ever
     # rendered), but RateLimitRecovery may then retry that same greeting with a
