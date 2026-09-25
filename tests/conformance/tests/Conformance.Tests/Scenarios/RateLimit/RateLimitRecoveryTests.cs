@@ -56,58 +56,14 @@ public sealed class RateLimitRecoveryTests(ShortTimersConformanceFixture fixture
         return connection!;
     }
 
-    [Fact]
-    public Task Ladder_runs_silent_then_two_notifications_then_gives_up() => fixture.RunAsync(async () =>
-    {
-        var ct = TestContext.Current.CancellationToken;
-        var connectionTask = fixture.Realtime.WaitForNextConnectionAsync(FrameTimeout, ct);
-        await using var browser = await RealtimeBrowserClient.ConnectAsync(fixture.Backend!.BaseUri, cancellationToken: ct);
-        var connection = await ConnectAndGetPastGreetingAsync(connectionTask, browser, ct);
-
-        // Three response.create frames: the guest's turn, then the first retry, then the second
-        // (and final) retry. All three fail, driving the ladder all the way to exhaustion.
-        connection.Script.Enqueue(NoHintRateLimited());
-        connection.Script.Enqueue(NoHintRateLimited());
-        connection.Script.Enqueue(NoHintRateLimited());
-
-        var turnStart = connection.ReceivedFrames.Count;
-        await browser.SendResponseCreateAsync(ct);
-
-        // Attempt 0's failure is silent -- no extension.rate_limited at all -- so the *first*
-        // thing the browser should observe is directly the {attempt:1} notification, not a
-        // {attempt:0} one that would prove attempt 0 wasn't actually silent.
-        var first = await browser.ReceivedFrames.WaitForAsync(
-            f => f.Type == "extension.rate_limited", FrameTimeout, ct);
-        Assert.True(first is not null, "Expected extension.rate_limited after the first retry also failed.");
-        Assert.Equal(1, first!.Json.GetProperty("attempt").GetInt32());
-        Assert.False(first.Json.TryGetProperty("final", out _), "attempt:1 must not carry final:true.");
-
-        var second = await browser.ReceivedFrames.WaitForAsync(
-            f => f.Type == "extension.rate_limited" && f.Sequence > first.Sequence, FrameTimeout, ct);
-        Assert.True(second is not null, "Expected a second extension.rate_limited after the final retry failed.");
-        Assert.Equal(2, second!.Json.GetProperty("attempt").GetInt32());
-        Assert.True(second.Json.TryGetProperty("final", out var finalProp) && finalProp.GetBoolean(),
-            "attempt:2 must carry final:true.");
-
-        // No third notification, no fourth response.create -- the ladder must stay exhausted
-        // until the guest's next turn. ShortTimers' second retry delay is 0.4s; 2s is generous
-        // headroom without ever approaching this actually taking long.
-        var extraNotification = await browser.ReceivedFrames.WaitForAsync(
-            f => f.Type == "extension.rate_limited" && f.Sequence > second.Sequence,
-            TimeSpan.FromSeconds(2), ct);
-        Assert.True(extraNotification is null, "Ladder must not notify again after attempt:2/final:true.");
-
-        var responseCreatesSeenByFake = connection.ReceivedFrames.Snapshot()
-            .Skip(turnStart)
-            .Count(f => f.Type == "response.create");
-        Assert.Equal(3, responseCreatesSeenByFake);
-
-        // Clean up: let the guest "speak again" so the session isn't left in a rate-limited
-        // state when the scenario ends (RunAsync's own teardown only cares about connections,
-        // not this, but it keeps the shared backend's state tidy for later tests in this
-        // collection).
-        await browser.SendInputAudioAppendAsync("dGVzdA==", ct);
-    });
+    // Ladder_runs_silent_then_two_notifications_then_gives_up and
+    // A_service_retry_hint_is_parsed_and_clamped_to_the_production_bounds both moved to
+    // RateLimitRetryTimingTests.cs on the RateLimitTimers profile (PR #54 review, blocker B1):
+    // ShortTimers' 1-second idle_timeout left both of them with only a few hundred milliseconds
+    // of margin against a genuine idle-close racing the behaviour actually under test -- the
+    // same thin-margin pattern the #52 review flagged for ResumeMargin. Neither test is
+    // exercising idle behaviour itself, so RateLimitTimers' 10s idle/grace budget (same
+    // rate-limit-delay values, otherwise) removes the race without changing what's asserted.
 
     // A_pending_retry_is_cancelled_by_guest_speech lives in
     // RateLimitGuestSpeechCancellationTests.cs on the RateLimitTimers profile, not ShortTimers --
@@ -245,56 +201,5 @@ public sealed class RateLimitRecoveryTests(ShortTimersConformanceFixture fixture
             .Count(f => f.Type == "response.create");
         // Exactly two: rtmt.py's own auto-sent tool follow-up, then the ladder's one retry of it.
         Assert.Equal(2, responseCreatesAfterTheTool);
-    });
-
-    [Fact]
-    public Task A_service_retry_hint_is_parsed_and_clamped_to_the_production_bounds() => fixture.RunAsync(async () =>
-    {
-        var ct = TestContext.Current.CancellationToken;
-        var connectionTask = fixture.Realtime.WaitForNextConnectionAsync(FrameTimeout, ct);
-        await using var browser = await RealtimeBrowserClient.ConnectAsync(fixture.Backend!.BaseUri, cancellationToken: ct);
-        var connection = await ConnectAndGetPastGreetingAsync(connectionTask, browser, ct);
-
-        // rate_limit.py's FIRST_RETRY_BOUNDS=(0.5, 5.0) are hardcoded and never overridable via
-        // CONFORMANCE_TEST_HOOKS. This deliberately proves the *floor* clamp (a hint asking for
-        // far less than 0.5s must still wait out the floor), not the ceiling -- ShortTimers' 1s
-        // idle_timeout can't accommodate a ~5s ceiling-clamped retry, so only the floor case is
-        // in scope here. A hint of "10ms" clamps up to the 0.5s floor, comfortably inside the
-        // idle deadline either way, while still proving both that the hint was recognised (0.5s
-        // is nowhere near the raw, unclamped 0.01s) *and* that it wasn't simply ignored in favour
-        // of ShortTimers' unhinted 0.2s default (0.5s is well past 0.2s too).
-        connection.Script.Enqueue(new ResponseScript([
-            new DoneEvent(Status: "failed", ErrorCode: "rate_limit_exceeded",
-                ErrorMessage: "Rate limit reached. Please try again in 10ms."),
-        ]));
-
-        var turnStart = connection.ReceivedFrames.Count;
-        var sendTime = DateTimeOffset.UtcNow;
-        await browser.SendResponseCreateAsync(ct);
-
-        // A dedicated "must not arrive within 0.3s" WaitForAsync (racing its own ~300ms
-        // Task.Delay against the retry's arrival signal) was tried here first but proved
-        // non-deterministic under full-suite load: FrameLog.WaitForAsync's timeout is itself a
-        // Task.Delay on the shared thread pool, and under heavy CPU contention its callback can
-        // be scheduled late enough that the genuine ~0.5s-floor retry -- which sets the same
-        // wait's completion signal the moment it's recorded -- wins the race, producing a
-        // spurious non-null "too early" result despite the retry having, in truth, arrived on
-        // time. Asserting on the single retry frame's own recorded ReceivedAt timestamp below
-        // proves the identical property (clamped to the floor, not the raw hint or the unhinted
-        // default) without racing an independent client-side clock against it.
-        //
-        // Must arrive well before ShortTimers' 1s idle_timeout would otherwise close the socket
-        // (a retry never touches the idle clock, so nothing else is keeping this session alive).
-        var retry = await connection.ReceivedFrames.WaitForAsync(
-            f => f.Sequence > turnStart && f.Type == "response.create", TimeSpan.FromSeconds(0.6), ct);
-        Assert.True(retry is not null,
-            "Expected the retry at roughly the 0.5s FIRST_RETRY_BOUNDS floor, clamped up from the " +
-            "10ms hint.");
-        var elapsed = retry!.ReceivedAt - sendTime;
-        // The lower bound alone proves the hint was recognised and clamped up to the 0.5s floor:
-        // it rules out both the raw, unclamped 0.01s hint and ShortTimers' unhinted 0.2s default
-        // (0.35s is comfortably past both).
-        Assert.True(elapsed >= TimeSpan.FromSeconds(0.35) && elapsed <= TimeSpan.FromSeconds(0.9),
-            $"Expected the retry roughly 0.5s after the send (clamped up to the floor), observed {elapsed}.");
     });
 }
