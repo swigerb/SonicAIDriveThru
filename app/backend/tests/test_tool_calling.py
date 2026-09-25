@@ -170,6 +170,35 @@ class SearchErrorHandlingTests(unittest.TestCase):
         self.assertEqual(result.destination, ToolResultDirection.TO_SERVER)
         self.assertTrue("try that again" in result.text.lower() or "trouble" in result.text.lower())
 
+    def test_hanging_iterator_times_out_via_search_service_unavailable_error_key(self):
+        """PR #50 review (second round, should-fix, kills Y5): the previous test above proves
+        the timeout fires, but with no ``_prompt_loader`` configured it only ever exercises the
+        hardcoded fallback string in ``tools.py`` -- it can never notice if the *error key*
+        requested on timeout drifted away from ``"search_service_unavailable"`` (e.g. a typo'd
+        key, or accidentally reusing a different error's key), because the fallback text is
+        returned before ``render_error`` is ever called. This test wires up the real
+        ``PromptLoader(brand="sonic")`` (the actual ``error_messages.yaml`` used in production)
+        so the returned text is not the source-code fallback but the literal rendered value of
+        ``search_service_unavailable`` -- reproducing the same hanging-iterator shape (the
+        ``search()`` call returns instantly, the real HTTP request happens during iteration) with
+        ``timeout_seconds: 0.05``."""
+        from prompt_loader import PromptLoader
+
+        async def _hanging_iteration_search(**kwargs):
+            async def _iter():
+                await asyncio.sleep(10)
+                yield {"id": "1", "name": "Cherry Limeade", "category": "Slushes", "sizes": "N/A"}
+
+            return _iter()
+
+        client = AsyncMock()
+        client.search = _hanging_iteration_search
+        loader = PromptLoader(brand="sonic")
+        with patch.dict(_search_cfg, {"timeout_seconds": 0.05}), patch("tools._prompt_loader", loader):
+            result = _run(search(client, "cfg", "id", "description", "embedding", False, {"query": "limeade"}))
+        self.assertEqual(result.destination, ToolResultDirection.TO_SERVER)
+        self.assertEqual(result.text, loader.render_error("search_service_unavailable"))
+
 
 class SearchCacheTests(unittest.TestCase):
     """Test search result caching."""
