@@ -53,6 +53,17 @@ public static class KeepAlive
                 // lets the caller's own real assertions report what actually happened instead of
                 // this unrelated send exception pre-empting them.
             }
+            catch (ObjectDisposedException)
+            {
+                // F4 (PR #54 review): once a caller disposes the underlying RealtimeBrowserClient
+                // (or its socket) while this loop is mid-iteration -- e.g. a test's own `await
+                // using var browser = ...` unwinding before StopAsync/DisposeAsync got a chance to
+                // cancel the loop first -- the next SendExtensionSetVerboseLoggingAsync can throw
+                // this instead of WebSocketException/OperationCanceledException. Same rationale as
+                // both catches above: the client is already gone, so there is nothing left for a
+                // best-effort keepalive to do, and the caller's own assertions should report what
+                // actually happened rather than this unrelated teardown race.
+            }
         }, CancellationToken.None);
 
         return new KeepAliveLoop(cts, loopTask);
@@ -64,6 +75,8 @@ public sealed class KeepAliveLoop : IAsyncDisposable
 {
     private readonly CancellationTokenSource _cts;
     private readonly Task _loopTask;
+    private Task? _stopTask;
+    private readonly Lock _stopGate = new();
 
     internal KeepAliveLoop(CancellationTokenSource cts, Task loopTask)
     {
@@ -71,8 +84,27 @@ public sealed class KeepAliveLoop : IAsyncDisposable
         _loopTask = loopTask;
     }
 
-    /// <summary>Cancels the loop and awaits its (already-fault-swallowed) completion.</summary>
-    public async Task StopAsync()
+    /// <summary>
+    /// Cancels the loop and awaits its (already-fault-swallowed) completion. Idempotent (#54
+    /// review F4): a second, third, ... call -- whether an explicit re-call or via
+    /// <see cref="DisposeAsync"/> after an explicit <see cref="StopAsync"/> already ran, or a
+    /// concurrent call from two code paths unwinding at once -- returns the same in-flight or
+    /// already-completed stop instead of re-cancelling an already-disposed <see cref="_cts"/>
+    /// (which used to throw <see cref="ObjectDisposedException"/>). This lets callers combine
+    /// <c>await using var keepAlive = ...</c> (a safety net for early-exit/exception paths) with
+    /// an explicit early <see cref="StopAsync"/> call (for tests that need the keepalive to stop
+    /// at a precise point mid-method) without having to pick only one style.
+    /// </summary>
+    public Task StopAsync()
+    {
+        lock (_stopGate)
+        {
+            _stopTask ??= StopOnceAsync();
+            return _stopTask;
+        }
+    }
+
+    private async Task StopOnceAsync()
     {
         await _cts.CancelAsync().ConfigureAwait(false);
         await _loopTask.ConfigureAwait(false);
@@ -83,10 +115,8 @@ public sealed class KeepAliveLoop : IAsyncDisposable
     /// #28 N28: lets a caller hold a <see cref="KeepAliveLoop"/> in an <c>await using</c> block
     /// instead of always needing an explicit <see cref="StopAsync"/> call (and a try/finally to
     /// guarantee it runs on every exit path, including test failures). Just forwards to
-    /// <see cref="StopAsync"/> -- both are safe to call at most once; <see cref="_cts"/>'s own
-    /// disposal there would throw <see cref="ObjectDisposedException"/> on a second call, so
-    /// callers should pick one style (either <c>await using</c>, or an explicit
-    /// <see cref="StopAsync"/>) rather than both for the same instance.
+    /// <see cref="StopAsync"/>, which is idempotent, so this composes safely with an explicit
+    /// earlier <see cref="StopAsync"/> call on the same instance.
     /// </summary>
     public ValueTask DisposeAsync() => new(StopAsync());
 }
