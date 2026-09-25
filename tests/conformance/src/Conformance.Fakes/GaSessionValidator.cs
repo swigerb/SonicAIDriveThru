@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace Conformance.Fakes;
 
@@ -304,6 +305,17 @@ public sealed class RealtimeSessionState
     /// gpt-realtime-2.1 / gpt-realtime-2.1-dz for PR #30 review "G1") -- this set is what lets
     /// <see cref="RealtimeScript.WithVadDefaults"/> reproduce that rejection.</summary>
     public HashSet<string> SeenConversationItemIds { get; } = new(StringComparer.Ordinal);
+
+    /// <summary>#28 N18: the fake's own copy of every conversation item it has ever sent, keyed
+    /// by item id, so `conversation.item.retrieve` has something real to answer with. Populated
+    /// wherever an item is created (client-supplied via `conversation.item.create`, or
+    /// fake-generated audio/function-call items), and overwritten with the finalized version once
+    /// an in-progress item completes -- a scenario retrieving an item mid-response back gets
+    /// whatever content had actually been sent by then, not the eventual final content. This is
+    /// deliberately a plain content mirror, not a source of truth for id-uniqueness or ordering:
+    /// #30 owns duplicate-id rejection (<see cref="SeenConversationItemIds"/>) and
+    /// `previous_item_id` tracking (<see cref="LastConversationItemId"/>).</summary>
+    public Dictionary<string, JsonObject> ConversationItemsById { get; } = new(StringComparer.Ordinal);
 
     /// <summary>The full session as GA would report it in `session.updated`, accumulated across
     /// every accepted `session.update` on this connection. Top-level keys from each update

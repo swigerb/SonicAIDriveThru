@@ -168,6 +168,12 @@ public sealed class RealtimeScript
                 // point at a stale predecessor instead of the client item that actually came last).
                 var previousItemId = connection.SessionState.LastConversationItemId;
                 var itemNode = System.Text.Json.Nodes.JsonNode.Parse(item.GetRawText());
+                if (itemId is not null && itemNode is System.Text.Json.Nodes.JsonObject itemObject)
+                {
+                    // #28 N18: mirror the item content so a later conversation.item.retrieve has
+                    // something real to answer with.
+                    connection.SessionState.ConversationItemsById[itemId] = itemObject;
+                }
                 await connection.SendAsync(new System.Text.Json.Nodes.JsonObject
                 {
                     ["type"] = "conversation.item.added",

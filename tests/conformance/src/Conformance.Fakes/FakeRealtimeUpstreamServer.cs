@@ -572,6 +572,9 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
             case "response.cancel":
                 await HandleResponseCancelAsync(connection, frame, ct).ConfigureAwait(false);
                 break;
+            case "conversation.item.retrieve":
+                await HandleConversationItemRetrieveAsync(connection, frame, ct).ConfigureAwait(false);
+                break;
         }
 
         // Rule-based triggers (VAD-like defaults plus anything a test added via Script.On) run
@@ -698,6 +701,49 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
         connection.ActiveResponseCancellation?.Cancel();
     }
 
+    // #28 N18: GA (Conversation Item Retrieve Event, part of the OpenAI Realtime API reference
+    // cited atop GaSessionValidator.cs) — "Send this event when you want to retrieve the server's
+    // representation of a specific item in the conversation history... The server will respond
+    // with a conversation.item.retrieved event, unless the item does not exist in the
+    // conversation history, in which case the server will respond with an error." Retrieval is
+    // answered purely from this connection's own mirror (RealtimeSessionState.ConversationItemsById)
+    // — the fake never had a real upstream conversation to ask, so "exists" here means "this fake
+    // sent or accepted it earlier on this connection". Duplicate-id rejection and
+    // previous_item_id tracking on the create path are #30's concern, not this handler's.
+    private static async Task HandleConversationItemRetrieveAsync(FakeRealtimeConnection connection, RecordedFrame frame, CancellationToken ct)
+    {
+        var itemId = TryGetString(frame.Json, "item_id");
+        var eventId = TryGetString(frame.Json, "event_id");
+
+        if (itemId is not null && connection.SessionState.ConversationItemsById.TryGetValue(itemId, out var item))
+        {
+            await connection.SendAsync(new JsonObject
+            {
+                ["type"] = "conversation.item.retrieved",
+                ["event_id"] = FakeRealtimeConnection.NewEventId(),
+                ["item_id"] = itemId,
+                ["item"] = item.DeepClone(),
+            }, ct).ConfigureAwait(false);
+            return;
+        }
+
+        // The GA reference does not name the not-found error's exact `code` in the page fetched
+        // for this fix (2026-09-24, same reference cited atop GaSessionValidator.cs) -- NOT
+        // independently live-verified, same caveat as response.cancel's error codes (see README
+        // "Response cancel — GA semantics and unverified error codes"). `item_not_found` is this
+        // fake's best-available placeholder; a scenario must not assert this exact string as a
+        // GA-verified contract.
+        await SendValidationErrorAsync(
+            connection,
+            SessionUpdateValidationResult.Rejected(
+                "item_not_found",
+                "item_id",
+                $"Item '{itemId}' not found.",
+                echoEventId: true),
+            eventId,
+            ct).ConfigureAwait(false);
+    }
+
     private async Task RespondAsync(FakeRealtimeConnection connection, CancellationToken ct)
     {
         var state = connection.SessionState;
@@ -791,6 +837,8 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
                 ["previous_item_id"] = state.LastConversationItemId,
                 ["item"] = completedItem.DeepClone(),
             }, ct).ConfigureAwait(false);
+            // #28 N18: overwrite the in-progress mirror with the finalized content.
+            state.ConversationItemsById[audioItemId] = (JsonObject)completedItem.DeepClone()!;
 
             output.Add(completedItem.DeepClone());
             outputIndex++;
@@ -857,6 +905,9 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
                                 ["item"] = openItem.DeepClone(),
                             }, ct).ConfigureAwait(false);
                             state.LastConversationItemId = audioItemId;
+                            // #28 N18: mirror the in-progress item so a retrieve mid-response
+                            // gets whatever content had actually gone out by then.
+                            state.ConversationItemsById[audioItemId] = (JsonObject)openItem.DeepClone()!;
                             await connection.SendAsync(new JsonObject
                             {
                                 ["type"] = "response.content_part.added",
@@ -921,6 +972,9 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
                             ["item"] = openCallItem.DeepClone(),
                         }, ct).ConfigureAwait(false);
                         state.LastConversationItemId = callItemId;
+                        // #28 N18: mirror the in-progress item so a retrieve mid-response gets
+                        // whatever content had actually gone out by then.
+                        state.ConversationItemsById[callItemId] = (JsonObject)openCallItem.DeepClone()!;
 
                         await connection.SendAsync(new JsonObject
                         {
@@ -965,6 +1019,8 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
                             ["previous_item_id"] = state.LastConversationItemId,
                             ["item"] = completedCallItem.DeepClone(),
                         }, ct).ConfigureAwait(false);
+                        // #28 N18: overwrite the in-progress mirror with the finalized content.
+                        state.ConversationItemsById[callItemId] = (JsonObject)completedCallItem.DeepClone()!;
 
                         output.Add(completedCallItem.DeepClone());
                         outputIndex++;
