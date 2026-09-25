@@ -84,6 +84,9 @@ jobs:
   # Part of issue #11 (S1.5): frontend build + tests, run on every PR to dev/main.
   frontend-tests:
     name: Frontend build and tests
+    # SCRATCH PROOF ONLY (M1, Rick's PR #52 review) -- forces this job to `skipped` so
+    # conformance-gate can be watched failing in real CI. Do not merge this commit.
+    if: false
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
