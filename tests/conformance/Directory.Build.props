@@ -10,5 +10,13 @@
     <AnalysisLevel>latest</AnalysisLevel>
     <InvariantGlobalization>false</InvariantGlobalization>
     <NoWarn>$(NoWarn);CA1848;CA2007</NoWarn>
+    <!-- issue #24 (CI hardening): pins the exact resolved dependency graph (including
+         transitives) into a committed packages.lock.json per project, so a same-versions-on-paper
+         restore can never silently pull a different transitive graph between a contributor's
+         machine and CI. CI restores in locked mode (see conformance.yml), which fails the build
+         instead of silently re-resolving if the lock file and the Directory.Packages.props
+         versions above ever disagree. Regenerate after any version bump by running a restore with
+         the force evaluate flag from this directory. -->
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
   </PropertyGroup>
 </Project>

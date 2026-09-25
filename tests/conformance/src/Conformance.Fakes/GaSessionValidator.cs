@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace Conformance.Fakes;
 
@@ -66,6 +67,49 @@ public static class GaSessionValidator
     public static readonly IReadOnlySet<string> AudioOutputKeys = new HashSet<string>(StringComparer.Ordinal)
     {
         "format", "speed", "voice",
+    };
+
+    /// <summary>
+    /// #28 N11: keys accepted under `session.audio.input.transcription` (the `AudioTranscription`
+    /// object) -- previously unchecked, so a translator that forwarded a legacy/renamed nested key
+    /// (e.g. a pre-GA field name) here would pass the fake but be rejected by the real service.
+    ///
+    /// #28 F2 (PR #52 review): re-verified against the OpenAI Realtime API reference --
+    /// https://developers.openai.com/api/reference/resources/realtime (section "Audio
+    /// Transcription", fetched 2026-09-25) -- which currently documents the `AudioTranscription`
+    /// object as `{ delay, keywords, language, languages, model, prompt }` (6 keys). `languages`
+    /// ("Possible languages of the input audio... Supported by `gpt-transcribe` and
+    /// `gpt-live-transcribe`") is a real, currently-documented GA key alongside the singular
+    /// `language` -- kept, not removed. The same re-check also found the set here was missing
+    /// two other now-documented keys, `delay` and `keywords`, which are added below for the same
+    /// reason N11 exists: an unchecked/incomplete nested-key set lets a translator regression
+    /// slip past the fake. Azure's realtime reference --
+    /// https://learn.microsoft.com/en-us/azure/foundry/openai/realtime-audio-reference (fetched
+    /// 2026-09-25) -- confirms it "follows the OpenAI Realtime API specification" here, with its
+    /// only documented deviation being the accepted *value* format for `model` (a deployment
+    /// name), not the key set.
+    /// </summary>
+    public static readonly IReadOnlySet<string> AudioInputTranscriptionKeys = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "delay", "keywords", "language", "languages", "model", "prompt",
+    };
+
+    /// <summary>
+    /// #28 N11: keys accepted under `session.audio.input.turn_detection` -- previously unchecked.
+    /// GA's `turn_detection` is a discriminated union on `type` (`ServerVad` vs `SemanticVad`);
+    /// this is the union of both variants' keys, since the discriminator itself
+    /// (`turn_detection.type`) isn't validated as a separate concern here — an unknown key is an
+    /// unknown key regardless of which variant the caller meant. `ServerVad`:
+    /// `{ type, create_response, idle_timeout_ms, interrupt_response, prefix_padding_ms,
+    /// silence_duration_ms, threshold }` (7 keys, confirmed by enumerating the reference's
+    /// "4 more" past the first three named in its preview). `SemanticVad`:
+    /// `{ type, create_response, eagerness, interrupt_response }` (4 keys) — `eagerness` is the
+    /// only key not already covered by `ServerVad`.
+    /// </summary>
+    public static readonly IReadOnlySet<string> AudioInputTurnDetectionKeys = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "type", "create_response", "idle_timeout_ms", "interrupt_response",
+        "prefix_padding_ms", "silence_duration_ms", "threshold", "eagerness",
     };
 
     /// <summary>
@@ -161,6 +205,36 @@ public static class GaSessionValidator
                         message: $"Unknown parameter: 'session.audio.input.{badInputKey}'.",
                         echoEventId: true);
                 }
+
+                // #28 N11: nested keys under audio.input.transcription / audio.input.turn_detection
+                // were never validated -- only that the parent object itself was named correctly.
+                if (input.TryGetProperty("transcription", out var transcription) &&
+                    transcription.ValueKind == JsonValueKind.Object)
+                {
+                    var badTranscriptionKey = FirstUnknownKey(transcription, AudioInputTranscriptionKeys);
+                    if (badTranscriptionKey is not null)
+                    {
+                        return SessionUpdateValidationResult.Rejected(
+                            code: "unknown_parameter",
+                            param: $"session.audio.input.transcription.{badTranscriptionKey}",
+                            message: $"Unknown parameter: 'session.audio.input.transcription.{badTranscriptionKey}'.",
+                            echoEventId: true);
+                    }
+                }
+
+                if (input.TryGetProperty("turn_detection", out var turnDetection) &&
+                    turnDetection.ValueKind == JsonValueKind.Object)
+                {
+                    var badTurnDetectionKey = FirstUnknownKey(turnDetection, AudioInputTurnDetectionKeys);
+                    if (badTurnDetectionKey is not null)
+                    {
+                        return SessionUpdateValidationResult.Rejected(
+                            code: "unknown_parameter",
+                            param: $"session.audio.input.turn_detection.{badTurnDetectionKey}",
+                            message: $"Unknown parameter: 'session.audio.input.turn_detection.{badTurnDetectionKey}'.",
+                            echoEventId: true);
+                    }
+                }
             }
 
             if (audio.TryGetProperty("output", out var output) && output.ValueKind == JsonValueKind.Object)
@@ -244,6 +318,17 @@ public sealed class RealtimeSessionState
     /// gpt-realtime-2.1 / gpt-realtime-2.1-dz for PR #30 review "G1") -- this set is what lets
     /// <see cref="RealtimeScript.WithVadDefaults"/> reproduce that rejection.</summary>
     public HashSet<string> SeenConversationItemIds { get; } = new(StringComparer.Ordinal);
+
+    /// <summary>#28 N18: the fake's own copy of every conversation item it has ever sent, keyed
+    /// by item id, so `conversation.item.retrieve` has something real to answer with. Populated
+    /// wherever an item is created (client-supplied via `conversation.item.create`, or
+    /// fake-generated audio/function-call items), and overwritten with the finalized version once
+    /// an in-progress item completes -- a scenario retrieving an item mid-response back gets
+    /// whatever content had actually been sent by then, not the eventual final content. This is
+    /// deliberately a plain content mirror, not a source of truth for id-uniqueness or ordering:
+    /// #30 owns duplicate-id rejection (<see cref="SeenConversationItemIds"/>) and
+    /// `previous_item_id` tracking (<see cref="LastConversationItemId"/>).</summary>
+    public Dictionary<string, JsonObject> ConversationItemsById { get; } = new(StringComparer.Ordinal);
 
     /// <summary>The full session as GA would report it in `session.updated`, accumulated across
     /// every accepted `session.update` on this connection. Top-level keys from each update

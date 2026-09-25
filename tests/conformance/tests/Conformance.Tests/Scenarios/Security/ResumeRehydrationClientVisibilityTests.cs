@@ -1,3 +1,4 @@
+using System.Net.WebSockets;
 using System.Text.Json;
 using Conformance.Fakes;
 using Conformance.Harness;
@@ -30,17 +31,21 @@ namespace Conformance.Tests.Scenarios.Security;
 /// instead for a browser-visible frame that is *causally* guaranteed to follow the rehydration
 /// item's full echo removes the race: after a mid-conversation resume, the only upstream traffic
 /// on this connection is the rehydration item followed (after
-/// <see cref="BackendProfiles.ShortTimers"/>'s ~1s nudge timer) by the silence nudge item and its
+/// <see cref="BackendProfiles.ResumeMargin"/>'s ~1s nudge timer) by the silence nudge item and its
 /// `response.create` -- so the nudge's `response.created` reaching the browser cannot have
 /// happened before the backend finished relaying (or correctly dropping) every
 /// `conversation.item.*` frame the fake sent for both the rehydration and nudge items, on the same
 /// single, order-preserving connection.
 ///
-/// Runs under <see cref="BackendProfiles.ShortTimers"/> so the resume grace hold and nudge timer
-/// (1s here vs the 120s / 30s production defaults) fit in a fast test.
+/// Runs under <see cref="BackendProfiles.ResumeMargin"/> (PR #52 CI follow-up) so the nudge timer
+/// stays a fast ~1s (vs the 30s production default) while idle timeout and grace get real margin
+/// (5s vs the 300s / 120s production defaults) above what this scenario's own pre-detach setup
+/// (session establishment + greeting) should ever take, even on a loaded CI runner — see that
+/// profile's doc comment for why the original, equal 1s/1s <see cref="BackendProfiles.ShortTimers"/>
+/// raced CI run 36085091969's "holding order for 0s" detach.
 /// </summary>
-[Collection(ShortTimersConformanceCollection.Name)]
-public sealed class ResumeRehydrationClientVisibilityTests(ShortTimersConformanceFixture fixture)
+[Collection(ResumeMarginConformanceCollection.Name)]
+public sealed class ResumeRehydrationClientVisibilityTests(ResumeMarginConformanceFixture fixture)
 {
     private static readonly TimeSpan FrameTimeout = TimeSpan.FromSeconds(30);
 
@@ -99,39 +104,27 @@ public sealed class ResumeRehydrationClientVisibilityTests(ShortTimersConformanc
         // Wait for a browser-visible frame that is causally guaranteed to follow the rehydration
         // item's full upstream echo (PR #30 review "S3"), instead of a fixed-window sleep: the
         // only upstream traffic on a mid-conversation resume is the rehydration item, then (after
-        // ShortTimers' ~1s nudge timer) the silence nudge item plus its own response.create. The
+        // ResumeMargin's ~1s nudge timer) the silence nudge item plus its own response.create. The
         // nudge's response.created cannot reach the browser before the backend has already
         // forwarded-or-dropped every conversation.item.* frame the fake sent for both items, since
         // frames on a single connection are relayed in the order the backend's upstream reader
         // receives them.
         //
-        // ShortTimers pins the idle-session sweep to the same ~1s as the nudge timer, so without
-        // any browser traffic the idle sweep can race the nudge and close the session first
+        // ResumeMargin's own idle timeout has real margin above the nudge timer (PR #52 CI
+        // follow-up), unlike ShortTimers' original equal 1s/1s, but without any browser traffic
+        // the idle sweep could still in principle race the nudge on an unusually slow runner
         // (rtmt.py's touch_activity resets on any non-audio-append client frame without cancelling
         // the pending nudge). Send an inert, already-false extension.set_verbose_logging as a
-        // keepalive every 200ms while waiting, so the nudge always gets to fire.
-        using var keepAliveCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        var keepAliveTask = Task.Run(async () =>
-        {
-            try
-            {
-                while (!keepAliveCts.IsCancellationRequested)
-                {
-                    await second.SendExtensionSetVerboseLoggingAsync(false, keepAliveCts.Token);
-                    await Task.Delay(TimeSpan.FromMilliseconds(200), keepAliveCts.Token);
-                }
-            }
-            catch (OperationCanceledException)
-            {
-                // Expected once the wait below cancels the keepalive loop.
-            }
-        }, CancellationToken.None);
+        // keepalive every 200ms while waiting, so the nudge always gets to fire. Extracted into
+        // the shared KeepAlive helper (PR #52 CI follow-up round 5, Rick's review S2) so this
+        // scenario and WholeSessionLeakTests can't silently diverge from what the self-test in
+        // BrowserClientLifecycleTests actually exercises.
+        var keepAlive = KeepAlive.RunAsync(second, TimeSpan.FromMilliseconds(200), ct);
 
         var nudgeResponseCreated = await second.ReceivedFrames.WaitForAsync(
             f => f.Type == "response.created", FrameTimeout, ct);
 
-        keepAliveCts.Cancel();
-        await keepAliveTask;
+        await keepAlive.StopAsync();
 
         Assert.True(nudgeResponseCreated is not null,
             "Expected the silence nudge's response.created to reach the browser after the resume.");

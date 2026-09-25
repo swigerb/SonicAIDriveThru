@@ -49,6 +49,38 @@ public static class BackendProfiles
     });
 
     /// <summary>
+    /// PR #52 CI follow-up (swigerb/SonicAIDriveThru#28 N10 aftermath): <see cref="ShortTimers"/>'s
+    /// equal 1s idle timeout and 1s grace both being genuinely tight enough to encounter under
+    /// realistic wall-clock work is exactly the point for the scenarios that use it today (the
+    /// idle-close and greeting-timeout tests *want* a ~1s window they can wait out). But
+    /// <c>session_manager.py</c> computes a detached session's expiry as
+    /// <c>min(detached_at + grace_seconds, last_activity + idle_timeout_seconds)</c> — the second
+    /// term only leaves real headroom if whatever the scenario does *before* detaching (here:
+    /// establishing the session, and for the whole-session-leak scenario also a voice change and a
+    /// full tool round trip) reliably finishes in well under a second. On a loaded CI runner it
+    /// doesn't: CI run 36085091969 logged "holding order for 0s" on detach, meaning
+    /// <c>last_activity + 1s</c> had already elapsed (or nearly had) by the time the *first*
+    /// connection's own pre-detach setup finished — so the resume that follows races an
+    /// already-expired (or about-to-expire) grace window purely from ordinary scheduling
+    /// slowness, not from anything the scenario is actually testing. This profile keeps
+    /// <see cref="ShortTimers"/>'s ~1s nudge timer (the resume scenarios' own causal wait depends
+    /// on that staying fast) but gives idle timeout and grace real margin above what session
+    /// setup should ever take, even under load — a profile with headroom, not a sleep, per the
+    /// investigation's own ask. Used by <c>ResumeRehydrationClientVisibilityTests</c> and
+    /// <c>WholeSessionLeakTests</c>' resume scenario, both via their own dedicated collection so
+    /// this doesn't touch <see cref="ShortTimers"/>'s existing ~1s guarantees for its other
+    /// scenarios (the idle-close and greeting-timeout tests).
+    /// </summary>
+    public static BackendProfile ResumeMargin { get; } = new("ResumeMargin", new Dictionary<string, string>
+    {
+        ["CONFORMANCE_TEST_HOOKS"] = "1",
+        ["CONFORMANCE_IDLE_TIMEOUT_SECONDS"] = "5",
+        ["CONFORMANCE_GRACE_SECONDS"] = "5",
+        ["CONFORMANCE_NUDGE_AFTER_SECONDS"] = "1",
+        ["CONFORMANCE_SWEEP_INTERVAL_SECONDS"] = "0.2",
+    });
+
+    /// <summary>
     /// Hooks enabled with the clock frozen at <paramref name="instant"/>, for time-based business
     /// logic such as app/backend/order_state.py's happy-hour pricing. Timers are left at their
     /// production defaults.
