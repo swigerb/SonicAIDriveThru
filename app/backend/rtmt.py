@@ -540,6 +540,34 @@ _CLIENT_APPEND_FAST_PATH_RE = re.compile(
     r'\{"type":"input_audio_buffer\.append","audio":"[A-Za-z0-9+/=]*"\}')
 
 
+# swigerb/SonicAIDriveThru#36, PR #58 re-review "S2": after this many *consecutive*
+# unhandled tool exceptions on one connection with no successful tool call in
+# between, stop auto-continuing the model (see the "response.done" case's
+# tools_pending handling below). Retrying the identical broken flow silently a
+# third time in a row is more likely to compound a bad order state than help --
+# the model still gets the function_call_output (so it can tell the guest
+# something went wrong), but only the guest's own next utterance (through
+# server VAD) starts a new response, breaking the loop instead of extending it.
+_TOOL_FAILURE_CAP = 2
+
+
+class _ToolFailureTracker:
+    """Per-connection consecutive-tool-failure counter (#36, PR #58 re-review "S2")."""
+    __slots__ = ("count",)
+
+    def __init__(self):
+        self.count = 0
+
+    def record_failure(self) -> None:
+        self.count += 1
+
+    def record_success(self) -> None:
+        self.count = 0
+
+    def at_cap(self) -> bool:
+        return self.count >= _TOOL_FAILURE_CAP
+
+
 class ToolResultDirection(Enum):
     TO_SERVER = 1
     TO_CLIENT = 2
@@ -1178,7 +1206,7 @@ class RTMiddleTier:
             },
         }
 
-    async def _process_message_to_client(self, msg: str, client_ws: web.WebSocketResponse, server_ws: web.WebSocketResponse, tools_pending: dict[str, RTToolCall], verbose: bool = False, guard: "_SessionUpdateGuard | None" = None, on_session_created: Callable[[], Awaitable[None]] | None = None, recovery: RateLimitRecovery | None = None, voice: str | None = _VOICE_UNSET) -> str | None:
+    async def _process_message_to_client(self, msg: str, client_ws: web.WebSocketResponse, server_ws: web.WebSocketResponse, tools_pending: dict[str, RTToolCall], verbose: bool = False, guard: "_SessionUpdateGuard | None" = None, on_session_created: Callable[[], Awaitable[None]] | None = None, recovery: RateLimitRecovery | None = None, voice: str | None = _VOICE_UNSET, tool_failures: "_ToolFailureTracker | None" = None) -> str | None:
         data = msg.data
 
         # FAST PATH: extract type via regex without full JSON parse.
@@ -1343,7 +1371,7 @@ class RTMiddleTier:
                             else:
                                 try:
                                     args = json.loads(item["arguments"])
-                                    logger.info("Executing tool '%s' with args %s (session=%s)", item["name"], args, session_id)
+                                    logger.info("Executing tool '%s' (session=%s)", item["name"], session_id)
                                     t0 = time.monotonic()
                                     if item["name"] in ("update_order", "get_order", "reset_order"):
                                         result = await tool.target(args, session_id)
@@ -1376,23 +1404,56 @@ class RTMiddleTier:
                                     output_text = result.to_text() if result.destination in (ToolResultDirection.TO_SERVER, ToolResultDirection.TO_BOTH) else ""
                                     send_to_client = result.destination in (ToolResultDirection.TO_CLIENT, ToolResultDirection.TO_BOTH)
                                     client_text = result.to_client_text() if send_to_client else None
+                                    if tool_failures is not None:
+                                        # #36 S2: a successful tool call, of any kind, breaks a
+                                        # consecutive-failure streak -- only unhandled exceptions
+                                        # that happen back-to-back should ever suppress the
+                                        # auto-continue below.
+                                        tool_failures.record_success()
                                 except Exception:
                                     # #36: a genuinely unhandled exception inside a tool handler
                                     # (e.g. a malformed call missing a required argument) used to
                                     # propagate all the way up through _forward_messages's
                                     # connection-wide catch-all, tearing down the guest's whole
                                     # WebSocket instead of giving the model a graceful, recoverable
-                                    # error. Log server-side only -- tool name + session id, never
-                                    # the raw args (which may contain guest-entered text) -- and
+                                    # error. Log server-side only (tool name + session id) and
                                     # hand the model a neutral function_call_output so the
                                     # conversation, and the guest's session, survive.
                                     logger.exception("Tool '%s' raised an unhandled exception (session=%s)",
                                                       item["name"], session_id)
                                     output_text = self._prompt_loader.render_error("tool_execution_failed") if self._prompt_loader else (
-                                        "I'm sorry, something went wrong with that. Could you try again?"
+                                        "Something went wrong with that action and it did not complete. "
+                                        "Don't retry it yet -- call get_order to confirm the order's current "
+                                        "state, then ask the guest to repeat what they'd like."
                                     )
                                     send_to_client = False
                                     client_text = None
+                                    # #36 S2: refresh the guest-visible order ticket from the
+                                    # server's own source of truth (order_state_singleton), not
+                                    # from the failed tool's result -- the exception may have
+                                    # landed after the order was already partially mutated, so
+                                    # the ticket the guest sees must reflect what's actually
+                                    # there, not go stale. Best-effort: if the order state isn't
+                                    # readable for this session either, skip it -- the guest
+                                    # still gets the function_call_output below regardless.
+                                    if session_id is not None:
+                                        try:
+                                            ticket_json = order_state_singleton.get_order_summary_json(session_id)
+                                        except Exception:
+                                            logger.warning(
+                                                "Could not read order state to refresh the ticket after a tool "
+                                                "failure (session=%s)", session_id,
+                                            )
+                                        else:
+                                            await client_ws.send_json({
+                                                "type": "extension.middle_tier_tool_response",
+                                                "previous_item_id": tool_call.previous_id,
+                                                "tool_name": "get_order",
+                                                "tool_result": ticket_json,
+                                            })
+                                    if tool_failures is not None:
+                                        tool_failures.record_failure()
+
 
                                 await server_ws.send_json({
                                     "type": "conversation.item.create",
@@ -1423,7 +1484,18 @@ class RTMiddleTier:
                         return None
                     if tools_pending:
                         tools_pending.clear()
-                        await server_ws.send_str(_RESPONSE_CREATE_MSG)
+                        if tool_failures is not None and tool_failures.at_cap():
+                            # #36 S2: two (or more) consecutive unhandled tool exceptions on
+                            # this connection with no success in between -- don't auto-continue
+                            # into a third identical silent retry. The model already has the
+                            # function_call_output(s) in context; only the guest's own next
+                            # utterance (server VAD) starts a new response from here.
+                            logger.warning(
+                                "Suppressing auto response.create after %d consecutive tool "
+                                "failures (session=%s)", tool_failures.count, session_id,
+                            )
+                        else:
+                            await server_ws.send_str(_RESPONSE_CREATE_MSG)
                     is_tool_call_response = False
                     if "response" in message:
                         output = message["response"]["output"]
@@ -1587,6 +1659,8 @@ class RTMiddleTier:
     async def _forward_messages(self, ws: web.WebSocketResponse):
         # Per-connection tool tracking — prevents cross-connection interference
         tools_pending: dict[str, RTToolCall] = {}
+        # #36 S2: per-connection consecutive-tool-failure counter.
+        tool_failures = _ToolFailureTracker()
 
         # Per-connection verbose logging toggle (set by frontend extension message)
         verbose = _VERBOSE_GLOBAL
@@ -2101,7 +2175,7 @@ class RTMiddleTier:
 
                             new_msg = await self._process_message_to_client(msg, ws, target_ws, tools_pending, verbose, guard=guard,
                                                                             on_session_created=on_session_created,
-                                                                            recovery=recovery, voice=voice)
+                                                                            recovery=recovery, voice=voice, tool_failures=tool_failures)
                             if new_msg is not None:
                                 await ws.send_str(new_msg)
                         elif msg.type == aiohttp.WSMsgType.ERROR:

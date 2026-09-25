@@ -1135,15 +1135,17 @@ is reached, never whether `CONFORMANCE_BACKEND` still says which language is run
 The consequence: **a new backend under test (`CONFORMANCE_BACKEND=dotnet`) actually runs these
 scenarios instead of silently skipping them.** A conforming C# backend must not reproduce these
 Python bugs, so the scenario is expected to *pass* there — an unconditional `Skip` would have hidden
-that expectation entirely, letting a backend with the exact same bug slip through green. The 8
+that expectation entirely, letting a backend with the exact same bug slip through green. The 7
 scenarios marked this way as of this commit: `SpokenTotalHalfCentTests` (#46),
 `ComboAbsorptionTests.Reset_order_clears_the_previous_orders_absorbed_component_display` (#41),
 `HappyHourBoundaryTests`'s Ched 'R' Peppers case (#39), `UpdateOrderAddRemoveModifyTests`'s two
-Route 44 alias cases (#40), `SearchToolTests`'s two fallback cases (#37), and
-`ToolErrorSessionSurvivesTests.Session_survives_an_unhandled_tool_exception` (#36).
+Route 44 alias cases (#40), and `SearchToolTests`'s two fallback cases (#37).
 (`VoicePickerTests.Two_concurrent_guests_voice_choices_do_not_leak_into_each_other` was un-skipped
-in PR #49 review round 5 once #43 was actually fixed — this paragraph's count/list is corrected
-here to match; it is a plain `[Fact]` now, listed instead in the voice contract section above.)
+in PR #49 review round 5 once #43 was actually fixed, and
+`ToolErrorSessionSurvivesTests.Session_survives_an_unhandled_tool_exception` was un-skipped in the
+A2 stream once #36 was fixed (`433dc03`) — this paragraph's count/list is corrected here to match;
+both are plain `[Fact]`s now, listed instead in the voice contract section and the tool-error
+section respectively.)
 
 This is deliberately **not** applied to the Windows-only Job Object tests elsewhere in the suite
 (`WindowsJobObjectTests.cs`) — those are plain `[Fact]`s that call `Assert.Skip(...)` at runtime
@@ -1161,9 +1163,9 @@ rather than letting propagate — is expected, even in a fully correct implement
 one such ERROR line for that exception. Use the second overload,
 `RunAsync(Func<Task> body, int allowedNewBackendErrors)`, to declare an upper bound on that count
 instead of letting the zero-new-errors invariant block an otherwise-passing scenario
-(`ToolErrorSessionSurvivesTests.cs`'s `Session_survives_an_unhandled_tool_exception` — currently
-`[Fact(Skip = ...)]` pending the Python fix tracked in #36 — is written to pass
-`allowedNewBackendErrors: 1` once that fix lands). The assertion is `actual <= baseline +
+(`ToolErrorSessionSurvivesTests.cs`'s `Session_survives_an_unhandled_tool_exception` passes
+`allowedNewBackendErrors: 1`, now that the #36 fix lands the rtmt.py-level exception handler
+described below). The assertion is `actual <= baseline +
 allowedNewBackendErrors`, never exact equality: per PR #42 review item 1 (see "Backend logging is
 not a wire contract" above), *how many* ERROR-level lines a backend logs for a given recovered
 condition is a logging/observability choice, not a wire contract — a correct backend that logs
@@ -1563,6 +1565,70 @@ does not look like a coincidentally-successful order-summary JSON object. The te
 one new backend error log line (`allowedNewBackendErrors: 1`) — the `logger.exception(...)` call
 itself is expected and desired (per the issue's ask to log the failure server-side); it just must no
 longer propagate and tear the socket down.
+
+### Model-facing failure wording, ticket refresh, and the consecutive-failure cap (PR #58 review round 2, S2)
+
+Layer 1's apology text (`error_messages.yaml`'s `tool_execution_failed`, and its hardcoded fallback
+when `self._prompt_loader` is `None`) was reworded so the model is told to **confirm the order state
+via `get_order` and ask the guest** rather than silently retrying the same mutation — the original
+wording invited a blind "try again," which is unsafe when the exception happened *after* `tools.py`
+had already partially applied the mutation (e.g. an in-place quantity/price update that raised only
+on the follow-up total recalculation). The reworded text is the model-facing contract; the exact
+string is intentionally not pinned character-for-character by conformance (only *that a
+`function_call_output` still arrives and the session survives* is a wire contract) — see also the
+"backend logging is not a wire contract" note above, applied here to model-facing prose instead of
+logs.
+
+Three related behaviours, all keyed off `session_id` (so a session-less/degraded connection still
+survives, just without the extras):
+
+1. **Ticket refresh on failure.** Immediately after the layer-1 apology's `function_call_output` is
+   sent to the server, the backend also pushes a fresh `extension.middle_tier_tool_response` to the
+   **browser** with `tool_name: "get_order"` and the current order summary JSON (same shape
+   `get_order` itself would send), so the guest's on-screen ticket doesn't silently drift out of sync
+   with whatever the model does next. If the order state can't be read (e.g. the session was already
+   torn down between the exception and the refresh attempt), the refresh is skipped — no exception,
+   no client push — never at the cost of the primary apology already having reached the server.
+   `ToolFailureCapAndTicketRefreshTests.A_genuine_tool_exception_refreshes_the_guests_ticket` is the
+   black-box proof: it scripts `update_order` with a non-numeric `price` (`"cheap"`, present but the
+   wrong type — sails past `tools.py`'s layer-2 *presence* validation, then raises a genuine
+   `TypeError` at the `price <= 0.0` comparison, the only vector that reaches layer 1 through
+   `update_order`'s normal front door black-box; a missing-argument script like the original #36 repro
+   never reaches layer 1 at all, because layer 2 already turns it into a graceful non-raising
+   `ToolResult` — see the layering discussion above), then asserts a `get_order`-tagged
+   `extension.middle_tier_tool_response` arrives at the browser, distinct from (and not to be confused
+   with) the missing `update_order`-tagged one.
+2. **Consecutive-failure cap.** A per-connection `_ToolFailureTracker` (`count`, `record_failure()`,
+   `record_success()`, `at_cap()`) counts **consecutive** tool failures (any success resets it to
+   zero). Below `_TOOL_FAILURE_CAP` (2), the existing auto-continue behaviour is unchanged: rtmt sends
+   its own `response.create` right after the failure's `function_call_output`, so the model gets an
+   immediate chance to react. At the cap, the auto-continue is suppressed — the `function_call_output`
+   (and, per above, the ticket refresh) still go out, but nothing follow-up happens automatically; the
+   model only continues once the browser sends its own next `response.create` (e.g. because the
+   *guest* said something, prompted by the model asking per the reworded apology text). This avoids a
+   tight, silent retry loop against a tool that keeps failing the same way.
+   `ToolFailureCapAndTicketRefreshTests.Consecutive_tool_exceptions_suppress_the_auto_continue_at_the_cap`
+   is the black-box proof: two consecutive `price:"cheap"` failures (the first's auto-continue must
+   still fire, driving the second automatically with no browser action; the second is the cap-th and
+   must not auto-continue a third). Because nothing else is queued on the fake, an erroneous third
+   auto-continue would fall through to `ResponseScript.Default` (plain audio, no tool call) — which,
+   unlike either tool-call response, *would* emit an `extension.round_trip_token` automatically. The
+   test proves the cap held by (a) sending a known, always-forwarded, unrelated probe frame
+   (`input_audio_buffer.clear`, same idiom as `ResponseCreateHooksGateTests`) and waiting for *it* to
+   arrive upstream — since the connection is a single ordered socket, anything an errant auto-continue
+   would have sent is *guaranteed* to have already arrived by the time the probe frame is recorded, so
+   the absence check that follows is a hard ordering guarantee rather than a timing-sensitive race —
+   then (b) asserting no premature `extension.round_trip_token` reached the browser and no premature
+   `response.create` reached upstream between the second failure and the probe. It then proves the
+   connection still works via the browser's own action (`OrderScenarioHelpers.RunOrderStepsAsync`).
+   (An earlier draft of this test tried to prove the same thing with a third *queued* scripted
+   response and a raw frame-sequence/watermark comparison; that version was **unsound** — it passed
+   both with and without the cap fix, because the watermark could already include the buggy
+   auto-continue's frames depending on scheduling. The probe-frame idiom above is deterministic and is
+   the one actually committed.)
+3. **INFO log tidy.** The INFO line logged just before the exception handler previously included the
+   raw tool `args` (contradicting a comment nearby claiming "never raw args"); it's been trimmed to
+   omit them, and the stale comment corrected to match reality.
 
 ## Client-controlled server logging must be gated off in production (#53)
 

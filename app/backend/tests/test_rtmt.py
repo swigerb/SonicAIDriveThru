@@ -40,6 +40,7 @@ from rtmt import (
     _CLIENT_SESSION_KEYS,
     _CLIENT_TEST_ONLY_TYPES,
     _CLIENT_TOP_LEVEL_KEYS,
+    _TOOL_FAILURE_CAP,
     RTMiddleTier,
     RTToolCall,
     Tool,
@@ -54,6 +55,7 @@ from rtmt import (
     _sanitize_voice,
     _SessionUpdateGuard,
     _to_ga_session,
+    _ToolFailureTracker,
     create_hmac_token,
     validate_hmac_token,
 )
@@ -2259,9 +2261,13 @@ class ProcessMessageToClientTests(unittest.IsolatedAsyncioTestCase):
         """swigerb/SonicAIDriveThru#36: an unhandled exception raised inside a tool's
         target must not propagate out of _process_message_to_client (which would tear
         down the whole guest WebSocket via _forward_messages's connection-wide
-        catch-all). Instead the model must get a neutral function_call_output, and
-        nothing must be sent to the client (no stray extension.middle_tier_tool_response
-        for a failed call)."""
+        catch-all). Instead the model must get a neutral function_call_output.
+
+        PR #58 re-review "S2": the browser now *does* get a message for a failed call
+        -- not the tool's own (failed) result, but a fresh order-ticket refresh read
+        from order_state_singleton directly, in case the exception landed after the
+        order was already partially mutated and the guest's on-screen ticket would
+        otherwise go stale."""
         rtmt = self._make_rtmt()
         client_ws = _make_mock_ws()
         server_ws = _make_mock_ws()
@@ -2287,12 +2293,140 @@ class ProcessMessageToClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result)
         mock_tool_target.assert_called_once()
         server_ws.send_json.assert_called_once()
-        client_ws.send_json.assert_not_called()
         server_payload = server_ws.send_json.call_args[0][0]
         self.assertEqual(server_payload["type"], "conversation.item.create")
         self.assertEqual(server_payload["item"]["type"], "function_call_output")
         self.assertEqual(server_payload["item"]["call_id"], "call-3")
         self.assertTrue(len(server_payload["item"]["output"]) > 0)
+        client_ws.send_json.assert_called_once()
+        client_payload = client_ws.send_json.call_args[0][0]
+        self.assertEqual(client_payload["type"], "extension.middle_tier_tool_response")
+        self.assertEqual(client_payload["tool_name"], "get_order")
+        self.assertEqual(client_payload["previous_item_id"], "prev-3")
+        # It's a real order summary, not the failed tool's own (never-produced) result.
+        json.loads(client_payload["tool_result"])
+
+    async def test_tool_exception_skips_ticket_refresh_when_order_state_unreadable(self):
+        """PR #58 re-review "S2": the ticket refresh is best-effort. If the session's
+        order state genuinely isn't readable (e.g. torn down out from under this call),
+        skip the refresh silently -- the guest still gets the function_call_output
+        either way, and this must never resurrect the old #36 crash-the-connection bug."""
+        rtmt = self._make_rtmt()
+        client_ws = _make_mock_ws()
+        server_ws = _make_mock_ws()
+        order_state_singleton.sessions = {}
+        session_id = rtmt._sessions.create_session(client_ws)
+        del order_state_singleton.sessions[session_id]  # simulate unreadable order state
+
+        mock_tool_target = AsyncMock(side_effect=KeyError("item_name"))
+        rtmt.tools["exploding_tool"] = Tool(target=mock_tool_target, schema={"name": "exploding_tool"})
+        tools_pending = {"call-9": RTToolCall("call-9", "prev-9")}
+        msg = MagicMock()
+        msg.data = json.dumps({
+            "type": "response.output_item.done",
+            "item": {
+                "type": "function_call",
+                "name": "exploding_tool",
+                "call_id": "call-9",
+                "arguments": '{}'
+            }
+        })
+        with self.assertLogs("sonic-drive-in", level="ERROR"):
+            result = await rtmt._process_message_to_client(msg, client_ws, server_ws, tools_pending)
+        self.assertIsNone(result)
+        server_ws.send_json.assert_called_once()  # the model still gets its function_call_output
+        client_ws.send_json.assert_not_called()
+
+    async def test_consecutive_tool_failures_suppress_auto_response_create_at_cap(self):
+        """PR #58 re-review "S2": two consecutive unhandled tool exceptions on one
+        connection, with no successful tool call in between, must suppress the usual
+        auto response.create after the second failure's response.done -- retrying the
+        same broken flow silently a third time in a row is more likely to compound a
+        bad order state than help. The model still gets both function_call_outputs."""
+        rtmt = self._make_rtmt()
+        client_ws = _make_mock_ws()
+        server_ws = _make_mock_ws()
+        order_state_singleton.sessions = {}
+        rtmt._sessions.create_session(client_ws)
+        tool_failures = _ToolFailureTracker()
+
+        mock_tool_target = AsyncMock(side_effect=KeyError("item_name"))
+        rtmt.tools["exploding_tool"] = Tool(target=mock_tool_target, schema={"name": "exploding_tool"})
+
+        async def _one_failed_round(call_id: str, tools_pending: dict):
+            call_msg = MagicMock()
+            call_msg.data = json.dumps({
+                "type": "response.output_item.done",
+                "item": {"type": "function_call", "name": "exploding_tool", "call_id": call_id, "arguments": "{}"},
+            })
+            with self.assertLogs("sonic-drive-in", level="ERROR"):
+                await rtmt._process_message_to_client(call_msg, client_ws, server_ws, tools_pending, tool_failures=tool_failures)
+            done_msg = MagicMock()
+            done_msg.data = json.dumps({"type": "response.done", "response": {"output": []}})
+            await rtmt._process_message_to_client(done_msg, client_ws, server_ws, tools_pending, tool_failures=tool_failures)
+
+        self.assertEqual(_TOOL_FAILURE_CAP, 2)  # the test below assumes exactly two rounds reaches the cap
+
+        tools_pending = {"call-a": RTToolCall("call-a", "prev-a")}
+        await _one_failed_round("call-a", tools_pending)
+        self.assertEqual(server_ws.send_str.call_count, 1)  # round 1: not yet at cap, auto-continues
+
+        tools_pending = {"call-b": RTToolCall("call-b", "prev-b")}
+        await _one_failed_round("call-b", tools_pending)
+        # round 2: at the cap -- no additional response.create sent.
+        self.assertEqual(server_ws.send_str.call_count, 1)
+
+    async def test_tool_success_resets_the_failure_streak(self):
+        """A successful tool call between two failures must reset the streak -- the cap
+        is about *consecutive* failures, not a lifetime total for the connection."""
+        rtmt = self._make_rtmt()
+        client_ws = _make_mock_ws()
+        server_ws = _make_mock_ws()
+        order_state_singleton.sessions = {}
+        rtmt._sessions.create_session(client_ws)
+        tool_failures = _ToolFailureTracker()
+
+        mock_tool_target = AsyncMock(side_effect=KeyError("item_name"))
+        rtmt.tools["exploding_tool"] = Tool(target=mock_tool_target, schema={"name": "exploding_tool"})
+        rtmt.tools["ok_tool"] = Tool(
+            target=AsyncMock(return_value=ToolResult("fine", ToolResultDirection.TO_SERVER)),
+            schema={"name": "ok_tool"},
+        )
+
+        async def _failed_round(call_id: str):
+            tools_pending = {call_id: RTToolCall(call_id, f"prev-{call_id}")}
+            call_msg = MagicMock()
+            call_msg.data = json.dumps({
+                "type": "response.output_item.done",
+                "item": {"type": "function_call", "name": "exploding_tool", "call_id": call_id, "arguments": "{}"},
+            })
+            with self.assertLogs("sonic-drive-in", level="ERROR"):
+                await rtmt._process_message_to_client(call_msg, client_ws, server_ws, tools_pending, tool_failures=tool_failures)
+            done_msg = MagicMock()
+            done_msg.data = json.dumps({"type": "response.done", "response": {"output": []}})
+            await rtmt._process_message_to_client(done_msg, client_ws, server_ws, tools_pending, tool_failures=tool_failures)
+
+        async def _successful_round(call_id: str):
+            tools_pending = {call_id: RTToolCall(call_id, f"prev-{call_id}")}
+            call_msg = MagicMock()
+            call_msg.data = json.dumps({
+                "type": "response.output_item.done",
+                "item": {"type": "function_call", "name": "ok_tool", "call_id": call_id, "arguments": "{}"},
+            })
+            await rtmt._process_message_to_client(call_msg, client_ws, server_ws, tools_pending, tool_failures=tool_failures)
+            done_msg = MagicMock()
+            done_msg.data = json.dumps({"type": "response.done", "response": {"output": []}})
+            await rtmt._process_message_to_client(done_msg, client_ws, server_ws, tools_pending, tool_failures=tool_failures)
+
+        await _failed_round("call-1")
+        self.assertEqual(tool_failures.count, 1)
+        await _successful_round("call-2")
+        self.assertEqual(tool_failures.count, 0)
+        server_ws.send_str.reset_mock()
+        await _failed_round("call-3")
+        # Streak is back to 1 (not 2) -- still below the cap, so auto-continue fires.
+        self.assertEqual(tool_failures.count, 1)
+        self.assertEqual(server_ws.send_str.call_count, 1)
 
     async def test_error_message_logged_not_crashed(self):
         """OpenAI error messages should be logged, not crash the handler."""
