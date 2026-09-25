@@ -175,15 +175,35 @@ public sealed class RealtimeBrowserClient : IAsyncDisposable
     /// no-close-frame disconnect instead (a browser crash or network drop), use
     /// <see cref="AbortAsync"/>; plain disposal (<see cref="DisposeAsync"/>) now defaults to the
     /// same graceful behaviour as this method.
+    ///
+    /// PR #52 CI follow-up (swigerb/SonicAIDriveThru#28 N10 aftermath, CI runs 36085091969):
+    /// the state check just above is inherently racy against the background reader loop, which
+    /// can observe the peer aborting/closing the connection concurrently with this call, on a
+    /// loaded runner -- the two are never synchronized with each other. A caller of this method
+    /// only asked for a *best-effort* close, the same contract <see cref="DisposeAsync"/> already
+    /// documents for its own equivalent attempt; it did not ask for proof the handshake completed
+    /// (that is what <see cref="WaitForCloseAsync"/> plus asserting on <see cref="CloseStatus"/>
+    /// is for). So a <see cref="WebSocketException"/> here -- the socket having raced its way out
+    /// of <c>Open</c>/<c>CloseReceived</c> between the check and the send, or the peer's TCP
+    /// connection simply vanishing before this send lands -- is treated the same way: the socket
+    /// is (or is about to be) closed either way, which is exactly what this method was trying to
+    /// bring about.
     /// </summary>
     public async Task CloseAsync(
         WebSocketCloseStatus status = WebSocketCloseStatus.NormalClosure,
         string? statusDescription = "test done",
         CancellationToken cancellationToken = default)
     {
-        if (_socket.State is WebSocketState.Open or WebSocketState.CloseReceived)
+        try
         {
-            await _socket.CloseOutputAsync(status, statusDescription, cancellationToken).ConfigureAwait(false);
+            if (_socket.State is WebSocketState.Open or WebSocketState.CloseReceived)
+            {
+                await _socket.CloseOutputAsync(status, statusDescription, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        catch (WebSocketException)
+        {
+            // Best-effort close -- see the doc comment above.
         }
     }
 
