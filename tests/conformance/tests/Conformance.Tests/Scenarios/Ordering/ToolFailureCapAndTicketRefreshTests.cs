@@ -157,17 +157,26 @@ public sealed class ToolFailureCapAndTicketRefreshTests(ConformanceFixture fixtu
         // At the cap: rtmt must send exactly ONE server-authored response.create with
         // response.tool_choice="none" instead of silence (PR #58 re-review "S1") -- the model
         // can still apologise out loud and ask the guest, but can't call a tool again with no
-        // guest input.
+        // guest input. It must ALSO carry non-empty response.instructions (PR #58 re-review
+        // round 3): a live probe against real gpt-realtime-2.1 showed tool_choice="none" alone
+        // still let the model falsely claim an item was added/changed in 2 of 3 runs; explicit
+        // instructions saying nothing changed fixed it in 3 of 3 runs. The exact wording is a
+        // brand-config concern (prompts/sonic/error_messages.yaml), not pinned here.
         var capNotice = await connection.ReceivedFrames.WaitForAsync(
             f => f.Type == "response.create" && f.Sequence > callB!.Sequence &&
                  f.Json.TryGetProperty("response", out var respObj) &&
                  respObj.TryGetProperty("tool_choice", out var toolChoiceProp) &&
-                 toolChoiceProp.GetString() == "none",
+                 toolChoiceProp.GetString() == "none" &&
+                 respObj.TryGetProperty("instructions", out var instructionsProp) &&
+                 instructionsProp.ValueKind == JsonValueKind.String &&
+                 !string.IsNullOrWhiteSpace(instructionsProp.GetString()),
             OrderScenarioHelpers.FrameTimeout, ct);
         Assert.True(capNotice is not null,
-            "Expected a server-authored response.create with response.tool_choice=\"none\" at the " +
-            "cap -- the model can still apologise out loud, but must not be allowed to call a tool " +
-            "again with no guest input (swigerb/SonicAIDriveThru#36 S1).");
+            "Expected a server-authored response.create with response.tool_choice=\"none\" AND " +
+            "non-empty response.instructions at the cap -- the model can still apologise out " +
+            "loud, but must not be allowed to call a tool again with no guest input, or to " +
+            "falsely claim the order changed anyway (swigerb/SonicAIDriveThru#36 S1, PR #58 " +
+            "re-review round 3).");
 
         // Nothing else was queued behind call_cap_a/call_cap_b, so the cap notice falls through
         // to ResponseScript.Default (a plain audio reply, no tool call) -- proving the apology

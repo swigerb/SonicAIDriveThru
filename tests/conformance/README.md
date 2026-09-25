@@ -1603,15 +1603,17 @@ survives, just without the extras):
    `ToolResult` — see the layering discussion above), then asserts a `get_order`-tagged
    `extension.middle_tier_tool_response` arrives at the browser, distinct from (and not to be confused
    with) the missing `update_order`-tagged one.
-2. **Consecutive-failure cap.** A per-connection `_ToolFailureTracker` (`count`, `record_failure()`,
-   `record_success()`, `at_cap()`) counts **consecutive** tool failures (any success resets it to
-   zero). Below `_TOOL_FAILURE_CAP` (2), the existing auto-continue behaviour is unchanged: rtmt sends
-   its own `response.create` right after the failure's `function_call_output`, so the model gets an
-   immediate chance to react. At the cap, the auto-continue is suppressed — the `function_call_output`
-   (and, per above, the ticket refresh) still go out, but nothing follow-up happens automatically; the
-   model only continues once the browser sends its own next `response.create` (e.g. because the
-   *guest* said something, prompted by the model asking per the reworded apology text). This avoids a
-   tight, silent retry loop against a tool that keeps failing the same way.
+2. **Consecutive-failure cap.** A per-connection `_ToolFailureTracker` counts **consecutive failed
+   tool-call rounds since the last guest turn** — not consecutive failed *calls*, and not reset by
+   tool success (see the round-2 update below; text above described an earlier, superseded design).
+   Below `_TOOL_FAILURE_CAP` (2), the existing auto-continue behaviour is unchanged: rtmt sends its
+   own `response.create` right after the failure's `function_call_output`, so the model gets an
+   immediate chance to react. At the cap, the auto-continue is replaced by exactly ONE
+   server-authored `response.create` carrying `response.tool_choice: "none"` (see the round-3 update
+   below for `response.instructions`) instead of a bare one — the model can still apologise out loud
+   and ask the guest, but can't call a tool again with no guest input — and every capped round after
+   that (same streak, still no guest turn) goes back to sending nothing at all, so the apology itself
+   can't restart an unbounded loop.
    `ToolFailureCapAndTicketRefreshTests.Consecutive_tool_exceptions_suppress_the_auto_continue_at_the_cap`
    is the black-box proof: two consecutive `price:"cheap"` failures (the first's auto-continue must
    still fire, driving the second automatically with no browser action; the second is the cap-th and
@@ -1634,6 +1636,74 @@ survives, just without the extras):
 3. **INFO log tidy.** The INFO line logged just before the exception handler previously included the
    raw tool `args` (contradicting a comment nearby claiming "never raw args"); it's been trimmed to
    omit them, and the stale comment corrected to match reality.
+
+#### Round update: counting rounds, not calls (PR #58 review round 3, S1)
+
+The original cap counter above (round 2) reset to zero on **any** tool success, which meant a model
+that alternates a failing `update_order` with the recovery loop's own prescribed `get_order` call
+(exactly the pattern the reworded apology text asks the model to do) never actually reached the cap —
+`get_order` succeeding reset the streak every time, so the "silent retry loop" guard never engaged for
+the one case its own wording invites.
+`ToolFailureCapAndTicketRefreshTests.Cap_is_not_reset_by_the_prescribed_get_order`
+is the black-box proof (red on the pre-fix code): a failing `update_order` / succeeding `get_order` /
+failing `update_order` sequence, with **no guest input anywhere**, must still hit the cap on the
+second failure. Two related refinements, both keyed off `tool_failures`:
+
+- The counter tallies **rounds**, not calls: several parallel tool calls failing within the *same*
+  `response.done` count as one failed round, tallied once per `response.done` rather than once per
+  call.
+- It resets only on **guest activity** — `speech_started` or a completed input transcription — never
+  on tool success. `ToolFailureCapAndTicketRefreshTests.Guest_speech_resets_the_failure_streak_after_the_cap`
+  proves the complementary case: guest speech *does* reset the streak, so a real conversational turn in
+  between two unrelated tool failures doesn't spuriously trip the cap.
+
+#### Round update: `response.instructions`, not `tool_choice` alone (PR #58 review round 3, S1 cont'd)
+
+A live probe against Sonic's real `gpt-realtime-2.1` deployment (`probe_tool_choice_none.py`), with two
+failed `update_order` rounds' `function_call_output`s already in context, showed that the cap-notice
+`response.create` with `response.tool_choice: "none"` **alone** still let the model falsely tell the
+guest an item was added/changed in **2 of 3** runs, even though it correctly avoided calling a tool.
+Adding an explicit response-level `response.instructions` field stating that nothing was actually
+added or changed, and that the model should apologise and ask the guest to repeat their request, fixed
+the false claim in **3 of 3** runs.
+
+The cap-notice frame is therefore:
+
+```json
+{
+  "type": "response.create",
+  "response": {
+    "tool_choice": "none",
+    "instructions": "<brand-configured or built-in fallback text; see below>"
+  }
+}
+```
+
+- **Response-level `instructions` replace** (not merge with) the session's own `instructions` for that
+  one response only — the text must be self-contained; it cannot assume the rest of the system prompt
+  (menu, persona, etc.) still applies for this turn.
+- The exact wording is a brand-config concern
+  (`prompts/sonic/error_messages.yaml`'s `tool_failure_cap_instructions`, rendered through the prompt
+  loader), so other rebrand ports and the C# backend keep their own carhop-equivalent persona voice; a
+  built-in fallback string is used when no prompt loader is configured, or the brand config doesn't
+  (yet) define the key — deliberately **not** via `PromptLoader.render_error()`'s own generic "Unknown
+  error message key" fallback, since a visibly broken placeholder would be worse than a neutral default
+  as the model's *only* instructions for that response.
+- This frame is still entirely **server-authored**, never derived from browser input, so the #31
+  browser→upstream allow-list in `_filter_client_to_server` is unaffected — `response.tool_choice` and
+  `response.instructions` are stripped from *browser*-originated `response.create`/
+  `conversation.item.create` events by that allow-list (see the #31 backend contract section), but
+  this cap-notice frame is built and sent entirely by the middle tier itself.
+- Neither `response.tool_choice` nor `response.instructions` is field-validated by the fake upstream's
+  `GaSessionValidator` — only the top-level client event `type` is checked for `response.create`
+  (unlike `session.update`, which does have a top-level-key allow-list). Both fields are documented GA
+  fields on `response.create`'s `response` object (OpenAI Realtime API reference, "Client events" →
+  `response.create`), so the fake accepting them unvalidated matches upstream's real behaviour; no fake
+  code change was needed for this fix.
+- `ToolFailureCapAndTicketRefreshTests.Consecutive_tool_exceptions_suppress_the_auto_continue_at_the_cap`
+  asserts the cap-notice frame carries **both** `tool_choice == "none"` and a non-empty
+  `instructions` string (the exact wording is not pinned — only the middle tier's contract that some
+  real text is present).
 
 ### Two probes pinning both entry points into layer 1 (PR #58 review round 2, S3)
 

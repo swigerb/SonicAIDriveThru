@@ -666,8 +666,60 @@ _TOOL_FAILURE_CAP = 2
 # for exactly that reason; see the README "backend contract" section and
 # _filter_client_to_server's RESPONSE_OVERRIDE_KEYS) -- "none" tells the
 # model it must not call a tool on this turn, so it can only speak.
-_RESPONSE_CREATE_TOOL_CHOICE_NONE_MSG = json.dumps(
-    {"type": "response.create", "response": {"tool_choice": "none"}})
+#
+# PR #58 re-review round 3: `response.tool_choice="none"` ALONE is not enough. A live
+# probe against Sonic's real gpt-realtime-2.1 deployment
+# (session-state/.../probe_tool_choice_none.py, 2026-09-25), with two failed update_order
+# rounds' function_call_output already in context, showed the model falsely told the
+# guest an item was added/changed in 2 of 3 runs even though tool_choice="none" correctly
+# stopped it from calling a tool. Response-level `instructions` (also a documented GA
+# field on response.create's `response` object, and -- like tool_choice -- one for THIS
+# response only, replacing rather than merging with the session's own instructions for
+# its duration) explicitly telling the model nothing was added or changed fixed it in 3
+# of 3 runs. `_tool_failure_cap_instructions()` prefers the brand prompt config's
+# `tool_failure_cap_instructions` (so each brand can keep its own carhop/crew-member
+# voice) and falls back to a neutral built-in default -- deliberately NOT via
+# PromptLoader.render_error()'s own generic "Unknown error message key" placeholder,
+# which would be a worse, more visibly broken instruction than a plain neutral one -- so
+# there is never an empty (or placeholder) `instructions` field.
+_TOOL_FAILURE_CAP_INSTRUCTIONS_FALLBACK = (
+    "The order system just failed twice in a row and nothing was added or changed. "
+    "Do not say an item was added, removed, or changed. Briefly apologise, say you "
+    "couldn't update the order just now, and ask the guest to repeat what they'd like."
+)
+
+
+def _tool_failure_cap_instructions(prompt_loader) -> str:
+    """Return the response-level `instructions` text for the tool-failure cap notice.
+
+    Reads the brand prompt config's `error_messages.yaml` key
+    `tool_failure_cap_instructions` if one is configured; otherwise returns
+    `_TOOL_FAILURE_CAP_INSTRUCTIONS_FALLBACK`. Deliberately checks
+    `get_error_messages()` directly rather than calling `prompt_loader.render_error()`
+    unconditionally -- `render_error()`'s own fallback for an unknown key is a generic
+    "An error occurred (...)" placeholder, not this function's neutral default, and a
+    placeholder string sent to the model as its ONLY instructions for this response
+    would be worse than nothing.
+    """
+    if prompt_loader is not None and "tool_failure_cap_instructions" in prompt_loader.get_error_messages():
+        return prompt_loader.render_error("tool_failure_cap_instructions")
+    return _TOOL_FAILURE_CAP_INSTRUCTIONS_FALLBACK
+
+
+def _build_tool_failure_cap_notice_msg(prompt_loader) -> str:
+    """Build the server-authored response.create sent once per capped failure streak.
+
+    `tool_choice: "none"` stops the model from calling a tool again with no guest
+    input; `instructions` (see `_tool_failure_cap_instructions()` above) stops it from
+    falsely claiming the order changed anyway, on top of not calling a tool.
+    """
+    return json.dumps({
+        "type": "response.create",
+        "response": {
+            "tool_choice": "none",
+            "instructions": _tool_failure_cap_instructions(prompt_loader),
+        },
+    })
 
 
 class _ToolFailureTracker:
@@ -1713,7 +1765,7 @@ class RTMiddleTier:
                                     "after %d consecutive failed tool round(s) (session=%s)",
                                     tool_failures.count, session_id,
                                 )
-                                await server_ws.send_str(_RESPONSE_CREATE_TOOL_CHOICE_NONE_MSG)
+                                await server_ws.send_str(_build_tool_failure_cap_notice_msg(self._prompt_loader))
                             else:
                                 logger.warning(
                                     "Suppressing auto response.create -- still at the "

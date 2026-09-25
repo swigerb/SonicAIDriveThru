@@ -41,13 +41,14 @@ from rtmt import (
     _CLIENT_SESSION_KEYS,
     _CLIENT_TEST_ONLY_TYPES,
     _CLIENT_TOP_LEVEL_KEYS,
-    _RESPONSE_CREATE_TOOL_CHOICE_NONE_MSG,
     _TOOL_FAILURE_CAP,
+    _TOOL_FAILURE_CAP_INSTRUCTIONS_FALLBACK,
     RTMiddleTier,
     RTToolCall,
     Tool,
     ToolResult,
     ToolResultDirection,
+    _build_tool_failure_cap_notice_msg,
     _client_log_control_allowed,
     _ClientFrameDropWarningLimiter,
     _drop_from_client,
@@ -59,6 +60,7 @@ from rtmt import (
     _SessionUpdateGuard,
     _spawn,
     _to_ga_session,
+    _tool_failure_cap_instructions,
     _ToolFailureTracker,
     _truncate_for_log,
     _truncate_key_list_for_log,
@@ -2592,7 +2594,7 @@ class ProcessMessageToClientTests(unittest.IsolatedAsyncioTestCase):
         await _one_failed_round("call-b", tools_pending)
         # round 2: at the cap -- one more response.create, but with tool_choice="none".
         self.assertEqual(server_ws.send_str.call_count, 2)
-        server_ws.send_str.assert_called_with(_RESPONSE_CREATE_TOOL_CHOICE_NONE_MSG)
+        server_ws.send_str.assert_called_with(_build_tool_failure_cap_notice_msg(None))
 
     async def test_tool_success_does_not_reset_the_failure_streak(self):
         """PR #58 re-review "S1": Rick's core repro. A successful tool call between two
@@ -2648,7 +2650,7 @@ class ProcessMessageToClientTests(unittest.IsolatedAsyncioTestCase):
         await _failed_round("call-3")
         # Streak is now 2 -- at the cap, so the auto-continue is the tool_choice=none variant.
         self.assertEqual(tool_failures.count, 2)
-        server_ws.send_str.assert_called_once_with(_RESPONSE_CREATE_TOOL_CHOICE_NONE_MSG)
+        server_ws.send_str.assert_called_once_with(_build_tool_failure_cap_notice_msg(None))
 
     async def test_third_failed_round_after_the_cap_notice_sends_nothing(self):
         """PR #58 re-review "S1" repro (`ToolFailureCapNotResetByGetOrderTests`): the model
@@ -2691,7 +2693,7 @@ class ProcessMessageToClientTests(unittest.IsolatedAsyncioTestCase):
         await _round("ok_tool", "g1")           # round 2: succeed -> count unchanged (1)
         server_ws.send_str.reset_mock()
         await _round("exploding_tool", "f2")   # round 3: fail -> count=2, AT CAP -> one apology
-        server_ws.send_str.assert_called_once_with(_RESPONSE_CREATE_TOOL_CHOICE_NONE_MSG)
+        server_ws.send_str.assert_called_once_with(_build_tool_failure_cap_notice_msg(None))
         server_ws.send_str.reset_mock()
         await _round("ok_tool", "g2")           # round 4: succeed, still at cap -> no notice left
         server_ws.send_str.assert_not_called()
@@ -2897,6 +2899,71 @@ class ToolFailureTrackerTests(unittest.TestCase):
         t.end_round()
         self.assertTrue(t.at_cap())
         self.assertTrue(t.consume_cap_notice())
+
+
+class _FakePromptLoaderForCapNotice:
+    """Minimal PromptLoader double exposing only the two methods
+    `_tool_failure_cap_instructions`/`_build_tool_failure_cap_notice_msg` actually call."""
+
+    def __init__(self, error_messages: dict[str, str]):
+        self._error_messages = error_messages
+
+    def get_error_messages(self) -> dict:
+        return self._error_messages
+
+    def render_error(self, key: str, **kwargs) -> str:
+        return self._error_messages[key].format(**kwargs) if kwargs else self._error_messages[key]
+
+
+class ToolFailureCapNoticeInstructionsTests(unittest.TestCase):
+    """PR #58 re-review round 3: a live probe against gpt-realtime-2.1 showed
+    `tool_choice:"none"` alone still let the model falsely tell the guest an item was
+    added/changed in 2 of 3 runs, even though no tool call happened -- the cap notice must
+    also carry response-level `instructions` telling the model nothing was actually
+    changed, which fixed it in 3 of 3 runs. These tests pin the message-building helpers
+    directly, independent of the full `_process_message_to_client` plumbing already
+    covered by `ToolFailureCapAndTicketRefreshTests`/the tests above."""
+
+    def test_no_prompt_loader_uses_the_builtin_fallback_instructions(self):
+        """A connection with no prompt loader at all (e.g. these unit tests' `_make_rtmt()`,
+        or a brand config that hasn't set one up) must still get a real instruction, never
+        an empty one."""
+        instructions = _tool_failure_cap_instructions(None)
+        self.assertEqual(instructions, _TOOL_FAILURE_CAP_INSTRUCTIONS_FALLBACK)
+        self.assertTrue(instructions.strip())
+
+    def test_missing_key_falls_back_to_builtin_default_not_a_generic_placeholder(self):
+        """If the brand's error_messages.yaml doesn't (yet) define
+        `tool_failure_cap_instructions`, this must NOT fall through to
+        `PromptLoader.render_error()`'s own generic "Unknown error message key" /
+        "An error occurred (...)" placeholder -- that would be a worse, more visibly
+        broken instruction than just using the built-in default."""
+        loader = _FakePromptLoaderForCapNotice({"tool_execution_failed": "some other message"})
+        instructions = _tool_failure_cap_instructions(loader)
+        self.assertEqual(instructions, _TOOL_FAILURE_CAP_INSTRUCTIONS_FALLBACK)
+        self.assertNotIn("error occurred", instructions.lower())
+
+    def test_brand_prompt_loader_key_is_used_when_present(self):
+        """When the brand config does define the key, its (brand-voiced) text wins over
+        the generic built-in fallback."""
+        loader = _FakePromptLoaderForCapNotice({
+            "tool_failure_cap_instructions": "Brand-specific apology text, nothing changed.",
+        })
+        instructions = _tool_failure_cap_instructions(loader)
+        self.assertEqual(instructions, "Brand-specific apology text, nothing changed.")
+
+    def test_cap_notice_message_has_both_tool_choice_none_and_nonempty_instructions(self):
+        msg = json.loads(_build_tool_failure_cap_notice_msg(None))
+        self.assertEqual(msg["type"], "response.create")
+        self.assertEqual(msg["response"]["tool_choice"], "none")
+        self.assertTrue(msg["response"]["instructions"].strip())
+
+    def test_cap_notice_message_uses_the_brand_prompt_loader_when_given(self):
+        loader = _FakePromptLoaderForCapNotice({
+            "tool_failure_cap_instructions": "Brand apology.",
+        })
+        msg = json.loads(_build_tool_failure_cap_notice_msg(loader))
+        self.assertEqual(msg["response"]["instructions"], "Brand apology.")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
