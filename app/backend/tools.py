@@ -11,7 +11,11 @@ from azure.search.documents.aio import SearchClient
 from azure.search.documents.models import VectorizableTextQuery
 
 from config_loader import get_config
-from menu_utils import infer_category as _infer_category, normalize_size
+from menu_utils import (
+    infer_category as _infer_category,
+    normalize_size,
+    strip_modifiers,
+)
 from order_state import is_happy_hour, order_state_singleton
 from rtmt import RTMiddleTier, Tool, ToolResult, ToolResultDirection
 
@@ -115,7 +119,11 @@ def _is_extra_item(item_name: str) -> bool:
 
 def validate_customization(item_name: str, mods_string: str) -> str | None:
     """Return an error message if the mods are nonsensical for the item category, else None."""
-    base_name = item_name.split("(")[0].strip()
+    # PR #50 review (third round, minor): reuse the one shared strip_modifiers() helper instead of
+    # a second, independent ad-hoc `.split("(")[0]` implementation of the same paren-stripping rule
+    # (menu_utils.py's classification functions and order_state.py's combo-conversion logic already
+    # route through it).
+    base_name = strip_modifiers(item_name)
     category = _infer_category(base_name)
     mods_lower = mods_string.lower()
     for cat_key, forbidden_list in INVALID_MODS.items():
@@ -203,14 +211,36 @@ async def search(
 
     semantic_enabled = bool(use_semantic_ranker and semantic_configuration)
 
+    # #37: azure-search-documents' async SearchClient.search(...) is lazy -- it returns an
+    # async-iterable immediately without making any HTTP request. The request (and therefore any
+    # HttpResponseError, including the "Could not find a property named" 400 the fallback below
+    # exists to catch) only happens once the results are actually iterated. So the first-page
+    # fetch has to live INSIDE the try, not just the initial `search_client.search(...)` call --
+    # otherwise a field-mismatch 400 raised during iteration propagates unhandled and tears down
+    # the whole realtime connection instead of triggering the minimal-select retry.
+    #
+    # PR #50 review (should-fix 4): `asyncio.wait_for` must wrap the ENTIRE collect -- the
+    # `await search_client.search(...)` call AND the `async for` iteration that triggers the real
+    # HTTP request -- not just the (non-blocking, no-HTTP-yet) initial call. Wrapping only the
+    # `await search_client.search(...)` bounded nothing useful, since that call does no network
+    # I/O per the comment above; the iteration below it (where the request actually happens) ran
+    # completely outside the timeout, so a slow/hanging search service could block indefinitely
+    # despite `timeout_seconds` being configured.
+    async def _fetch_records(**search_kwargs) -> list[dict]:
+        async def _search_and_collect() -> list[dict]:
+            search_results = await search_client.search(**search_kwargs)
+            return [record async for record in search_results]
+
+        return await asyncio.wait_for(_search_and_collect(), timeout=_search_cfg.get("timeout_seconds", 10))
+
     try:
-        search_results = await asyncio.wait_for(search_client.search(
+        records = await _fetch_records(
             search_text=query,
             top=_top,
             vector_queries=vector_queries or None,
             select=select_fields,
             **_query_kwargs(semantic_enabled),
-        ), timeout=_search_cfg.get("timeout_seconds", 10))
+        )
     except TimeoutError:
         logger.error("Azure AI Search timed out for query '%s'", query)
         _err = _prompt_loader.render_error("search_service_unavailable") if _prompt_loader else "I'm having trouble reaching our menu right now — could you try that again?"
@@ -220,24 +250,34 @@ async def search(
         if "Could not find a property named" in str(exc):
             logger.warning("Retrying search with minimal fields after select mismatch: %s", exc)
             fallback_select = [identifier_field or "id", content_field or "description"]
-            search_results = await asyncio.wait_for(search_client.search(
-                search_text=query,
-                top=_top,
-                vector_queries=vector_queries or None,
-                select=[f for f in fallback_select if f],
-                **_query_kwargs(semantic_enabled),
-            ), timeout=_search_cfg.get("timeout_seconds", 10))
+            try:
+                records = await _fetch_records(
+                    search_text=query,
+                    top=_top,
+                    vector_queries=vector_queries or None,
+                    select=[f for f in fallback_select if f],
+                    **_query_kwargs(semantic_enabled),
+                )
+            except Exception as exc2:
+                logger.error("Search retry with minimal select also failed: %s", exc2)
+                _err = _prompt_loader.render_error("search_service_unavailable") if _prompt_loader else "I'm sorry, I can't reach our menu data right now."
+                return ToolResult(_err, ToolResultDirection.TO_SERVER)
         elif semantic_enabled and "semantic" in str(exc).lower():
             # Belt and braces: the service rejected the semantic query even though
             # configuration said it was available (e.g. the SKU was changed after
             # deployment). Retry without the ranker rather than failing the lookup.
             logger.warning("Semantic ranker unavailable, retrying without it: %s", exc)
-            search_results = await asyncio.wait_for(search_client.search(
-                search_text=query,
-                top=_top,
-                vector_queries=vector_queries or None,
-                select=select_fields,
-            ), timeout=_search_cfg.get("timeout_seconds", 10))
+            try:
+                records = await _fetch_records(
+                    search_text=query,
+                    top=_top,
+                    vector_queries=vector_queries or None,
+                    select=select_fields,
+                )
+            except Exception as exc2:
+                logger.error("Search retry without semantic ranker also failed: %s", exc2)
+                _err = _prompt_loader.render_error("search_service_unavailable") if _prompt_loader else "I'm sorry, I can't reach our menu data right now."
+                return ToolResult(_err, ToolResultDirection.TO_SERVER)
         else:
             logger.error("Azure AI Search request failed: %s", exc)
             _err = _prompt_loader.render_error("search_service_unavailable") if _prompt_loader else "I'm sorry, I can't reach our menu data right now."
@@ -248,7 +288,7 @@ async def search(
         return ToolResult(_err, ToolResultDirection.TO_SERVER)
 
     results = []
-    async for record in search_results:
+    for record in records:
         identifier = record.get(identifier_field) or record.get("id", "unknown")
 
         # Format sizes into human-readable list so the Realtime API can speak them naturally
@@ -448,20 +488,20 @@ async def update_order(args, session_id: str) -> ToolResult:
     converted_from = result_info.get("combo_converted_from") if result_info else None
 
     if absorbed:
-        delta_text = f"{display_name} included with your combo — your total is ${summary.finalTotal:.2f}"
+        delta_text = f"{display_name} included with your combo — your total is {summary.finalTotalDisplay}"
     elif converted_from and action == "add":
         combo_display = display_name
         mods = result_info.get("mods_carried", "")
         if mods:
             combo_display = f"{display_name} {mods}"
-        delta_text = f"Upgraded to {combo_display} — your total is now ${summary.finalTotal:.2f}"
+        delta_text = f"Upgraded to {combo_display} — your total is now {summary.finalTotalDisplay}"
     elif _prompt_loader:
         tpl = _prompt_loader.get_delta_template(action)
-        delta_text = _prompt_loader.render_template(tpl, quantity=quantity, display_name=display_name, total=f"{summary.finalTotal:.2f}")
+        delta_text = _prompt_loader.render_template(tpl, quantity=quantity, display_name=display_name, total=summary.finalTotalDisplay)
     elif action == "add":
-        delta_text = f"Added {quantity} {display_name} — your total is now ${summary.finalTotal:.2f}"
+        delta_text = f"Added {quantity} {display_name} — your total is now {summary.finalTotalDisplay}"
     else:
-        delta_text = f"Removed {quantity} {display_name} — your total is now ${summary.finalTotal:.2f}"
+        delta_text = f"Removed {quantity} {display_name} — your total is now {summary.finalTotalDisplay}"
 
     # ── Combo validation: flag missing components ──
     validation = order_state_singleton.get_combo_requirements(session_id)

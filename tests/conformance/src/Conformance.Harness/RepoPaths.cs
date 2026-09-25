@@ -55,6 +55,15 @@ public static class RepoPaths
         Path.Combine(repoRoot, "tests", "conformance", "testdata", "golden-order-pricing.json");
 
     /// <summary>
+    /// Issue #39: the golden category/combo-slot-bucket table (every app/frontend/src/data/
+    /// menuItems.json entry mapped to app/backend/menu_utils.py::infer_combo_component's
+    /// sides/drinks/none bucket), so both the Python unit tests and this C# scenario suite assert
+    /// against the exact same 60-item table from one shared file.
+    /// </summary>
+    public static string GoldenMenuCategoriesJsonPath(string repoRoot) =>
+        Path.Combine(repoRoot, "tests", "conformance", "testdata", "golden-menu-categories.json");
+
+    /// <summary>
     /// app/backend/static is gitignored — populated only by `npm run build` in app/frontend
     /// (vite's outDir points there). aiohttp's `add_static` raises at app-creation time if this
     /// directory doesn't exist, so the Python backend fails immediately on startup without it.

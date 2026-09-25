@@ -770,13 +770,126 @@ summary:
 ```json
 {
   "items": [
-    { "item": "<name>", "size": "<display size, or empty>", "quantity": <int>, "price": <number>, "display": "<full display string>" }
+    { "item": "<name>", "size": "<canonical size key, or empty>", "quantity": <int>, "price": <number>, "display": "<full display string>" }
   ],
   "total": <number>,
   "tax": <number>,
-  "finalTotal": <number>
+  "finalTotal": <number>,
+  "totalDisplay": "<$0.00 string>",
+  "taxDisplay": "<$0.00 string>",
+  "finalTotalDisplay": "<$0.00 string>"
 }
 ```
+
+**`items[].size` is the canonical size key, not the raw spelling or the display string (#40, PR #50
+review follow-up)**: `order_state.handle_order_update` runs every incoming size through
+`menu_utils.canonical_size_key()` *before* constructing the `OrderItem`, so this field is always the
+lowercase, alias-resolved key used for order-line matching/merging/removal — `"route 44"`, `"xl"`,
+`"medium"`, `"standard"`, etc. — never the guest's raw spelling (`"RT. 44"`, `"Route-44"`,
+`"44 oz"`, `"Extra Large"` all canonicalize to `"route 44"`/`"xl"` respectively) and never the
+human-readable prefix that appears in `display`/`normalize_size()` (`"Route 44"`, `"Extra Large"`).
+`canonical_size_key` and `normalize_size` share the same alias-resolution table and the same
+punctuation/whitespace-stripping compact-key lookup, so the matching key and the display prefix can
+never disagree about which physical size a given spelling means. See
+`app/backend/tests/test_tool_calling.py::CanonicalSizeKeyTests` and
+`GoldenOrderPricingData.Route44.Aliases`/`Route44AliasCases` in this suite for the full alias list
+(now including the punctuation variants `"44 oz"`, `"Route-44"`, `"rt. 44"`).
+
+**`items[].item` may carry a parenthesized customization suffix, and every menuItems.json-based
+classification must strip it before looking anything up (PR #50 review, second round)**:
+customizations travel *inside* `item_name` itself (e.g. `"Tots (Extra Crispy)"`,
+`"Cherry Limeade (Extra Cherries)"` — see `tools.py`'s `update_order`), not as a separate field. A
+naive `item_name.lower()` lookup against `menu_utils.MENU_CATEGORY_MAP` therefore misses every
+customised item and silently falls through to keyword-substring guessing, which can disagree with
+the item's own real menu category — the concrete regression Rick caught in review: a Cheeseburger
+Combo plus `"Chili Cheese Tots (Extra Cheese)"` was absorbing the tots for free (matching the bare
+substring `"tots"`) instead of charging $3.79 in full, because the true item ("Chili Cheese Tots")
+is a real `menuItems.json` item that is *not* one of the two combo-side-slot items. The fix is one
+shared rule, `menu_utils.strip_modifiers()` (a customised name minus its trailing `(...)` suffix,
+whitespace-collapsed), used everywhere a raw item name is turned into a lookup key:
+`infer_category`, `infer_combo_component`, `is_happy_hour_discounted` (all via the private
+`_menu_key()` wrapper) *and* `order_state.py`'s combo-conversion base-name matching (auto-removing a
+standalone entree when its combo is added) — one implementation, so lookup and combo-conversion
+matching can never drift apart on how a customization suffix is stripped. A direct implication: an
+unknown/off-menu item (customised or not) **never** falls back into the combo side slot — only the
+literal, allow-listed `"tots"`/`"groovy fries"` names do (post-modifier-stripping); the drink
+keyword fallback remains for genuinely off-menu fountain drinks (Dr Pepper, Coke, Sprite, root
+beer, ...) and for shakes/blasts/malts, but the latter obey
+`menu_utils._SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED` for the happy-hour-discount question exactly
+like their on-menu counterparts do — that flag is the single switch for every shake/blast, plain or
+customised, on-menu or off. See `app/backend/tests/test_menu_utils.py::CustomisedItemMenuLookupTests`
+and `CustomisedItemMenuLookupTests.cs` in this suite.
+
+**The exact `_menu_key()` normalisation algorithm (PR #50 review, round 4 — state it precisely so
+C# does the same thing, not just "something similar")**, applied in this order to *every* raw
+`item_name` before it is used as a lookup key into `MENU_CATEGORY_MAP`, `_COMBO_SIDE_ITEMS`, or
+`_SUNDAES`, and before the two keyword-fallback functions ever see it:
+1. Remove **every** `\s*\([^)]*\)\s*` group anywhere in the string, not just a trailing one —
+   `"Chili Cheese (Extra Cheese) Tots"` (a mid-string group) strips to `"Chili Cheese Tots"` exactly
+   like a trailing one would, and `"Tots (Extra Crispy) (No Salt)"` (two groups) strips to `"Tots"`.
+   `[^)]*` cannot cross an inner `(`, so a **nested or unbalanced** group — e.g.
+   `"Tots (Extra (Really) Crispy)"` — only partially matches and leaves a stray `)` in the result
+   (`"Tots Crispy)"`); this is a deliberate fail-safe, not a bug: the mangled string matches no real
+   menu key, so the item falls through to full-price/no-discount rather than risking a wrong match.
+2. Collapse all whitespace via `str.split()`/`" ".join(...)`, which uses the same definition as
+   Python's `str.isspace()` — this treats Unicode whitespace (including U+00A0 NBSP, present
+   verbatim in some `menuItems.json` names, e.g. the OREO Blast) the same as an ordinary space, no
+   special-casing needed. Every whitespace character actually used across `menuItems.json` names is
+   either an ordinary ASCII space or a single NBSP, and C#'s `char.IsWhiteSpace` also classifies
+   NBSP as whitespace, so a C# reimplementation agrees on every real name without any extra rule.
+3. Lowercase, **culture-invariantly** (`str.lower()` on the Python side; C# must use
+   `ToLowerInvariant()`, not the culture-sensitive `ToLower()`, so casing can never depend on the
+   host's current culture/locale).
+4. Remove the `®` character (`str.replace("®", "")`), the `™` character
+   (`str.replace("™", "")`), and normalise the curly/typographic apostrophe `’` (U+2019) to a plain
+   ASCII apostrophe `'` (U+0027) (`str.replace("’", "'")`) — PR #50 review round 5 added the last
+   two, applying the same reasoning as `®`. These three character rules are the *one* place they
+   live — used everywhere `_menu_key()` is used (map construction, map lookup, combo-slot/sundae/
+   happy-hour classification, and `order_state.py`'s combo-conversion matching) — there is no
+   second place left where any of them could drift. Eight `menuItems.json` names carry `™` (the
+   "SONIC Smasher™" family, plain and Combo variants) and one carries `’` (the "SONIC Blast® made
+   with REESE'S", whose raw JSON name uses the curly apostrophe verbatim); without this step, a
+   spoken "All-American SONIC Smasher" or "Reese's" (naturally omitting the unspeakable `™`, or
+   typed with a plain apostrophe) would miss its own map entry, exactly like the OREO Blast's NBSP
+   did before round 4. See `.squad/decisions.md` for the history of why this pattern of
+   consolidating symbol-handling into `_menu_key()` started.
+
+Keyword fallbacks (`_keyword_fallback_combo_drink`, `_keyword_fallback_happy_hour_discounted`, for
+names that resolve to no `MENU_CATEGORY_MAP` entry at all, i.e. genuinely off-menu) match on
+**word boundaries**, not bare substrings (PR #50 review round 4): a bare substring check let
+`"tea"` match inside `"steak"`, silently absorbing an off-menu `"Philly Cheesesteak"`/
+`"Steak Sandwich"` into a combo's drink slot for free and happy-hour-discounting it. A hyphen is a
+non-word character in both engines (Python `\b`/`re` and C#'s `\b`/`Regex`, whose word-character
+definition matches .NET's), so it is a word boundary in either regex, on either side, with no
+special-casing (PR #50 review round 5, no behaviour change) — a keyword adjacent to a hyphen, e.g.
+a hyphenated customization like `"(Extra-Crispy)"` or the `"All-American"` prefix on the Smasher
+family, still gets a correct boundary. Both keyword lists are compiled regexes:
+```
+r"\b(?:slush(?:ie|y)?|limeade|ocean water|drink|tea|lemonade|coke|sprite|root beer)(?:e?s)?\b"
+```
+for fountain drinks, and
+```
+r"(?:\b|milk)(?:shake|blast|malt)(?:e?s)?\b"
+```
+for shakes/blasts/malts; Dr Pepper keeps its own, already-word-boundary regex unchanged. The
+`(?:e?s)?` suffix (not a bare `s?`) matches the plural `-s`/`-es` forms (`"Cokes"`, `"Slushes"`) as
+well as the singular; `slush(?:ie|y)?` additionally matches the spoken `"Slushie"`/`"Slushy"`
+variants. The shake/blast/malt regex's `(?:\b|milk)` prefix is a narrow, deliberate carve-out (PR
+#50 review round 5, "keyword over-correction"): a plain `\bshake\b` never matches `"Milkshake"` at
+all because there is no word boundary between "milk" and "shake" (both are word characters), so a
+guest's spoken `"Chocolate Milkshake"` fell all the way through to unclassified. Matching either a
+normal word boundary OR the literal `"milk"` immediately before the keyword resolves that specific
+compound without loosening the boundary for anything else — a nonsense `"Overshake Deluxe"` still
+correctly does not match. Every genuine on-menu item still resolves via `MENU_CATEGORY_MAP`
+directly and never reaches these fallbacks at all — see
+`test_menu_utils.py::MenuCategoryMapDirectResolutionTests`, which patches both fallback functions to
+raise and asserts classification never touches them for any of the 60 `menuItems.json` names.
+
+See `app/backend/tests/test_menu_utils.py::KeywordFallbackWordBoundaryTests`,
+`KeywordOverCorrectionTests`, `MenuCategoryMapDirectResolutionTests`, and
+`CustomisedItemMenuLookupTests.cs`'s `ParenGroupNormalisationTests` in this suite for the
+paren-group-stripping edge cases (two groups, mid-string group, nested/unbalanced group) end to end
+against the live backend.
 
 All four money fields (`items[].price`, `total`, `tax`, `finalTotal`) are numbers on the wire (not
 quoted, unlike the golden file's storage format) and must always be parsed via
@@ -787,28 +900,61 @@ value, per `AssertMoneyEqual`. `search`'s `tool_result` is always `null`
 (it's `ToolResultDirection.TO_SERVER`-only and never reaches the browser at all) — its
 model-visible content is instead the plain-text `function_call_output` sent upstream.
 
+**`totalDisplay`/`taxDisplay`/`finalTotalDisplay` (#47, additive)**: three extra string fields on
+`OrderSummary` (`app/backend/models.py`), each the exact-decimal, `format_money()`-rendered
+`"$0.00"` string for the corresponding numeric field — i.e. the *same* round-half-up display rule
+documented below in "Rendering money for display", computed server-side from the pre-float-conversion
+`Decimal` before it's ever exposed as a JSON number. They are additive: every existing consumer that
+only reads the four numeric fields is unaffected, and this suite's exact-decimal contract above still
+applies unchanged to `total`/`tax`/`finalTotal`/`items[].price`. They exist because the frontend
+ticket (`app/frontend/src/components/ui/order-summary.tsx`) previously re-derived its own display
+strings from the numeric fields with `.toFixed(2)`, which cannot reliably distinguish e.g.
+`88.04499999999999` from `88.045` (both meant to be the exact decimal `88.045`) once either has
+already degraded into a noisy IEEE-754 double — the backend's `Decimal` pipeline is the only place
+with access to the true exact value, so it is the single source of truth for what the guest reads
+on the ticket. Pydantic auto-fills any of the three fields that a caller omits (via
+`format_money()` on the numeric field), so pre-existing direct `OrderSummary(...)` construction
+sites never need to change, but `order_state.py`'s two real call sites pass the more-precise,
+pre-float-conversion values explicitly.
+
 ### Rendering money for display (PR #38 re-review should-fix 2)
 
 The exact-decimal contract above governs every wire/golden numeric field (`total`, `tax`,
 `finalTotal`, `items[].price`) — there is no rounding anywhere in that arithmetic. Separately, the
 **spoken/human-readable `$X.XX` text** the model reads back to the guest (and any `.2f`-style
 display formatting) is presentation-only and follows its own, additional rule: round the exact
-decimal to two places using **round half away from zero** (C#: `decimal` value with
-`Math.Round(value, 2, MidpointRounding.AwayFromZero)`). This rule only ever consumes the exact
-decimal as input — it must never feed back into subtotal/tax/finalTotal math, and it is
-independent of (not a replacement for) the wire/golden exact-decimal contract.
+decimal to two places using **round half up** and render it as an exact, culture-invariant `"$0.00"`
+string. The precise formula (PR #50 review, should-fix 3):
 
-Python's actual behavior does not implement this (or any single) decimal rounding rule for
-half-cent-landing totals: it renders with `float`'s `:.2f` format specifier, which round-trips
+- **C#**: `"$" + Math.Round(v, 2, MidpointRounding.AwayFromZero).ToString("0.00", CultureInfo.InvariantCulture)`
+  for a `decimal` value `v`.
+- **Python**: `app/backend/money_utils.py::format_money`, which converts the value to `Decimal`
+  first — never through a binary `float` intermediate — and rounds with `decimal.ROUND_HALF_UP`
+  (the `Decimal` equivalent of `MidpointRounding.AwayFromZero`), formatting the result as `"$0.00"`.
+
+This rule only ever consumes the exact decimal as input — it must never feed back into
+subtotal/tax/finalTotal math, and it is independent of (not a replacement for) the wire/golden
+exact-decimal contract.
+
+**(#46, resolved)** Python previously did not implement this (or any single) decimal rounding rule
+for half-cent-landing totals: it rendered with `float`'s `:.2f` format specifier, which round-trips
 through IEEE-754 double and can disagree with *every* consistent decimal rounding rule (round half
 away from zero, round half to even, etc.) depending on the specific value's binary representation.
-Rick's 200k-order simulation found hundreds of disagreements for values that land exactly on a half
-cent. Golden cases whose `finalTotal` lands exactly on a half cent (e.g. a scenario engineered so
-pre-tax subtotal + tax produces an `X.XX5` total) therefore have their spoken-text assertion
-`Skip`'d, referencing #46 — this is a known, filed Python defect, not a harness or contract defect.
-Non-half-cent cases are not affected by this ambiguity and their spoken-text assertions stay
-active, so a backend that (for example) speaks the pre-tax subtotal instead of the final total is
-still caught today.
+As of #46, every spoken-money surface (`tools.py`'s prompt/template paths, `order_state.py`'s
+`get_order` readback, and the `*Display` wire fields above) routes through `format_money()`, which
+derives its `Decimal` from the same pre-float-conversion values used for the exact wire numerics and
+rounds with `ROUND_HALF_UP` — so it now agrees with this suite's round-half-up rule exactly,
+including for values that land precisely on a half cent (e.g. `5.265` → `$5.27`, never `$5.26`). The
+previously `Skip`'d half-cent spoken-text assertions (`SpokenTotalHalfCentTests`, referencing #46)
+are un-skipped and green.
+
+**(PR #50 review follow-up, one source of truth)** `tools.py`'s delta text and `order_state.py`'s
+`get_grouped_order_for_readback` no longer call `format_money(summary.finalTotal)` a second time to
+build their own `"$0.00"` string — they read `summary.finalTotalDisplay` directly, the exact same
+string the wire's `finalTotalDisplay` field carries. There is now exactly one call to
+`format_money()` per order mutation (inside `OrderSummary`'s construction), and every spoken surface
+downstream of it is a plain string read, not a re-derivation, so the readback and the wire field can
+never independently drift out of sync with each other.
 
 ### `response.cancel` still emits the normal `.done`-shaped events (#8 follow-up)
 

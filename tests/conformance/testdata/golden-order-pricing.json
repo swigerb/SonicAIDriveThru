@@ -97,14 +97,18 @@
     }
   ],
   "route44": {
-    "aliases": ["rt44", "rt 44", "route 44", "44", "44oz", "RT44", "Route 44"],
+    "aliases": ["rt44", "rt 44", "route 44", "44", "44oz", "44 oz", "RT44", "Route 44", "Route-44", "rt. 44"],
     "expectedDisplayPrefix": "Route 44",
-    "source": "app/backend/tests/test_combo_orders.py::TestRoute44WithCombos::test_route_44_size_aliases_all_work; the mixed/upper-case entries (RT44, Route 44) were added per PR #38 review item 4 (Rick's M5) to prove size-alias matching is genuinely case-insensitive, not just coincidentally lowercase in every existing case"
+    "source": "app/backend/tests/test_combo_orders.py::TestRoute44WithCombos::test_route_44_size_aliases_all_work; the mixed/upper-case entries (RT44, Route 44) were added per PR #38 review item 4 (Rick's M5) to prove size-alias matching is genuinely case-insensitive; the punctuation variants (44 oz, Route-44, rt. 44) were added per PR #50 review follow-up item X3 -- normalize_size previously looked up SIZE_ALIASES verbatim and silently dropped the display prefix for any spelling with an internal period/hyphen, even though canonical_size_key's matching key already resolved it correctly"
   },
   "sizeDisplayCases": [
     { "item": "Latte", "size": "small", "expectedDisplay": "Small Latte" },
     { "item": "Latte", "size": "medium", "expectedDisplay": "Medium Latte" },
     { "item": "Latte", "size": "large", "expectedDisplay": "Large Latte" },
+    { "item": "Latte", "size": "xl", "expectedDisplay": "Extra Large Latte" },
+    { "item": "Latte", "size": "Extra Large", "expectedDisplay": "Extra Large Latte" },
+    { "item": "Latte", "size": "extra large", "expectedDisplay": "Extra Large Latte" },
+    { "item": "Latte", "size": "XL", "expectedDisplay": "Extra Large Latte" },
     { "item": "Cherry Limeade", "size": "mini", "expectedDisplay": "Mini Cherry Limeade" },
     { "item": "Cherry Limeade", "size": "rt44", "expectedDisplay": "Route 44 Cherry Limeade" },
     { "item": "Cherry Limeade", "size": "rt 44", "expectedDisplay": "Route 44 Cherry Limeade" },
@@ -302,6 +306,7 @@
   ],
   "spokenTotalCases": [
     {
+      "tag": "activeNonHalfCent",
       "description": "PR #38 second re-review should-fix 2 (active, non-half-cent): reuses taxCases' 'Drink + non-drink, no happy hour' case. finalTotal 9.4716 rounds unambiguously to $9.47 under EITHER rounding convention (round-half-away-from-zero or IEEE round-half-to-even), so this stays an active assertion against the live Python backend and still catches Rick's N2 (spoken text built from the pre-tax subtotal instead of finalTotal) today: a backend speaking the pre-tax total would say $8.77, not $9.47.",
       "steps": [
         { "action": "add", "item": "Cherry Limeade", "size": "medium", "quantity": 2, "price": "2.99" },
@@ -313,7 +318,8 @@
       "landsOnHalfCent": false
     },
     {
-      "description": "PR #38 second re-review should-fix 2 (Skip'd, lands exactly on a half cent, #46): a whole-cent subtotal can never land finalTotal (subtotal * 1.08) exactly on a half cent -- 8n mod 100 = 50 has no integer solution since gcd(8,100)=4 does not divide 50 -- so this case needs a subtotal with 3+ decimal places, which only arises here from a happy-hour-halved odd-cent drink price. Cherry Limeade 3.79 halved to 1.895 (happy hour) + Glazed Donut 1.49 x2 (2.98) => subtotal 4.875, tax 0.39 (exact), finalTotal 5.265. Python's float `:.2f` formatting does not reproduce any single consistent rounding rule for exactly-half-cent totals (Rick's 200k-order simulation found hundreds of disagreements), so the spoken-text assertion for this specific case must stay Skip'd against the Python backend; expectedSpokenTotalText below is the value the round-half-away-from-zero display rule (C# `decimal` + `MidpointRounding.AwayFromZero`) requires once a conforming backend (S4) can be asserted against un-skipped.",
+      "tag": "halfCent",
+      "description": "PR #38 second re-review should-fix 2 (Skip'd, lands exactly on a half cent, #46): a whole-cent subtotal can never land finalTotal (subtotal * 1.08) exactly on a half cent -- 8n mod 100 = 50 has no integer solution since gcd(8,100)=4 does not divide 50 -- so this case needs a subtotal with 3+ decimal places, which only arises here from a happy-hour-halved odd-cent drink price. Cherry Limeade 3.79 halved to 1.895 (happy hour) + Glazed Donut 1.49 x2 (2.98) => subtotal 4.875, tax 0.39 (exact), finalTotal 5.265. #46 fixes this: exact Decimal math with ROUND_HALF_UP renders 5.265 as $5.27 (half cent rounds up), matching the round-half-away-from-zero display rule (C# `decimal` + `MidpointRounding.AwayFromZero`) used to compute expectedSpokenTotalText below.",
       "steps": [
         { "action": "add", "item": "Cherry Limeade", "size": "medium", "quantity": 1, "price": "3.79" },
         { "action": "add", "item": "Glazed Donut", "size": "standard", "quantity": 2, "price": "1.49" }
@@ -322,6 +328,28 @@
       "expectedFinalTotal": "5.265",
       "expectedSpokenTotalText": "$5.27",
       "landsOnHalfCent": true
+    },
+    {
+      "tag": "trailingZero",
+      "description": "Rick's N21 (#46): trailing-zero cents must still render two decimal places, not truncate to '$10.8'. Reuses taxCases[0] (Tots qty1 @10.00, no happy hour): subtotal 10.00, tax 0.80, finalTotal 10.80.",
+      "steps": [
+        { "action": "add", "item": "Tots", "size": "medium", "quantity": 1, "price": "10.00" }
+      ],
+      "happyHour": false,
+      "expectedFinalTotal": "10.80",
+      "expectedSpokenTotalText": "$10.80",
+      "landsOnHalfCent": false
+    },
+    {
+      "tag": "roundUpNonMidpoint",
+      "description": "Rick's N21 (#46): a non-midpoint value whose third decimal digit forces a round-up, distinct from the exact-half-cent case above. Tots medium x3 @2.79, no happy hour: subtotal 8.37, tax 0.6696 (8.37 * 0.08), finalTotal 9.0396 -- rounds up to $9.04 (not a ceiling: this is a genuine round-half-up-style carry from the thousandths digit, not merely truncating/ceiling every fractional cent).",
+      "steps": [
+        { "action": "add", "item": "Tots", "size": "medium", "quantity": 3, "price": "2.79" }
+      ],
+      "happyHour": false,
+      "expectedFinalTotal": "9.0396",
+      "expectedSpokenTotalText": "$9.04",
+      "landsOnHalfCent": false
     }
   ]
 }

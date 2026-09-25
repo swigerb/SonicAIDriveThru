@@ -229,7 +229,362 @@
 - **Fallback Behavior:** null token → no `?token=...` param appended; legacy backends work unchanged
 - **Impact:** Zero demo behavior change until `require_session_token: true` is set
 
-## Governance
+#### 34. Search Fallback: Wrap the Retry, Not Just the First Attempt (Summer — Backend Dev, #37)
+- **Decision:** Moved Azure AI Search result iteration and first-page materialization *inside* the
+  existing `try` block in `tools.py::search()`, and wrapped the minimal-`select` retry call itself in
+  its own `try`/`except` rather than letting it run unguarded after the first exception was caught.
+- **Rationale:** The original code caught the field-name-mismatch 400 on the *first* search call, but
+  then re-issued the retry call and iterated its results **outside** any exception handling — so a
+  second failure (or a failure while paging results) would propagate as an unhandled exception instead
+  of falling through to the tool's existing "no results" guest-facing response. This was dead-code
+  protection: the retry path existed but wasn't actually safe to call.
+- **Investigated (report-only, no change):** Checked whether the McDonald's/Dunkin' search tool
+  implementations have the same pattern. **Confirmed absent** — those backends don't have an
+  equivalent field-name-mismatch retry path at all (no dual-select-list fallback), so this specific
+  dead-code-retry bug is unique to the Sonic backend and required no cross-backend fix.
+- **Verification:** Red confirmed via `SearchToolTests.cs`'s two previously-skipped fallback
+  scenarios (both now un-skipped and green) plus new realistic-mock Python unit tests in
+  `test_tools_search.py`. Mutation-checked.
+
+#### 35. Route 44 Alias Normalization on a Single Canonical Size Key (Summer — Backend Dev, #40)
+- **Decision:** Added `menu_utils.canonical_size_key()` so every order-mutation path (add/merge/
+  remove/update) normalizes `size` through one canonical mapping before comparing or storing —
+  `"44 oz"`, `"route44"`, `"Route 44"`, and case variants all canonicalize to the same key used
+  internally, instead of each caller inventing its own ad-hoc string comparison.
+- **Rationale:** Guests and the model say the Route 44 size differently across turns
+  (`"route 44"`, `"44oz"`, `"Route44"`); without a single canonical key, "add a route 44 tots" then
+  "remove the 44 oz tots" silently failed to merge/remove because the literal strings didn't match.
+- **Verification:** Red confirmed via 2 previously-skipped `UpdateOrderAddRemoveModifyTests.cs`
+  scenarios (now un-skipped, green) plus 2 new Python unit tests. Mutation-checked.
+
+#### 36. Single `_reset_order_state()` Helper Clears All Per-Session State (Summer — Backend Dev, #41)
+- **Decision:** Extracted a single `_reset_order_state()` helper in `order_state.py` that clears
+  every piece of per-session order state (items, combo/absorption display bookkeeping, etc.) in one
+  place, and made `reset_order` call only this helper.
+- **Rationale:** Reset previously cleared the order item list but left stale combo-absorption display
+  state behind, so a reset order could still show phantom combo line items on the next `get_order`
+  readback. A single reset helper removes the possibility of a future new piece of session state being
+  added to one path and forgotten in the other.
+- **Verification:** Red confirmed via previously-skipped `ComboAbsorptionTests.cs` reset-display
+  scenario (now un-skipped, green) plus a new Python unit test. Mutation-checked.
+
+#### 37. Category Inference: `menuItems.json` First, Word-Boundary Keyword Fallback Second; Sundaes Are Full-Price During Happy Hour (Summer — Backend Dev, #39 — decision confirmed by Brian)
+- **Decision:** `infer_combo_component()` now looks up the item's category from `menuItems.json`
+  first; only unknown items fall through to a keyword heuristic, and that heuristic now requires a
+  **word-boundary** match (regex `\b...\b`) so `"Dr Pepper"` no longer spuriously matches on a
+  substring inside an unrelated item name. Per Brian's explicit decision recorded on #39: **sundaes
+  are excluded from the happy-hour drinks/sides discount and remain full price** — they are neither a
+  "drink" nor a "side" for discount purposes even though the naive keyword heuristic would have
+  matched "Sundae" as a dessert-adjacent item.
+- **Rationale:** The prior keyword-only approach was both under- and over-inclusive: it missed items
+  whose category was only knowable from the menu data, and it false-positive-matched substrings
+  (`dr pepper` matching inside longer strings without a word boundary). Brian's sundae ruling needed
+  an explicit, tested exception rather than relying on the keyword fallback accidentally getting it
+  right.
+- **Added:** A golden category table (`tests/conformance/testdata/golden-menu-categories.json`) with
+  every menu item's expected bucket (`sides`/`drinks`/`none`), enforced by a new C# theory
+  (`GoldenMenuCategoryHappyHourTests.cs`) covering all 3 buckets and both exception cases (sundae,
+  hot-dog-entree).
+- **Verification:** Red confirmed via the previously-skipped Ched 'R' Peppers scenario (now
+  un-skipped, green) plus the new golden-category theory and 6 new Python unit tests
+  (`test_menu_utils.py`). Mutation-checked (stashed `menu_utils.py`/`order_state.py`; confirmed both
+  Ched R Peppers and the sundae exception case go genuinely red).
+- **Correction (PR #50 review follow-up):** the two sundaes (Hot Fudge Sundae, Caramel Sundae) live
+  in `menuItems.json`'s **"Shakes & Ice Cream"** category — that's specifically *why* the naive
+  keyword/category heuristic miscategorized them as happy-hour-eligible drinks before Brian's ruling:
+  "Shakes & Ice Cream" is otherwise a drinks-adjacent bucket (shakes/blasts genuinely are half-price
+  drinks in happy hour), so a sundae sitting in the same JSON category needed the explicit
+  `_SUNDAES` carve-out documented above rather than a blanket category-to-bucket mapping.
+
+#### 38. Exact Money via `Decimal` + `ROUND_HALF_UP`, One Formatter for Every Spoken-Money Surface (Summer — Backend Dev, #46 — decision confirmed by Brian per #28 N22)
+- **Decision:** All order money math (`_update_summary` in `order_state.py`) now runs entirely in
+  `decimal.Decimal`, built directly from `menuItems.json` prices and config tax rates via
+  `money_utils.to_decimal()` — never through a `float` intermediate — with **no intermediate
+  rounding** anywhere in the subtotal/tax/final-total chain. A single new formatter,
+  `money_utils.format_money()`, renders the final exact `Decimal` as a culture-invariant `"$0.00"`
+  string using `decimal.ROUND_HALF_UP` (a half cent rounds *up*, not toward a ceiling — verified with
+  a dedicated non-half-cent case that must still round down). Per Brian's #28 N22 note, every
+  spoken-money surface in the backend — the `tools.py` prompt/template paths (~5 call sites) and the
+  `get_order` readback in `order_state.py` (which previously omitted the `$` sign entirely) — now
+  routes through this one formatter, and the wire's numeric fields (`total`/`tax`/`finalTotal`/
+  `items[].price`) remain plain, un-rounded JSON numbers, unaffected by the display rule.
+- **Rationale:** The prior implementation rendered spoken totals with Python's `float`-based `:.2f`
+  format specifier, which round-trips through IEEE-754 binary and can disagree with *every*
+  consistent decimal rounding rule depending on a value's specific binary representation — Rick's
+  200k-order simulation found hundreds of half-cent disagreements. `SpokenTotalHalfCentTests` (the
+  `5.265` → `$5.27` case) was `Skip`'d against Python for exactly this reason.
+  Un-skipping it required an actual `Decimal`-based rounding rule, not a smarter `float` format string.
+- **Added:** Two new N21 golden cases per Rick — trailing-zero (`10.80` → `$10.80`, proving a clean
+  value still renders two decimal places) and round-up-non-midpoint (3× Tots medium at `2.79` →
+  `9.0396` → `$9.04`, proving the rule generalizes beyond exact half-cent landings). Confirmed the
+  conformance suite's money tolerance still holds — Python's `Decimal`-derived exact values now match
+  the golden decimals exactly, well within the existing 1e-6 Python slack (which is now unused
+  headroom rather than a load-bearing tolerance).
+- **Verification:** Red confirmed on both sides — Python: `test_money_utils.py` (6 new tests,
+  mutation-checked at both collection level, i.e. missing module, and assertion level, i.e.
+  `ROUND_HALF_UP`→`ROUND_DOWN` swap); C#: `SpokenTotalHalfCentTests` un-skipped plus 2 new `[Fact]`s
+  for the N21 cases, all green.
+- **Correction (PR #50 review follow-up):** "built directly from `menuItems.json` prices" above
+  overstates what `_update_summary` actually does — it sums `OrderItem.price * OrderItem.quantity`
+  for each line, where `price` is whatever value the model passed as a tool-call argument to
+  `update_order`, not a value `order_state.py`/`money_utils.py` looks up from `menuItems.json`
+  itself. The system prompt instructs the model to quote prices from the menu data it was given, so
+  in practice they match `menuItems.json`, but the backend has no independent lookup or validation of
+  that — it trusts the caller's `price` argument. (`menuItems.json` schema/lookup redesign is a
+  separate, larger piece of work Rick is filing independently; not in scope here.)
+
+#### 39. Frontend Ticket Cents: Backend-Computed Display Strings as Source of Truth, Client-Side `formatMoney()` Double-Rounding as Defense-in-Depth (Morty — Frontend Dev, #47)
+- **Decision:** Two-pronged. (1) `OrderSummary` (`app/backend/models.py`) gains three additive string
+  fields — `totalDisplay`/`taxDisplay`/`finalTotalDisplay` — computed server-side via `format_money()`
+  from the pre-float-conversion `Decimal` (the same #46 formatter, same `ROUND_HALF_UP` rule); these
+  are the single source of truth the ticket prefers whenever present, added to the wire schema
+  additively (numeric fields unchanged, existing consumers unaffected; a Pydantic
+  `model_validator` auto-fills them from the numeric fields for any caller that omits them). (2) The
+  frontend (`order-summary.tsx`) gains an exported `formatMoney()` helper using a **double-rounding**
+  trick (`Number(value.toFixed(10)).toFixed(2)`) as a fallback for the dummy-data preview path (which
+  never talks to the backend) and for each line item's `price * quantity` (not covered by the new
+  backend fields, since `OrderItem` itself wasn't touched).
+- **Rationale:** Rick's repro — `88.04499999999999` vs `88.045`, both meant to be the exact decimal
+  `$88.045` — are genuinely distinct IEEE-754 doubles. Plain `.toFixed(2)` renders them
+  inconsistently (`$88.04` vs `$88.05`); the classic "epsilon trick"
+  (`Math.round((v + Number.EPSILON) * 100) / 100`) does not fix this either (still `$88.04` for the
+  first value). Rounding first to a much higher intermediate precision collapses the float noise
+  (which only ever appears past roughly the 10th decimal place at these magnitudes) before the final
+  2-decimal round, so both inputs land on `$88.05`. This mirrors the exact same problem #46 solved on
+  the backend: once float noise is baked into a value, only access to the original exact value (the
+  backend's `Decimal` path) or an intermediate-precision cleanup round can reliably normalize it —
+  hence preferring the backend string whenever it's available, and using the double-rounding trick
+  only where the backend hasn't (yet) computed one.
+- **Verification:** Red confirmed by reverting `formatMoney()` to plain `.toFixed(2)` — 3 of the new
+  frontend tests fail exactly as expected (line-item price, Rick's two repro values, per-item
+  rendering), restored and green. Backend `_fill_display_defaults` validator mutation-checked
+  (`test_models.py`, 3 new tests) by breaking the fill logic — confirmed genuine red, restored.
+- **Superseded (PR #50 review should-fix 2):** the double-rounding trick above
+  (`Number(value.toFixed(10)).toFixed(2)`) deduplicated `88.04499999999999`/`88.045` correctly but
+  was never actually round-half-up — Rick's node repro showed it under-rounds genuine half-cents
+  (`5.265` → `$5.26`, `1.005` → `$1.00`), disagreeing with the backend's `ROUND_HALF_UP` contract.
+  Replaced with `"$" + (Math.round(Number((v * 100).toFixed(6))) / 100).toFixed(2)`: round to 6
+  decimal places first (collapses the same float noise the old trick targeted) then round-half-up to
+  cents. Verified both properties still hold — `5.265` → `$5.27` (was `$5.26`) and
+  `88.04499999999999`/`88.045` both still → `$88.05` (unchanged). See entry 40 below.
+
+#### 40. PR #50 Review Remediation — Must-Fix and Should-Fix Items (Summer — Backend Dev, Morty — Frontend Dev, Birdperson — Tester)
+- **Must-fix — combo side slot was an implicit category bucket, not the menu's actual rule
+  (pricing regression, Rick's repro: Cheeseburger Combo + Crispy Tenders 5 pc subtotal 8.49 on this
+  branch vs 15.98 on `dev`).** `menu_utils.py`'s `infer_combo_component()` previously mapped *every*
+  item in the `"Extras & Sides"` and `"Hot Dogs & Tots"` `menuItems.json` categories to the combo
+  `sides` slot, so 9 items that were never meant to be absorbed for free (Crispy Tenders 3/5 pc,
+  Premium Chicken Bites, both FRITOS® wraps, Fritos Chili Cheese Pie, Soft Pretzel Twist, Mozzarella
+  Sticks, Ched 'R' Peppers) got absorbed into a combo instead of being charged in full. Every combo's
+  own menu description says "your choice of a side (**Tots or Fries**) and a drink" — the combo side
+  slot is now an explicit allow-list (`_COMBO_SIDE_ITEMS`: Tots and Groovy Fries, any size) instead of
+  a category-derived bucket; everything else in those two categories is priced as a full add-on. The
+  combo **drink** slot allow-list was compared against `dev`'s prior behaviour and left unchanged —
+  no bug found there. Happy-hour discount eligibility (`is_happy_hour_discounted()`) is now a
+  genuinely separate question from combo-slot membership — each item has two independent boolean-ish
+  facts (`comboSlot`, `happyHourDiscounted`) rather than one bucket doing double duty, per Rick's
+  explicit instruction not to derive both from the same category lookup.
+- **Golden data / naming note:** the golden table (`golden-menu-categories.json`) gives every one of
+  the 60 menu items explicit `comboSlot` (`"sides"`/`"drinks"`/`"none"`) and `happyHourDiscounted`
+  (`true`/`false`) fields as requested. The **values stay plural** (`"sides"`/`"drinks"`) rather than
+  Rick's literal singular wording (`side|drink|none`) — the field *names* match his request, but the
+  values keep the vocabulary the rest of the Python code already uses (`_COMBO_SIDE_ITEMS`,
+  `is_combo_side()`, etc.) so there's exactly one spelling of "which slot" throughout the codebase.
+  Flagging explicitly in case Rick expects the literal singular string.
+- **Shakes & Blasts — deliberately left alone pending Brian's ruling.** Shakes and Blasts currently
+  count as `drinks` for the happy-hour discount (half price), by the same logic that makes them fill
+  a combo's drink slot. Whether that's correct is an open question asked of Brian separately; per the
+  request, this is now a **single, obvious line** in the golden table/code
+  (`_SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED = True` in `menu_utils.py`, with a comment pointing at
+  this decision) so his eventual answer is a one-line flip, not a re-derivation.
+- **Should-fix 1 — assert the `*Display` fields directly (kills Rick's mutation X1).** The half-cent
+  and an active (non-half-cent) `SpokenTotalTests` scenario now assert `totalDisplay`/`taxDisplay`/
+  `finalTotalDisplay` as literal strings (`$4.88`/`$0.39`/`$5.27` and `$8.77`/`$0.70`/`$9.47`), not
+  just the underlying exact decimals — the exact-decimal fields alone can't distinguish
+  `ROUND_HALF_UP` from `ROUND_HALF_EVEN` on values that never round in the first place.
+- **Should-fix 2 — frontend `formatMoney` round-half-up.** See the note appended to entry 39 above.
+- **Should-fix 3 — README states the literal formula.** "Rendering money for display" in
+  `tests/conformance/README.md` now states the exact C# expression
+  (`"$" + Math.Round(v, 2, MidpointRounding.AwayFromZero).ToString("0.00", CultureInfo.InvariantCulture)`)
+  and the equivalent Python description, rather than only naming the rounding mode in prose.
+- **Should-fix 4 — `tools.py`'s search timeout didn't bound the actual HTTP request.**
+  `asyncio.wait_for(search_client.search(**kwargs), timeout=...)` only wrapped the initial call,
+  which is lazy for `azure-search-documents`' async `SearchClient` — the real HTTP request fires
+  during the subsequent `async for record in search_results` iteration, which ran *outside* the
+  timeout entirely. Fixed by wrapping an inner coroutine (the await *and* the full iteration) in the
+  one `asyncio.wait_for` call, so a slow/hanging iteration is now genuinely bounded.
+- **Verification:** Every item above was mutation-checked with a backup-file revert/restore cycle —
+  confirmed genuinely red before the fix, green after. The must-fix's new
+  `GoldenMenuComboSlotTheoryTests` (60-row Theory over every golden item × combo) catches Rick's X4
+  (Corn Dog exception removed) and X6 (`extras & sides` bucket changed) simultaneously: reverting to
+  the old wide category mapping fails 18/60 rows including the Corn Dog row. Full suites re-run clean
+  after every item: `pytest app/backend/tests` (672 passed at the time, growing with each follow-up —
+  see entry 41), `dotnet test` (292 passed / 2 skipped, Stream A only), `ruff check .` clean, frontend
+  `npm test`/`npm run build` clean.
+
+#### 41. PR #50 Review Follow-Ups (Summer — Backend Dev, Morty — Frontend Dev)
+- **Size-key aliases now share one compact-key lookup (kills Rick's X3).** `canonical_size_key()`
+  and `normalize_size()` previously stripped whitespace only when resolving `SIZE_ALIASES`, so
+  `"Route-44"` and `"rt. 44"` (punctuation variants) fell through unresolved — `canonical_size_key`
+  returned the raw string as the matching key (so they didn't merge with other Route 44 spellings)
+  and `normalize_size` returned `""` (silently dropping the display prefix). Added a shared
+  `_compact_size_key()` helper (strips whitespace, periods, and hyphens) used by both functions, plus
+  an `"extralarge"` → `"xl"` alias so `"Extra Large"` canonicalizes onto the same key as its own short
+  form. `items[].size` on the wire is now explicitly documented (`tests/conformance/README.md`) and
+  test-pinned (`CanonicalSizeKeyTests`, `test_wire_item_size_is_the_canonical_lowercase_key_...`) as
+  the canonical lowercase key — never the raw spelling, never the human-readable display prefix.
+- **Spoken totals read `finalTotalDisplay` once, not re-derive it.** `tools.py`'s `update_order`
+  delta text and `order_state.py`'s `get_grouped_order_for_readback` both called
+  `format_money(summary.finalTotal)` a second time instead of reading the `finalTotalDisplay` string
+  `OrderSummary` already computed. Functionally identical today, but two independent call sites
+  computing the same string is exactly the kind of duplication that let the original `get_order`
+  readback (#46, #28 N22) silently omit the `$` sign in the first place. Both now read
+  `summary.finalTotalDisplay` / `session["order_summary"].finalTotalDisplay` directly; verified with
+  a mock asserting `format_money` is never called during two successive readback requests.
+- **`types.ts`'s `OrderSummaryWire` gains the three `*Display` fields**, mirroring
+  `OrderSummaryProps` in `order-summary.tsx`, so a resumed session's ticket
+  (`extension.session_resumed`) keeps reading the same backend-rounded strings a fresh order does,
+  rather than losing them to a structurally-permissive type gap.
+
+## PR #50 review, round 4 (Rick: Approve, with should-fix items before merge)
+
+- **`®` removal is now one rule, not two.** `_menu_key()` (the shared normalisation helper) now
+  strips `®` itself, as its own explicit step, alongside paren-group removal, whitespace collapse,
+  and lowercasing. Previously `®` removal only existed in `order_state.py`'s ad-hoc combo-conversion
+  string, and `MENU_CATEGORY_MAP` was still keyed by bare `name.lower()`.
+  **Correction (PR #50 review round 5, should-fix 3):** the line above originally claimed this was a
+  *live* bug affecting "12 of the 60" `®`-bearing menu items. Re-checked directly against `467494b`
+  (the commit before this fix): map construction (`name.lower()`) and lookup
+  (`strip_modifiers(item_name).lower()`) were **both** missing `®` removal — symmetric, so
+  `®`-bearing names actually resolved fine at that point. The one genuine *live* bug was narrower:
+  map construction didn't collapse whitespace the way `strip_modifiers()` does, so only the single
+  NBSP-bearing OREO Blast name could ever actually fail to resolve via the map. Consolidating `®`
+  removal into `_menu_key()` was still worth doing — it closed a *latent* duplication/drift risk,
+  since `order_state.py`'s combo-conversion matching already stripped `®` independently while
+  `menu_utils.py` didn't — but it was not fixing a live classification bug for the other 11 `®`
+  names. The "reverting the map-key line fails a test for all 12" mutation result is real and worth
+  keeping as a regression guard (it proves construction and lookup must stay in sync going forward),
+  but it does not mean those 12 were broken in the code as shipped before this fix.
+- **Keyword fallbacks now match on word boundaries, not bare substrings.** A plain
+  `any(kw in normalized ...)` substring check let `"tea"` match inside `"steak"`, silently
+  absorbing an off-menu `"Philly Cheesesteak"`/`"Steak Sandwich"` into a combo's drink slot for
+  free and happy-hour-discounting it. Both the fountain-drink and shake/blast/malt keyword lists
+  are now compiled `\b...\b` regexes (optional trailing `s` for plurals); Dr Pepper's existing
+  regex was already word-boundary and is unchanged. Every on-menu item still resolves via
+  `MENU_CATEGORY_MAP` directly (proven by a test that patches both fallback functions to raise) —
+  these fallbacks only ever see genuinely off-menu names.
+- **Customised sundaes pin Brian's #39 decision under customization too, not just the plain
+  case.** `"Hot Fudge Sundae (Extra Fudge)"` in a combo is charged in full (never fills the drink
+  slot, kills Rick's Z2) and stays full price at happy hour (kills Z3) — added as two new
+  `CustomisedItemMenuLookupTests.cs` Facts, alongside the plain-sundae case already pinned in
+  `GoldenMenuComboSlotTheoryTests`/`test_menu_utils.py`.
+- **Y4 (an off-menu fountain drink discounted at happy hour) is now pinned at the C# conformance
+  level too, not just Python.** Previously only `test_menu_utils.py` covered "an off-menu drink
+  like Dr Pepper Zero is still happy-hour discounted"; a new
+  `Off_menu_fountain_drink_is_happy_hour_discounted` Fact in `CustomisedItemMenuLookupTests.cs`
+  runs the same assertion end to end against the live backend, mirroring the combo-slot version of
+  the same case (`Off_menu_fountain_drink_still_absorbs_into_the_combo_drink_slot`) that already
+  existed there.
+- **README now states the exact `_menu_key()` algorithm as an ordered list** (paren-group removal
+  anywhere in the string → whitespace collapse → lowercase → `®` removal) so a C# reimplementation
+  has no ambiguity left to diverge on. A new `CustomisedItemMenuLookupTests.cs::
+  ParenGroupNormalisationTests` pins the three edge cases Rick's review explicitly asked for: two
+  separate `(...)` groups (both strip, still absorbs as a side); a *mid-string* (not just trailing)
+  group (strips correctly to a different, non-side real menu item, charges in full); and a
+  nested/unbalanced group (fails safe to full price rather than risking a wrong, silent match).
+- **Explicitly out of scope (Rick will file separately):** the Python conformance-suite money
+  tolerance change, and the `menuItems.json` schema redesign referenced in the correction on entry 38
+  above.
+
+## PR #50 review, round 5 (Rick: Approve, with should-fix items before merge)
+
+- **Keyword over-correction fixed: the round-4 word-boundary regexes were too strict and broke
+  real spoken off-menu variants that worked at `467494b`.** `\bshake\b` never matches "milkshake"
+  at all (no word boundary between "milk" and "shake"), so "Chocolate Milkshake" fell through to
+  unclassified; the old `s?` suffix only allowed a single trailing "s", so "Cherry Slushes"
+  ("-es") and "Blue Raspberry Slushie" ("-ie") also fell through. Fixed with
+  `r"\b(?:slush(?:ie|y)?|limeade|ocean water|drink|tea|lemonade|coke|sprite|root beer)(?:e?s)?\b"`
+  (fountain) and `r"(?:\b|milk)(?:shake|blast|malt)(?:e?s)?\b"` (shake/blast/malt) — the latter's
+  `(?:\b|milk)` prefix is a narrow, deliberate carve-out for the "milk"+"shake" compound only, not
+  a general loosening (a nonsense "Overshake Deluxe" still correctly doesn't match). Both the
+  original round-4 fix (steak/tea word-boundary) and this correction are pinned together: a new
+  `KeywordOverCorrectionTests` pytest class plus a `Theory` over the three spoken variants in both
+  `ComboSlotTests` and `HappyHourDiscountTests` in `CustomisedItemMenuLookupTests.cs`. Mutation
+  check: reverting either regex to its round-4 form fails exactly the 6 new conformance rows (3
+  combo-slot + 3 happy-hour), the other 16 stay green.
+- **README documentation corrections (should-fix 2):** "lowercase" is now stated as
+  culture-invariant (C#'s `ToLowerInvariant()`, not the culture-sensitive `ToLower()`); the
+  whitespace-collapse step now states the Python-side rule precisely (`str.isspace()`, which
+  Python's `str.split()` uses internally) and notes that every `menuItems.json` name's whitespace
+  is either an ASCII space or a single NBSP, so C#'s `char.IsWhiteSpace` — which also treats NBSP
+  as whitespace — agrees on every real name without special-casing.
+- **README history correction (should-fix 3):** the "12 of the 60 items were affected" story has
+  been removed from the *rule* statement in the conformance README (the contract only needs to
+  state the algorithm, not its discovery history); the corrected story now lives in this file, in
+  the round-4 entry above (see the "Correction" paragraph added to the `®` removal bullet under
+  "PR #50 review, round 4").
+- **`™` and the curly apostrophe `’` are now normalised in `_menu_key()`, exactly like `®`
+  (should-fix 4).** `™` is stripped; `’` (U+2019) is replaced with a plain `'` (U+0027). Eight
+  `menuItems.json` names contain `™` (the "SONIC Smasher" family, plain and Combo) and one contains
+  `’` (the REESE'S Blast); all nine previously missed their own `MENU_CATEGORY_MAP` entry and
+  relied on keyword-fallback luck exactly like the OREO Blast's NBSP did before round 4. New
+  pytests prove all nine resolve directly (fallbacks patched to raise, mirroring
+  `MenuCategoryMapDirectResolutionTests`). A Burger/Sandwich item's map miss is invisible through
+  the combo-slot/happy-hour paths (neither keyword list matches "smasher" either way), so the new
+  conformance row instead pins the one place the miss *is* end-to-end observable: `update_order`'s
+  extras-eligibility check (`ALLOWED_EXTRA_CATEGORIES` includes "burgers & sandwiches", but only if
+  the Smasher resolves via the map) — a Smasher spoken without its `™` must still let a follow-up
+  "Add Bacon" extra through instead of being wrongly rejected. Mutation check: reverting `_menu_key`
+  to the round-4 (®-only) form fails exactly that one new conformance test (23 → 22 passing), the
+  other 22 stay green; restored, re-confirmed 23/23.
+- **Hyphens are word boundaries in both regex engines by design (should-fix 5, no behaviour
+  change).** Documented as a note only in the README's keyword-fallback section — Python's `\b`
+  and C#'s `\b` (via `Regex`, whose word-character definition matches .NET's) both treat `-` as a
+  non-word character, so a keyword adjacent to a hyphen (e.g. a hyphenated customization like
+  `"(Extra-Crispy)"`, or the `"All-American"` prefix on the Smasher family) still gets a correct
+  boundary on either side without any special-casing — a future C# port of these keyword regexes
+  needs no adjustment for hyphens.
+
+#### 42. Customised Items Must Be Normalised Before Every Menu Lookup (Summer — Backend Dev, PR #50 review round 2)
+- **Root cause: customizations live *inside* `item_name`, and lookups didn't account for that.**
+  A modifier like `"Tots (Extra Crispy)"` or `"Chili Cheese Tots (Extra Cheese)"` is a single
+  string sent by `update_order` — there is no separate "base item" field. `infer_category()`,
+  `infer_combo_component()`, and `is_happy_hour_discounted()` were all matching against the raw,
+  unstripped, lowercased name. A customised item therefore never hit its real
+  `menuItems.json`/allow-list entry and fell through to substring keyword guessing instead —
+  which could (and did) disagree with the item's true classification. Rick's concrete repro:
+  a Cheeseburger Combo plus `"Chili Cheese Tots (Extra Cheese)"` absorbed the tots for free
+  (matched the bare `"tots"` keyword) instead of charging $3.79 in full, because "Chili Cheese
+  Tots" is its own priced menu item, not one of the two combo-side-slot items.
+- **Fix: one shared `strip_modifiers()`/`_menu_key()` helper, reused everywhere, not duplicated.**
+  `menu_utils.strip_modifiers()` removes the trailing `(...)` suffix and collapses whitespace;
+  `_menu_key()` lowercases the result. Every classification function (category, combo-slot,
+  happy-hour-discount) now normalises through it, and `order_state.py`'s pre-existing ad-hoc
+  combo-conversion base-name stripping (`item_name.split("(")[0]`-style) was replaced with a call
+  to the same helper rather than kept as a second, independent implementation of the same rule —
+  the exact class of bug the Route 44 alias fix (#40, entry 41 above) already taught us to avoid:
+  two pieces of code doing raw string matching against the same source of truth, with no shared
+  normalisation step, desync the moment the model introduces a transformation (aliases there,
+  parenthesized modifiers here).
+- **The side-slot keyword fallback is deleted, not fixed (Rick's explicit instruction).** An
+  unrecognised/off-menu item — customised or not — never fills the combo side slot; it is always
+  charged in full. "A charged item is visible and correctable; a free one is silent revenue
+  loss." Only the literal `_COMBO_SIDE_ITEMS` allow-list (tots, groovy fries, post-normalisation)
+  can occupy that slot.
+- **The drink keyword fallback is split so the happy-hour flag is genuinely the single switch.**
+  Fountain-drink keywords (Dr Pepper, Coke, Sprite, root beer, ...) remain unconditionally
+  eligible for both the combo drink slot and the happy-hour discount — they're always full-price
+  fountain drinks otherwise. Shake/blast/malt keywords are still unconditionally eligible for the
+  combo drink slot (that's a menu-composition fact, unrelated to pricing), but the happy-hour
+  discount question for them is gated exclusively by
+  `_SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED` — proven by a dedicated test that flips the flag and
+  asserts every shake/blast variant (plain, customised, on-menu, off-menu) changes together, while
+  combo-slot eligibility stays unaffected.
+- **Regression coverage added on both sides:** `test_menu_utils.py::CustomisedItemMenuLookupTests`
+  (12 Python unit tests) and a new `CustomisedItemMenuLookupTests.cs` (5 live-backend Facts,
+  including the customised Cherry Limeade happy-hour case that kills Rick's Y4).
+
+
 
 - All meaningful changes require team consensus
 - Document architectural decisions here

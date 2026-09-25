@@ -115,19 +115,37 @@ class SearchToolTests(unittest.TestCase):
         self.assertIn("can't reach", result.text.lower())
 
     def test_field_mismatch_triggers_fallback_retry(self):
+        """#37: the real azure-search-documents async SearchClient.search(...) is lazy -- it
+        returns an async-iterable immediately without making any HTTP request; the request (and
+        any HttpResponseError, e.g. this "Could not find a property named" 400) only happens once
+        the results are iterated (`async for` / `__anext__`). A mock where `search()` itself raises
+        synchronously doesn't exercise that shape at all, so this mock raises from the *iterator's*
+        `__anext__` instead, matching production exactly."""
         from azure.core.exceptions import HttpResponseError
 
         records = [{"id": "5", "description": "A tasty item"}]
         call_count = 0
 
+        class _FailingResults:
+            """Simulates the SDK returning immediately (no exception at call time) but raising
+            once the caller starts iterating -- i.e. when the first-page HTTP request actually
+            fires."""
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                raise HttpResponseError(message="Could not find a property named 'sizes'")
+
+        async def _async_iter():
+            for r in records:
+                yield r
+
         async def _search_with_fallback(**kwargs):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                raise HttpResponseError(message="Could not find a property named 'sizes'")
-            async def _async_iter():
-                for r in records:
-                    yield r
+                return _FailingResults()
             return _async_iter()
 
         client = AsyncMock()

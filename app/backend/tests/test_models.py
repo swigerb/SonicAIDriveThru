@@ -87,6 +87,34 @@ class OrderSummaryTests(unittest.TestCase):
         self.assertIsInstance(summary.items[0], OrderItem)
         self.assertEqual(summary.items[0].item, "Muffin")
 
+    def test_display_fields_default_from_numeric_fields(self):
+        # #47: callers that only pass the numeric fields (e.g. every pre-existing call site above)
+        # must still get correct display strings -- the additive fields are never left blank.
+        summary = OrderSummary(items=[], total=9.0396, tax=0.0, finalTotal=9.0396)
+        self.assertEqual(summary.totalDisplay, "$9.04")
+        self.assertEqual(summary.finalTotalDisplay, "$9.04")
+
+    def test_explicit_display_fields_are_not_overwritten(self):
+        # #47: order_state.py passes display strings computed from the pre-float-conversion
+        # Decimal (more precise than re-deriving from the already-rounded float fields); those
+        # explicit values must win over the auto-derived default.
+        summary = OrderSummary(
+            items=[],
+            total=5.265,
+            tax=0.0,
+            finalTotal=5.265,
+            totalDisplay="$5.27",
+            taxDisplay="$0.00",
+            finalTotalDisplay="$5.27",
+        )
+        self.assertEqual(summary.totalDisplay, "$5.27")
+        self.assertEqual(summary.finalTotalDisplay, "$5.27")
+
+    def test_display_fields_round_trip_through_json(self):
+        summary = OrderSummary(items=[], total=10.80, tax=0.0, finalTotal=10.80)
+        restored = OrderSummary.model_validate_json(summary.model_dump_json())
+        self.assertEqual(restored.finalTotalDisplay, "$10.80")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -71,26 +71,7 @@ public sealed class SearchToolTests(ConformanceFixture fixture)
         Assert.False(anySearchToolResponse, "search must never emit extension.middle_tier_tool_response.");
     });
 
-    [Fact(Skip = "Known Python bug (tracked in #37): app/backend/tools.py's search() wraps only the initial " +
-        "`await search_client.search(...)` call in try/except HttpResponseError (lines 206-244) " +
-        "expecting the field-mismatch 400 to raise there, but the azure-search-documents async " +
-        "client is lazy -- `search_client.search(...)` returns immediately without making any " +
-        "HTTP request, and the first-page fetch (and therefore any HttpResponseError, including " +
-        "the \"Could not find a property named\" 400 this test injects) only happens later, " +
-        "inside `async for record in search_results:` at tools.py line 251 -- OUTSIDE the " +
-        "try/except block. This makes the fallback-retry branch (lines 218-229) dead code: any " +
-        "select-field-mismatch 400 propagates as an unhandled HttpResponseError up through " +
-        "rtmt.py's connection-wide catch-all (the same mechanism as " +
-        "ToolErrorSessionSurvivesTests.Session_survives_an_unhandled_tool_exception), tearing " +
-        "down the WebSocket connection instead of retrying. Empirically confirmed: the backend " +
-        "log shows the fake 400 was received and parsed into `azure.core.exceptions." +
-        "HttpResponseError: (InvalidRequestParameter) Could not find a property named 'sizes' " +
-        "on type 'search.document'.` raised from tools.py:251 (via " +
-        "azure/search/documents/aio/_operations/_patch.py's __anext__), then \"Session ... " +
-        "detached (client close code=None)\" -- no retry request was ever sent, and no " +
-        "function_call_output reached the upstream socket. app/backend must not be modified " +
-        "from this stream; see the #9 report for details.",
-        SkipWhen = nameof(BackendUnderTest.IsPython), SkipType = typeof(BackendUnderTest))]
+    [Fact]
     public Task Search_retries_with_a_minimal_select_after_the_field_name_fallback_400() => fixture.RunAsync(async () =>
     {
         var ct = TestContext.Current.CancellationToken;
@@ -125,12 +106,7 @@ public sealed class SearchToolTests(ConformanceFixture fixture)
         Assert.DoesNotContain(rejectedField, retrySelect.Split(',', StringSplitOptions.TrimEntries), StringComparer.OrdinalIgnoreCase);
     });
 
-    [Fact(Skip = "Known Python bug (tracked in #37): depends on the search field-name fallback retry actually " +
-        "succeeding (see Search_retries_with_a_minimal_select_after_the_field_name_fallback_400's " +
-        "Skip reason) -- the fallback's HttpResponseError propagates unhandled and tears down " +
-        "the connection before a later update_order call could ever prove the session survives. " +
-        "app/backend must not be modified from this stream; see the #9 report for details.",
-        SkipWhen = nameof(BackendUnderTest.IsPython), SkipType = typeof(BackendUnderTest))]
+    [Fact]
     public Task Session_survives_the_search_fallback_and_a_later_update_order_call_still_works() => fixture.RunAsync(async () =>
     {
         var ct = TestContext.Current.CancellationToken;
