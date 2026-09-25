@@ -40,3 +40,19 @@ public sealed class FixedClockConformanceCollection : ICollectionFixture<FixedCl
 {
     public const string Name = "ConformanceFixedClock";
 }
+
+/// <summary>
+/// CONFORMANCE_TEST_HOOKS unset -- the real-deployment shape (PR #49 review round 2 follow-up,
+/// "G1"). See <see cref="BackendProfiles.HooksOff"/>'s docstring for why this needs its own
+/// dedicated collection/process rather than reusing the Default fixture.
+/// </summary>
+public sealed class HooksOffConformanceFixture : ConformanceFixture
+{
+    protected override BackendProfile Profile => BackendProfiles.HooksOff;
+}
+
+[CollectionDefinition(Name)]
+public sealed class HooksOffConformanceCollection : ICollectionFixture<HooksOffConformanceFixture>
+{
+    public const string Name = "ConformanceHooksOff";
+}

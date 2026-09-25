@@ -74,4 +74,21 @@ public static class BackendProfiles
             ["CONFORMANCE_TEST_HOOKS"] = "1",
             ["CONFORMANCE_FIXED_NOW"] = instant.ToString("O"),
         });
+
+    /// <summary>
+    /// CONFORMANCE_TEST_HOOKS left completely unset -- the exact shape of a real deployment (PR
+    /// #49 review round 2 follow-up, "G1"). Every other profile above sets
+    /// CONFORMANCE_TEST_HOOKS=1 so the suite's many scenarios can keep using a browser-sent
+    /// `response.create` as a same-effect stand-in for a server-VAD-triggered turn -- which is
+    /// exactly why none of them can prove the S1 gate (`rtmt.py`'s
+    /// `conformance_hooks.hooks_enabled_now()` check in `_filter_client_to_server`) actually does
+    /// anything: they all run against a backend where it's unconditionally true. This profile
+    /// gets its own dedicated collection/process (see
+    /// tests/conformance/tests/Conformance.Tests/BackendProfileFixtures.cs's
+    /// HooksOffConformanceFixture) specifically so
+    /// Scenarios/Security/ResponseCreateHooksGateTests.cs can black-box prove a browser-sent
+    /// `response.create` is dropped -- never reaching the fake upstream -- when hooks are off,
+    /// the same as a genuine production deployment.
+    /// </summary>
+    public static BackendProfile HooksOff { get; } = new("HooksOff", new Dictionary<string, string>());
 }

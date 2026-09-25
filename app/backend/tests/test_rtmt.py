@@ -7,6 +7,7 @@ and error recovery — all with mocked external services (no real OpenAI/Azure c
 
 import asyncio
 import json
+import os
 import re
 import sys
 import time
@@ -912,6 +913,41 @@ class ProcessMessageToServerTests(unittest.IsolatedAsyncioTestCase):
             result = await rtmt._process_message_to_server(msg, ws)
         self.assertIsNone(result)
 
+    async def test_response_create_gate_requires_hooks_enabled_live_not_just_type_membership(self):
+        """PR #49 review round 2 follow-up ("G1"): every test in this class
+        runs inside a `pytest` process where `app/backend/tests/conftest.py`
+        sets `CONFORMANCE_TEST_HOOKS=1` for the WHOLE process before any test
+        module is imported -- so none of them actually prove the S1 gate's
+        `conformance_hooks.hooks_enabled_now()` half does anything. Mutating
+        the gate in `_filter_client_to_server` to
+        `allowed = msg_type in _CLIENT_ALLOWED_TYPES or (msg_type in
+        _CLIENT_TEST_ONLY_TYPES)` -- deleting the `hooks_enabled_now()` call
+        entirely, so `response.create` becomes unconditionally allowed
+        regardless of the env var -- left every existing test in this file
+        green.
+
+        This toggles the LIVE env var directly around the full
+        `_process_message_to_server` path (not just `_filter_client_to_server`
+        in isolation) to prove both directions: dropped -- never forwarded,
+        i.e. never sent upstream -- with hooks disabled (the shape of a real
+        deployment), forwarded when the conformance harness has explicitly
+        enabled them. No `importlib.reload()` is needed:
+        `conformance_hooks.hooks_enabled_now()` re-reads the env var on every
+        call (see its own docstring)."""
+        rtmt = self._make_rtmt()
+        ws = _make_mock_ws()
+        msg = MagicMock()
+        msg.data = json.dumps({"type": "response.create"})
+
+        with patch.dict(os.environ, {"CONFORMANCE_TEST_HOOKS": ""}):
+            with self.assertLogs("sonic-drive-in", level="WARNING"):
+                result = await rtmt._process_message_to_server(msg, ws)
+        self.assertIsNone(result, "response.create must never be forwarded (never sent upstream) with hooks disabled")
+
+        with patch.dict(os.environ, {"CONFORMANCE_TEST_HOOKS": "1"}):
+            result = await rtmt._process_message_to_server(msg, ws)
+        self.assertEqual(json.loads(result), {"type": "response.create"})
+
     # ── PR #49 review round 2 "M1": fast-path bypass reproductions ──
     # Rick reproduced all three of these against the real backend before
     # this fix; each must now be handled correctly by the anchored fast
@@ -1070,6 +1106,22 @@ class ClientToServerAllowListTests(unittest.TestCase):
         (see `tests/test_conformance_hooks.py::TestNeverInInfraOrDockerfile`)."""
         self.assertEqual(_CLIENT_TEST_ONLY_TYPES, {"response.create"})
         self.assertNotIn("response.create", _CLIENT_ALLOWED_TYPES)
+
+    def test_response_create_direct_hooks_gate_toggle(self):
+        """PR #49 review round 2 follow-up ("G1"): direct-unit-test
+        companion to
+        `ProcessMessageToServerTests::test_response_create_gate_requires_hooks_enabled_live_not_just_type_membership`,
+        pinned one layer down at `_filter_client_to_server` itself rather
+        than the full message-processing wiring. Every other test in this
+        class runs with `CONFORMANCE_TEST_HOOKS=1` set process-wide (see
+        `conftest.py`), so `test_response_create_is_test_only` above only
+        pins `_CLIENT_TEST_ONLY_TYPES`'s membership -- not that the live
+        `hooks_enabled_now()` check is actually consulted at call time."""
+        message = {"type": "response.create"}
+        with patch.dict(os.environ, {"CONFORMANCE_TEST_HOOKS": ""}):
+            self.assertIsNone(_filter_client_to_server(message))
+        with patch.dict(os.environ, {"CONFORMANCE_TEST_HOOKS": "1"}):
+            self.assertEqual(_filter_client_to_server(message), {"type": "response.create"})
 
     def test_unknown_type_is_dropped(self):
         self.assertIsNone(_filter_client_to_server({"type": "some.future.event"}))
