@@ -73,12 +73,25 @@ public static class GaSessionValidator
     /// #28 N11: keys accepted under `session.audio.input.transcription` (the `AudioTranscription`
     /// object) -- previously unchecked, so a translator that forwarded a legacy/renamed nested key
     /// (e.g. a pre-GA field name) here would pass the fake but be rejected by the real service.
-    /// Confirmed by enumerating the reference's `{ language, languages, model, prompt }` preview
-    /// for this object (same page/fetch date as the class doc).
+    ///
+    /// #28 F2 (PR #52 review): re-verified against the OpenAI Realtime API reference --
+    /// https://developers.openai.com/api/reference/resources/realtime (section "Audio
+    /// Transcription", fetched 2026-09-25) -- which currently documents the `AudioTranscription`
+    /// object as `{ delay, keywords, language, languages, model, prompt }` (6 keys). `languages`
+    /// ("Possible languages of the input audio... Supported by `gpt-transcribe` and
+    /// `gpt-live-transcribe`") is a real, currently-documented GA key alongside the singular
+    /// `language` -- kept, not removed. The same re-check also found the set here was missing
+    /// two other now-documented keys, `delay` and `keywords`, which are added below for the same
+    /// reason N11 exists: an unchecked/incomplete nested-key set lets a translator regression
+    /// slip past the fake. Azure's realtime reference --
+    /// https://learn.microsoft.com/en-us/azure/foundry/openai/realtime-audio-reference (fetched
+    /// 2026-09-25) -- confirms it "follows the OpenAI Realtime API specification" here, with its
+    /// only documented deviation being the accepted *value* format for `model` (a deployment
+    /// name), not the key set.
     /// </summary>
     public static readonly IReadOnlySet<string> AudioInputTranscriptionKeys = new HashSet<string>(StringComparer.Ordinal)
     {
-        "language", "languages", "model", "prompt",
+        "delay", "keywords", "language", "languages", "model", "prompt",
     };
 
     /// <summary>

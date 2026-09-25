@@ -617,6 +617,59 @@ public sealed class FakeRealtimeScriptingModelTests
         await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
     }
 
+    /// <summary>
+    /// #28 F2 (PR #52 review): <see cref="GaSessionValidator.AudioInputTranscriptionKeys"/> was
+    /// re-verified against the OpenAI Realtime API reference (see that field's doc comment for
+    /// the citation) and found to be missing two currently-documented `AudioTranscription` keys,
+    /// `delay` and `keywords`, alongside the already-present `languages` (kept, confirmed valid).
+    /// Self-test for the harness behaviour change: a `session.update` that sets all three of
+    /// these keys under `audio.input.transcription` must be accepted (not rejected as
+    /// `unknown_parameter`), proving the validator's allow-list actually includes them rather
+    /// than just not having a test that happens to avoid them. Mutation-check: reverting the
+    /// `AudioInputTranscriptionKeys` set to the pre-F2 four keys turns this red
+    /// (`unknown_parameter` / `session.audio.input.transcription.delay`).
+    /// </summary>
+    [Fact]
+    public async Task Session_update_with_ga_transcription_delay_and_keywords_keys_is_accepted()
+    {
+        await using var fake = new FakeRealtimeUpstreamServer();
+        await fake.StartAsync(TestContext.Current.CancellationToken);
+
+        using var socket = new ClientWebSocket();
+        var wsUri = new Uri($"ws://{fake.BaseUri.Host}:{fake.BaseUri.Port}/openai/v1/realtime?model=gpt-realtime-test");
+        await socket.ConnectAsync(wsUri, TestContext.Current.CancellationToken);
+        Assert.NotNull(await ReceiveJsonWithTimeoutAsync(socket, TestContext.Current.CancellationToken)); // session.created
+
+        await WebSocketJson.SendAsync(socket, new JsonObject
+        {
+            ["type"] = "session.update",
+            ["event_id"] = "evt_ga_transcription_delay_keywords",
+            ["session"] = new JsonObject
+            {
+                ["type"] = "realtime",
+                ["audio"] = new JsonObject
+                {
+                    ["input"] = new JsonObject
+                    {
+                        ["transcription"] = new JsonObject
+                        {
+                            ["model"] = "gpt-transcribe",
+                            ["delay"] = "low",
+                            ["keywords"] = new JsonArray("drive-thru", "combo"),
+                            ["languages"] = new JsonArray("en"),
+                        },
+                    },
+                },
+            },
+        }, TestContext.Current.CancellationToken);
+
+        var response = await ReceiveJsonWithTimeoutAsync(socket, TestContext.Current.CancellationToken);
+        Assert.NotNull(response);
+        Assert.Equal("session.updated", response!.Value.GetProperty("type").GetString());
+
+        await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
+    }
+
     [Fact]
     public async Task Unknown_top_level_client_event_type_is_rejected_before_dispatch()
     {
