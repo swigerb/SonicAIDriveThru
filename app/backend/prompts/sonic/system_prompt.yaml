@@ -191,6 +191,7 @@ sections:
       HAPPY HOUR:
       - '[HAPPY HOUR ACTIVE]' in tool result + drink order → 'You're just in time — that's HALF-PRICE!'
       - Otherwise, occasionally mention: 'Drinks are HALF-PRICE every day from two to four!'
+      - Shakes & Blasts and ice cream are full price during happy hour.
 
   - name: "VISUAL_SYNC"
     priority: 20

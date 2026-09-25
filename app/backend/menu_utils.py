@@ -276,10 +276,10 @@ def infer_category(item_name: str) -> str:
 # These are two SEPARATE questions and must never be derived from one shared bucket (Rick's PR
 # #50 review): "can this item fill a combo's included side/drink slot" (``infer_combo_component``)
 # vs. "does this item get the happy-hour discount" (``is_happy_hour_discounted``). They agree on
-# almost everything today, but that's incidental, not structural -- e.g. Shakes & Blasts are
-# currently happy-hour-discounted pending Brian's ruling (see the single flag below) regardless of
-# whether they can ever fill a combo's drink slot, and a future change to one must not silently
-# change the other.
+# almost everything today, but that's incidental, not structural -- e.g. Shakes & Blasts are NOT
+# happy-hour-discounted (Brian's decision, 2026-09-25 -- see the single flag below) even though
+# they DO fill a combo's drink slot, and a future change to one must not silently change the
+# other.
 # ---------------------------------------------------------------------------
 
 # Combo SIDE slot: the menu's own combo description says "your choice of a side (Tots or Fries)
@@ -394,18 +394,17 @@ def infer_combo_component(item_name: str) -> str:
     return ""
 
 
-# Pending Brian's ruling (#39 follow-up / PR #50 review): Shakes & Blasts are currently
-# happy-hour-discounted, matching dev's existing behaviour. Flip this ONE flag to ``False`` the
-# moment he decides otherwise (leaving Slushes & Drinks discounted) -- no other code needs to
-# change.
-_SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED = True
+# Brian's decision (2026-09-25, #39 follow-up): Shakes & Blasts are NOT happy-hour discounted --
+# full price, unlike Slushes & Drinks. This flag was left as a single, obvious switch specifically
+# so his eventual answer would be a one-line change (PR #50 review) -- this is that line.
+_SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED = False
 
 
 def is_happy_hour_discounted(item_name: str) -> bool:
     """Whether *item_name* gets the happy-hour discount -- a SEPARATE question from
     ``infer_combo_component`` above (PR #50 review): don't derive one from the other. Sundaes are
-    never discounted (Brian's #39 decision). See ``_SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED``
-    above for the one open question (Shakes & Blasts, pending Brian). *item_name* may carry a
+    never discounted (Brian's #39 decision), and neither are Shakes & Blasts (Brian's decision,
+    2026-09-25) -- see ``_SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED`` above. *item_name* may carry a
     parenthesized customization suffix -- ``_menu_key`` strips it before any lookup so a
     customised drink is discounted (or not) exactly like its base item (PR #50 review)."""
     normalized = _menu_key(item_name)

@@ -130,13 +130,15 @@ class InferComboComponentGoldenCategoryTests(unittest.TestCase):
         self.assertTrue(is_happy_hour_discounted("Cherry Limeade"))
         self.assertTrue(is_happy_hour_discounted("Ocean Water®"))
 
-    def test_shakes_and_blasts_are_happy_hour_discounted_pending_brian(self):
-        """PR #50 review: leave as-is (Brian hasn't ruled yet) -- but this is deliberately the
-        ONE test that pins the current answer, so flipping
-        ``menu_utils._SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED`` is a one-line change once he
-        decides, and this test is the one line that documents/enforces today's answer."""
-        self.assertTrue(is_happy_hour_discounted("Vanilla Classic Shake"))
-        self.assertTrue(is_happy_hour_discounted("SONIC Blast® made with OREO® Cookie Pieces"))
+    def test_shakes_and_blasts_are_full_price_during_happy_hour(self):
+        """Brian's decision (2026-09-25, #39 follow-up): Shakes & Blasts are NOT happy-hour
+        discounted -- full price. This is deliberately the ONE test that pins the answer, so
+        ``menu_utils._SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED`` stays a one-line switch and this
+        test is the one line that documents/enforces today's (now final) answer. Combo-drink-slot
+        eligibility is unaffected -- a separate question (PR #50 review)."""
+        self.assertFalse(is_happy_hour_discounted("Vanilla Classic Shake"))
+        self.assertFalse(is_happy_hour_discounted("SONIC Blast® made with OREO® Cookie Pieces"))
+        self.assertEqual(infer_combo_component("Vanilla Classic Shake"), "drinks")
 
     def test_burgers_combos_and_hot_dog_entrees_are_never_happy_hour_discounted(self):
         for name in ("Crispy Chicken Sandwich", "SONIC® Cheeseburger Combo", "Corn Dog", "Tots", "Groovy Fries"):
@@ -198,16 +200,16 @@ class CustomisedItemMenuLookupTests(unittest.TestCase):
         off_menu_plain = "Chocolate Malt"
         off_menu_customised = "Chocolate Malt (Extra Malt)"
 
-        # Baseline: the flag is currently True (pending Brian) -- every variant is discounted.
+        # Baseline: the flag is now False (Brian's decision, 2026-09-25) -- no variant is discounted.
         for name in (on_menu_plain, on_menu_customised, on_menu_blast_customised, off_menu_plain, off_menu_customised):
-            self.assertTrue(is_happy_hour_discounted(name), name)
+            self.assertFalse(is_happy_hour_discounted(name), name)
 
-        with patch.object(menu_utils, "_SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED", False):
+        with patch.object(menu_utils, "_SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED", True):
             for name in (on_menu_plain, on_menu_customised, on_menu_blast_customised, off_menu_plain, off_menu_customised):
-                self.assertFalse(is_happy_hour_discounted(name), name)
+                self.assertTrue(is_happy_hour_discounted(name), name)
 
         # Combo-drink-slot eligibility is a SEPARATE question and must NOT be affected by the flag.
-        with patch.object(menu_utils, "_SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED", False):
+        with patch.object(menu_utils, "_SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED", True):
             self.assertEqual(infer_combo_component(off_menu_customised), "drinks")
 
 
@@ -255,9 +257,9 @@ class KeywordOverCorrectionTests(unittest.TestCase):
 
     def test_milkshake_is_recognised_as_a_shake_and_obeys_the_flag(self):
         self.assertEqual(infer_combo_component("Chocolate Milkshake"), "drinks")
-        self.assertTrue(is_happy_hour_discounted("Chocolate Milkshake"))
-        with patch.object(menu_utils, "_SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED", False):
-            self.assertFalse(is_happy_hour_discounted("Chocolate Milkshake"))
+        self.assertFalse(is_happy_hour_discounted("Chocolate Milkshake"))
+        with patch.object(menu_utils, "_SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED", True):
+            self.assertTrue(is_happy_hour_discounted("Chocolate Milkshake"))
             # Combo-drink-slot eligibility is unconditional -- unaffected by the flag.
             self.assertEqual(infer_combo_component("Chocolate Milkshake"), "drinks")
 

@@ -245,7 +245,7 @@
       "item": "Vanilla Classic Shake",
       "category": "Shakes & Ice Cream",
       "comboSlot": "drinks",
-      "happyHourDiscounted": true,
+      "happyHourDiscounted": false,
       "size": "Medium",
       "unitPrice": "4.69"
     },
@@ -253,7 +253,7 @@
       "item": "Chocolate Classic Shake",
       "category": "Shakes & Ice Cream",
       "comboSlot": "drinks",
-      "happyHourDiscounted": true,
+      "happyHourDiscounted": false,
       "size": "Medium",
       "unitPrice": "4.69"
     },
@@ -261,7 +261,7 @@
       "item": "Strawberry Classic Shake",
       "category": "Shakes & Ice Cream",
       "comboSlot": "drinks",
-      "happyHourDiscounted": true,
+      "happyHourDiscounted": false,
       "size": "Medium",
       "unitPrice": "4.69"
     },
@@ -269,7 +269,7 @@
       "item": "Peanut Butter Classic Shake",
       "category": "Shakes & Ice Cream",
       "comboSlot": "drinks",
-      "happyHourDiscounted": true,
+      "happyHourDiscounted": false,
       "size": "Medium",
       "unitPrice": "4.69"
     },
@@ -277,7 +277,7 @@
       "item": "SONIC Blast® made with REESE’S",
       "category": "Shakes & Ice Cream",
       "comboSlot": "drinks",
-      "happyHourDiscounted": true,
+      "happyHourDiscounted": false,
       "size": "Medium",
       "unitPrice": "5.89"
     },
@@ -285,7 +285,7 @@
       "item": "SONIC Blast® made with OREO® Cookie Pieces",
       "category": "Shakes & Ice Cream",
       "comboSlot": "drinks",
-      "happyHourDiscounted": true,
+      "happyHourDiscounted": false,
       "size": "Medium",
       "unitPrice": "5.89"
     },
@@ -293,7 +293,7 @@
       "item": "OREO® Cheesecake Master Shake®",
       "category": "Shakes & Ice Cream",
       "comboSlot": "drinks",
-      "happyHourDiscounted": true,
+      "happyHourDiscounted": false,
       "size": "Medium",
       "unitPrice": "5.39"
     },
@@ -309,7 +309,7 @@
       "item": "Banana Classic Shake",
       "category": "Shakes & Ice Cream",
       "comboSlot": "drinks",
-      "happyHourDiscounted": true,
+      "happyHourDiscounted": false,
       "size": "Medium",
       "unitPrice": "4.69"
     },

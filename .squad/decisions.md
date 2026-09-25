@@ -586,6 +586,39 @@
 
 
 
+## S1.5 fan-out, Brian's pricing decisions (2026-09-25)
+
+#### 43. Shakes & Blasts Are Full Price During Happy Hour (Summer — Backend Dev, #39 — decision confirmed by Brian, 2026-09-25)
+- **Decision:** `_SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED = False` (was `True`, pending Brian since entry
+  42). Shakes and blasts — plain, customised, on-menu, and off-menu keyword-fallback alike — are full
+  price from two to four. Combo drink-slot eligibility for shakes/blasts is unchanged; that is a
+  separate question from happy-hour discount eligibility (entry 42's split of `infer_combo_component`
+  from `is_happy_hour_discounted` already keeps them independent, so only the one flag moved).
+- **Golden data:** the 8 shake/blast rows in `golden-menu-categories.json`
+  (Vanilla/Chocolate/Strawberry/Peanut Butter Classic Shake, both SONIC Blast variants, OREO
+  Cheesecake Master Shake, Banana Classic Shake) flipped `happyHourDiscounted: true → false`; no other
+  field on those rows changed.
+- **Prompt consistency check (asked for, not assumed):** grepped every prompt/hint source for language
+  that could tell the carhop shakes are half-price.
+  - `hints.yaml`'s `system_hints.happy_hour_active` ("drinks and slushes are half-price") is **dead
+    code** — `prompt_loader.get_hints_data()` loads it but nothing renders it; only `upsell_hints`
+    (per-category) is actually used. Left as-is; noted here so nobody "fixes" unused text later.
+  - `tools.py`'s runtime banner (`" [HAPPY HOUR ACTIVE: drinks and slushes are half-price!]"`,
+    `tools.py:532`/`:554`) is hardcoded literally, not templated from `hints.yaml`, and never itself
+    names shakes — low risk on its own.
+  - `system_prompt.yaml`'s `HAPPY_HOUR` section (~line 192) instructs: `'[HAPPY HOUR ACTIVE]' in tool
+    result + drink order → 'You're just in time — that's HALF-PRICE!'`. "Drink order" is ambiguous
+    enough that a model could read an ordered shake as a "drink" and misapply the half-price line —
+    this was the one real risk found.
+  - **Change:** added one line to the `HAPPY_HOUR` content block: `Shakes & Blasts and ice cream are
+    full price during happy hour.` Nothing else in any prompt/hints file changed.
+- **Mutation check:** flipped the flag back to `True` (uncommitted, restored after) — 3 pytest failures
+  (`test_shakes_and_blasts_are_full_price_during_happy_hour`,
+  `test_flipping_the_shakes_and_blasts_flag_changes_every_shake_blast_variant`,
+  `test_milkshake_is_recognised_as_a_shake_and_obeys_the_flag`) and 3 conformance failures (the golden
+  happy-hour Theory row for Banana Classic Shake, the customised-shake Fact, the off-menu-milkshake
+  full-price Fact); restored, pytest 788/788 and the filtered conformance run 124/124 green again.
+
 - All meaningful changes require team consensus
 - Document architectural decisions here
 - Keep history focused on work, decisions focused on direction

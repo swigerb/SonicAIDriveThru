@@ -292,8 +292,9 @@ public sealed class CustomisedItemMenuLookupTests
         public Task Customised_shake_obeys_the_single_shakes_and_blasts_flag_exactly_like_its_plain_form() =>
             fixture.RunAsync(async () =>
             {
-                // menu_utils._SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED is currently True (pending
-                // Brian) -- both the plain and customised forms of the same shake must agree.
+                // menu_utils._SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED is now False (Brian's
+                // decision, 2026-09-25) -- both the plain and customised forms of the same shake
+                // must agree: full price, not discounted.
                 var ct = TestContext.Current.CancellationToken;
                 const string item = "Vanilla Classic Shake (No Whip)";
                 const decimal unitPrice = 4.69m; // app/frontend/src/data/menuItems.json, "Vanilla Classic Shake" Medium
@@ -308,10 +309,10 @@ public sealed class CustomisedItemMenuLookupTests
 
                 var golden = GoldenMenuCategoryData.Load(RepoPaths.FindRepoRoot());
                 var baseItemCase = golden.Items.Single(c => c.Item == "Vanilla Classic Shake");
-                Assert.True(baseItemCase.HappyHourDiscounted, "Sanity check: base item golden row must currently be discounted.");
+                Assert.False(baseItemCase.HappyHourDiscounted, "Sanity check: base item golden row must now be full price.");
 
                 var rules = GoldenOrderPricingData.Load(RepoPaths.FindRepoRoot()).BusinessRules;
-                var expectedTotal = unitPrice * rules.HappyHourDiscount * (1 + rules.TaxRate);
+                var expectedTotal = unitPrice * (1 + rules.TaxRate); // NOT multiplied by HappyHourDiscount
                 OrderScenarioHelpers.AssertMoneyEqual(expectedTotal, OrderScenarioHelpers.GetOrderFinalTotal(result.ToolResultJson!));
             });
 
@@ -366,14 +367,13 @@ public sealed class CustomisedItemMenuLookupTests
                 OrderScenarioHelpers.AssertMoneyEqual(expectedTotal, OrderScenarioHelpers.GetOrderFinalTotal(result.ToolResultJson!));
             });
 
-        /// <summary>PR #50 review (round 5, "keyword over-correction"): pins the same three spoken
-        /// off-menu variants as the combo-drink-slot Theory above, at the happy-hour-discount
-        /// question this time -- "Chocolate Milkshake" must obey
-        /// `_SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED` (currently True) exactly like its on-menu
-        /// counterparts, and the two slush spoken variants are always discounted like every other
-        /// fountain drink.</summary>
+        /// <summary>PR #50 review (round 5, "keyword over-correction"): pins the same two spoken
+        /// off-menu fountain-drink variants as the combo-drink-slot Theory above, at the
+        /// happy-hour-discount question this time -- the two slush spoken variants are always
+        /// discounted like every other fountain drink. "Chocolate Milkshake" moved to
+        /// <see cref="Off_menu_spoken_shake_variant_is_full_price_during_happy_hour"/> below
+        /// (Brian's decision, 2026-09-25: Shakes & Blasts are full price during happy hour).</summary>
         [Theory]
-        [InlineData("Chocolate Milkshake")]
         [InlineData("Cherry Slushes")]
         [InlineData("Blue Raspberry Slushie")]
         public Task Off_menu_spoken_shake_and_slush_variants_are_happy_hour_discounted(string item) =>
@@ -395,7 +395,37 @@ public sealed class CustomisedItemMenuLookupTests
                 OrderScenarioHelpers.AssertMoneyEqual(
                     expectedTotal,
                     OrderScenarioHelpers.GetOrderFinalTotal(result.ToolResultJson!),
-                    $"'{item}' is an off-menu spoken shake/slush variant and must still get the happy-hour discount.");
+                    $"'{item}' is an off-menu spoken slush variant and must still get the happy-hour discount.");
+            });
+
+        /// <summary>Brian's decision (2026-09-25, #39 follow-up): Shakes & Blasts are full price
+        /// during happy hour -- proves the off-menu keyword-fallback path
+        /// (`_keyword_fallback_happy_hour_discounted`) obeys
+        /// `_SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED` exactly like the on-menu, JSON-category path
+        /// does (<see cref="Customised_shake_obeys_the_single_shakes_and_blasts_flag_exactly_like_its_plain_form"/>),
+        /// not just some of the shake/blast surfaces.</summary>
+        [Fact]
+        public Task Off_menu_spoken_shake_variant_is_full_price_during_happy_hour() =>
+            fixture.RunAsync(async () =>
+            {
+                var ct = TestContext.Current.CancellationToken;
+                const string item = "Chocolate Milkshake"; // off-menu; the real item is "... Classic Shake"
+                const decimal unitPrice = 4.69m; // placeholder -- see comment on the off-menu drink test above
+
+                var (browser, connection, roundTripIndex) = await OrderScenarioHelpers.ConnectAndGreetAsync(fixture, ct);
+                await using var _ = browser;
+
+                var result = await OrderScenarioHelpers.RunOrderStepsAsync(
+                    connection, browser,
+                    [("add", item, "medium", 1, unitPrice)],
+                    roundTripIndex, ct);
+
+                var rules = GoldenOrderPricingData.Load(RepoPaths.FindRepoRoot()).BusinessRules;
+                var expectedTotal = unitPrice * (1 + rules.TaxRate); // NOT multiplied by HappyHourDiscount
+                OrderScenarioHelpers.AssertMoneyEqual(
+                    expectedTotal,
+                    OrderScenarioHelpers.GetOrderFinalTotal(result.ToolResultJson!),
+                    $"'{item}' is an off-menu spoken shake variant and must be full price during happy hour (Brian's decision).");
             });
     }
 
