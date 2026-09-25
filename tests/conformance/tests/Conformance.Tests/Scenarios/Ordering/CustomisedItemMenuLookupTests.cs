@@ -97,6 +97,46 @@ public sealed class CustomisedItemMenuLookupTests
                 Assert.Equal(1, OrderScenarioHelpers.GetOrderItemCount(result.ToolResultJson!));
             });
 
+        /// <summary>Brian's decision (2026-09-25, new issue #60): any spoken name-variant of
+        /// PLAIN Tots absorbs into the combo side slot exactly like the real "Tots" menu item --
+        /// an explicit, exact-match alias, never a substring check. The "must stay charged"
+        /// regression net for real-but-different Tots items and off-menu near-misses already
+        /// exists just below/above (<see cref="Customised_chili_cheese_tots_is_charged_in_full_alongside_a_combo_not_absorbed"/>,
+        /// <see cref="Off_menu_side_like_item_is_charged_in_full_alongside_a_combo_not_absorbed"/>)
+        /// and is untouched by this alias.</summary>
+        [Theory]
+        [InlineData("Tot")]
+        [InlineData("Tots")]
+        [InlineData("Tater Tot")]
+        [InlineData("Tater Tots")]
+        [InlineData("Tator Tots")] // common spoken misspelling
+        [InlineData("Tater Tots (Extra Crispy)")] // customised alias -- modifier stripped before the alias lookup
+        public Task Plain_tots_alias_absorbs_into_the_combo_side_slot(string item) =>
+            fixture.RunAsync(async () =>
+            {
+                var ct = TestContext.Current.CancellationToken;
+                const decimal unitPrice = 2.79m; // arbitrary -- update_order's price is caller-supplied
+                                                  // and never menu-validated for an alias name; only
+                                                  // comboSlot behaviour is under test.
+
+                var (browser, connection, roundTripIndex) = await OrderScenarioHelpers.ConnectAndGreetAsync(fixture, ct);
+                await using var _ = browser;
+
+                var result = await OrderScenarioHelpers.RunOrderStepsAsync(
+                    connection, browser,
+                    [
+                        ("add", BaseComboName, BaseComboSize, 1, BaseComboPrice),
+                        ("add", item, "medium", 1, unitPrice),
+                    ],
+                    roundTripIndex, ct);
+
+                OrderScenarioHelpers.AssertMoneyEqual(
+                    BaseComboPrice,
+                    OrderScenarioHelpers.GetOrderTotal(result.ToolResultJson!),
+                    $"'{item}' is a spoken alias of plain Tots (Brian's #60 decision) and must absorb into the combo side slot.");
+                Assert.Equal(1, OrderScenarioHelpers.GetOrderItemCount(result.ToolResultJson!));
+            });
+
         /// <summary>PR #50 review (third round): pins that an unrecognised/off-menu side-like
         /// name NEVER fills the combo side slot -- this is the shared-suite gap Rick's mutation
         /// (b) exposed. Reintroducing a substring fallback ("if 'tots' in name or 'fries' in

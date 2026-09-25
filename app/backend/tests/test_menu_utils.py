@@ -213,6 +213,49 @@ class CustomisedItemMenuLookupTests(unittest.TestCase):
             self.assertEqual(infer_combo_component(off_menu_customised), "drinks")
 
 
+class TotsAliasNormalisationTests(unittest.TestCase):
+    """Brian's decision (2026-09-25, new issue #60): any spoken name-variant of PLAIN Tots --
+    "Tot", "Tots", "Tater Tot", "Tater Tots", the common misspelling "Tator Tot(s)" -- fills the
+    combo side slot exactly like the real "Tots" menuItems.json item does. This is an explicit
+    alias allow-list, NOT a substring match: Rick's PR #50 revenue rule still applies, so a
+    real-but-different menu item ("Chili Cheese Tots", "Cheese Tots") and an off-menu near-miss
+    ("Loaded Tots Supreme", the misspelled "chilli cheese tots") must all still be charged in
+    full."""
+
+    def test_every_plain_tots_alias_fills_the_combo_side_slot(self):
+        for name in ("Tot", "tot", "Tots", "TOTS", "Tater Tot", "Tater Tots", "Tator Tots", "Tator Tot"):
+            self.assertEqual(infer_combo_component(name), "sides", name)
+
+    def test_customised_tots_alias_still_fills_the_combo_side_slot(self):
+        """Alias resolution runs after ``_menu_key`` normalisation, so a bracketed modifier is
+        stripped first exactly like it is for the real "Tots" item."""
+        self.assertEqual(infer_combo_component("Tater Tots (Extra Crispy)"), "sides")
+        self.assertEqual(infer_combo_component("Tator Tots (Extra Crispy)"), "sides")
+
+    def test_spoken_misspelling_tator_tots_is_recognised(self):
+        self.assertEqual(infer_combo_component("tator tots"), "sides")
+
+    def test_real_but_different_tots_menu_items_still_charged_in_full(self):
+        """These are separate, real menuItems.json items -- not aliases of plain Tots -- and must
+        keep being charged in full, exactly like Rick's PR #50 revenue rule requires."""
+        for name in ("Chili Cheese Tots", "Cheese Tots"):
+            self.assertEqual(infer_combo_component(name), "", name)
+
+    def test_off_menu_near_miss_names_still_charged_in_full(self):
+        """The alias is an EXACT match against the alias set, not a substring check -- these
+        off-menu names merely contain "tot(s)" and must not be swept up by the alias."""
+        for name in ("Loaded Tots Supreme", "chilli cheese tots", "totstastic snack"):
+            self.assertEqual(infer_combo_component(name), "", name)
+
+    def test_tots_alias_does_not_affect_category_or_happy_hour_discount(self):
+        """Scoped to combo-side-slot classification only (#60) -- the alias must not leak into
+        category inference (already correctly "sides" via the pre-existing substring keyword
+        fallback) or happy-hour-discount eligibility (Tots was never a drink, discounted or not)."""
+        for name in ("Tater Tot", "Tater Tots", "Tator Tots"):
+            self.assertEqual(infer_category(name), "sides", name)
+            self.assertFalse(is_happy_hour_discounted(name), name)
+
+
 class KeywordFallbackWordBoundaryTests(unittest.TestCase):
     """PR #50 review (round 4, must-fix): the off-menu keyword fallbacks used to be plain
     substring checks (``kw in normalized``), so the keyword "tea" matched inside "steak" -- an

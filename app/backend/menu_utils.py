@@ -292,6 +292,26 @@ def infer_category(item_name: str) -> str:
 # (measured regression: Cheeseburger Combo + Crispy Tenders 5pc totalled $8.49 instead of $15.98).
 _COMBO_SIDE_ITEMS = frozenset({"tots", "groovy fries"})
 
+# Brian's decision (2026-09-25, new issue #60): any spoken name-variant of PLAIN Tots -- "Tot",
+# "Tots", "Tater Tot(s)", the common misspelling "Tator Tot(s)" -- fills the combo side slot
+# exactly like the real "Tots" menuItems.json item does. This is an explicit alias -> canonical
+# map, resolved with an EXACT match, NOT a substring check -- Rick's PR #50 revenue rule still
+# applies: "Chili Cheese Tots" and "Cheese Tots" are separate, real menuItems.json items, and an
+# off-menu near-miss like "Loaded Tots Supreme" or the misspelled "chilli cheese tots" must all
+# still fall through to full price, because none of those five names is an exact match here.
+# Scoped to combo-SIDE-slot classification only (#60) -- it does not touch ``infer_category``
+# (the pre-existing "tot"/"tots" substring keyword fallback there already categorises every one
+# of these spoken variants as "sides" on its own) or happy-hour-discount eligibility (Tots was
+# never a drink, discounted or not).
+_TOTS_ALIASES = frozenset({"tot", "tots", "tater tot", "tater tots", "tator tot", "tator tots"})
+
+
+def _resolve_combo_side_alias(normalized: str) -> str:
+    """Resolve a spoken Tots alias to its canonical combo-side-slot key. Called with the result
+    of ``_menu_key`` (so a bracketed modifier, e.g. "Tater Tots (Extra Crispy)", is already
+    stripped before this exact-match lookup runs)."""
+    return "tots" if normalized in _TOTS_ALIASES else normalized
+
 # Combo DRINK slot: unchanged from dev's original behaviour (confirmed via git history) -- every
 # "Slushes & Drinks" item, plus every "Shakes & Ice Cream" item except the two sundaes (Brian's
 # #39 decision: a sundae isn't a drink, so it can't fill a combo's drink slot or be discounted).
@@ -372,10 +392,13 @@ def infer_combo_component(item_name: str) -> str:
     ``menuItems.json`` first; keyword fallback only applies to items that aren't in the menu at
     all (#39). *item_name* may carry a parenthesized customization suffix (e.g. "Tots (Extra
     Crispy)") -- ``_menu_key`` strips it before any lookup so a customised item classifies
-    identically to its base item (PR #50 review).
+    identically to its base item (PR #50 review). Any spoken alias of plain Tots ("Tot",
+    "Tater Tot(s)", "Tator Tot(s)") resolves to the same side slot as "Tots" -- an explicit,
+    exact-match alias map, never a substring check (Brian's decision, 2026-09-25, #60; see
+    ``_TOTS_ALIASES`` above).
     """
     normalized = _menu_key(item_name)
-    if normalized in _COMBO_SIDE_ITEMS:
+    if _resolve_combo_side_alias(normalized) in _COMBO_SIDE_ITEMS:
         return "sides"
     if normalized in _SUNDAES:
         return ""

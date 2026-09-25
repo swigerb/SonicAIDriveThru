@@ -619,6 +619,37 @@
   happy-hour Theory row for Banana Classic Shake, the customised-shake Fact, the off-menu-milkshake
   full-price Fact); restored, pytest 788/788 and the filtered conformance run 124/124 green again.
 
+#### 44. Plain-Tots Alias Map for the Combo Side Slot (Summer — Backend Dev, new issue #60 — decision confirmed by Brian, 2026-09-25)
+- **Decision:** any spoken name-variant of plain Tots — `"Tot"`, `"Tots"`, `"Tater Tot"`,
+  `"Tater Tots"`, plus the common spoken misspelling `"Tator Tot"`/`"Tator Tots"` — fills the combo
+  side slot exactly like the real `"Tots"` menuItems.json item does.
+- **Implementation:** `menu_utils._TOTS_ALIASES`, an explicit, exact-match frozenset, resolved by a
+  new `_resolve_combo_side_alias()` helper. Applied *after* `_menu_key()` normalisation (so
+  `"Tater Tots (Extra Crispy)"` → `"tater tots"` → alias-resolved to `"tots"`) and *before* the
+  `_COMBO_SIDE_ITEMS` membership check in `infer_combo_component` — an exact match, never a
+  substring check, so Rick's PR #50 revenue rule keeps holding: `"Chili Cheese Tots"`,
+  `"Cheese Tots"` (real, different menu items), and off-menu near-misses (`"Loaded Tots Supreme"`,
+  the misspelled `"chilli cheese tots"`) are none of them in the alias set and all still fall
+  through to charged-in-full.
+- **Scope: combo-side-slot classification only.** Does not touch `infer_category` (its pre-existing
+  `"tot"`/`"tots"` substring keyword fallback already categorises every alias variant as `"sides"`
+  on its own) or `is_happy_hour_discounted` (Tots was never a drink either way).
+- **Pricing unaffected either way:** confirmed `update_order`'s unit price always comes from the
+  tool-call argument (`tools.py`, `price = args.get("price", 0.0)`), never from `menu_utils` — a
+  standalone alias-ordered item (e.g. a guest ordering just "Tater Tots") prices exactly as the
+  model/search-tool supplies, same as before this change; the alias only changes whether the item
+  can be silently absorbed into a combo's side slot.
+- **Variants considered:** included `"Tator Tot"` (singular) alongside the four literally requested
+  names, for symmetry with `"Tot"`/`"Tots"` — flagged here as a proposed addition, not explicitly
+  asked for. Considered and rejected: hyphenated forms (`"Tater-Tot"`) — no evidence guests speak it
+  that way, and `_menu_key()` does not collapse hyphens, so adding it would be speculative; can be
+  added later if it turns out to matter.
+- **Mutation check:** reverted `infer_combo_component` to check `normalized in _COMBO_SIDE_ITEMS`
+  directly (bypassing the new alias resolver) — 3 pytest failures and 5 of 6 new conformance rows
+  failed (only the literal `"Tots"` row still passed, since it was already a direct
+  `_COMBO_SIDE_ITEMS` member); restored, pytest 794/794 and the filtered conformance run 6/6 green
+  again.
+
 - All meaningful changes require team consensus
 - Document architectural decisions here
 - Keep history focused on work, decisions focused on direction
