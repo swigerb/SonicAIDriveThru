@@ -82,6 +82,37 @@ public sealed class ResumeRehydrationAndNudgeTests(ResumeTimersConformanceFixtur
         return (browser, connection!);
     }
 
+    /// <summary>
+    /// PR #52 review ("F1"): the Wi-Fi-blip path -- no Close frame ever crosses the wire, unlike
+    /// every other resume scenario in this file (which all go through <see cref="DropAndResumeAsync"/>'s
+    /// graceful <see cref="RealtimeBrowserClient.CloseAsync"/>). This exercises a genuinely
+    /// different code path on the backend: app/backend/rtmt.py's `async for msg in ws:` loop
+    /// ends via a receive fault/EOF rather than an orderly CLOSE-type message, so `ws.close_code`
+    /// is still None by the time `_forward_messages`'s own `finally:` block runs
+    /// `detach_session(...)` -- the same unconditional detach path every other close (graceful or
+    /// not) already goes through, per that finally block's own comment. This helper (and its
+    /// asserted-null <see cref="RealtimeBrowserClient.CloseStatus"/> below) is the proof that the
+    /// scenario actually took that different path rather than silently degrading to a graceful
+    /// close.
+    /// </summary>
+    private async Task<(RealtimeBrowserClient Browser, FakeRealtimeConnection Connection)> AbortAndResumeAsync(
+        RealtimeBrowserClient oldBrowser, string resumeId, CancellationToken ct)
+    {
+        oldBrowser.Abort();
+        await oldBrowser.WaitForCloseAsync(FrameTimeout, ct);
+        Assert.True(oldBrowser.CloseStatus is null,
+            "An abrupt abort must not produce a Close frame -- CloseStatus should stay null, " +
+            "otherwise this scenario isn't actually exercising the abnormal-close code path.");
+        await oldBrowser.DisposeAsync();
+
+        var connectionTask = fixture.Realtime.WaitForNextConnectionAsync(FrameTimeout, ct);
+        var browser = await RealtimeBrowserClient.ConnectAsync(fixture.Backend!.BaseUri, cancellationToken: ct);
+        var connection = await connectionTask;
+        Assert.True(connection is not null, $"No upstream connection was accepted within {FrameTimeout}.");
+        await browser.SendExtensionResumeAsync(resumeId, ct);
+        return (browser, connection!);
+    }
+
     [Fact]
     public Task Resuming_mid_conversation_rehydrates_the_order_with_no_greeting() => fixture.RunAsync(async () =>
     {
@@ -140,6 +171,72 @@ public sealed class ResumeRehydrationAndNudgeTests(ResumeTimersConformanceFixtur
         // response.create. This is deterministic regardless of how long the wait itself took,
         // and still kills the greeting-on-resume mutation (a reintroduced greeting sends a
         // response.create in exactly this window).
+        var nudge = await newConnection.ReceivedFrames.WaitForAsync(
+            f => IsSystemMessageItem(f) && f.Sequence > rehydration!.Sequence,
+            TimeSpan.FromSeconds(6), ct); // ResumeTimers' nudge_after_seconds=1s, generous headroom
+        Assert.True(nudge is not null, "Expected the nudge to eventually fire so the window has a deterministic end.");
+
+        var prematureResponse = newConnection.ReceivedFrames.Snapshot()
+            .FirstOrDefault(f => f.Type == "response.create" &&
+                                  f.Sequence > rehydration!.Sequence && f.Sequence < nudge!.Sequence);
+        Assert.True(prematureResponse is null,
+            "No response.create (greeting or otherwise) should fire between the rehydration item and the nudge.");
+    });
+
+    /// <summary>
+    /// PR #52 review ("F1"): every other resume scenario in this file drops the old connection
+    /// gracefully (<see cref="DropAndResumeAsync"/>). A real Wi-Fi blip never sends a Close
+    /// frame at all -- <see cref="AbortAndResumeAsync"/> reproduces that with
+    /// <see cref="RealtimeBrowserClient.Abort"/>, which severs the socket the way
+    /// <c>ClientWebSocket.Abort()</c> does (no close handshake, in-flight receive faults). This
+    /// otherwise mirrors <see cref="Resuming_mid_conversation_rehydrates_the_order_with_no_greeting"/>
+    /// exactly -- same order-restore, same no-greeting, same rehydration-upstream assertions --
+    /// because app/backend/rtmt.py's `_forward_messages` finally block runs
+    /// `detach_session(...)` unconditionally, regardless of whether `ws.close_code` was ever set.
+    /// The mutation for this scenario (see the report) proves that unconditional detach actually
+    /// matters: making the backend treat a close-code-less (abrupt) disconnect as a hard
+    /// `end_session` instead turns this red.
+    /// </summary>
+    [Fact]
+    public Task Resuming_after_an_abrupt_abort_with_no_close_frame_restores_the_order_with_no_greeting() => fixture.RunAsync(async () =>
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (oldBrowser, oldConnection, resumeId) = await ConnectPastGreetingWithResumeIdAsync(ct);
+
+        const string callId = "call_resume_abort_1";
+        oldConnection.Script.Enqueue(new ResponseScript([
+            new FunctionCallEvent(
+                Name: "update_order",
+                ArgumentsJson: """{"action":"add","item_name":"Bacon Cheeseburger","size":"N/A","quantity":1,"price":6.99}""",
+                CallId: callId),
+            new DoneEvent(),
+        ]));
+        await oldBrowser.SendResponseCreateAsync(ct);
+        var toolResponse = await oldBrowser.ReceivedFrames.WaitForAsync(
+            f => f.Type == "extension.middle_tier_tool_response", FrameTimeout, ct);
+        Assert.True(toolResponse is not null, "Expected the update_order tool call to complete before aborting.");
+
+        var (newBrowser, newConnection) = await AbortAndResumeAsync(oldBrowser, resumeId, ct);
+        await using var _ = newBrowser;
+
+        var resumed = await newBrowser.ReceivedFrames.WaitForAsync(
+            f => f.Type == "extension.session_resumed", FrameTimeout, ct);
+        Assert.True(resumed is not null, "Expected extension.session_resumed after resuming from an abrupt abort within grace.");
+        var orderSummaryJson = resumed!.Json.GetProperty("order_summary").GetRawText();
+        Assert.Contains("Bacon Cheeseburger", orderSummaryJson);
+
+        var bootstrap = await newConnection.ReceivedFrames.WaitForAsync(
+            f => f.Type == "session.update", FrameTimeout, ct);
+        Assert.True(bootstrap is not null, "Expected a bootstrap session.update on the new upstream connection.");
+
+        var rehydration = await newConnection.ReceivedFrames.WaitForAsync(
+            f => IsSystemMessageItem(f) && f.Sequence > bootstrap!.Sequence,
+            FrameTimeout, ct);
+        Assert.True(rehydration is not null,
+            "Expected the rehydration conversation.item.create (system-role message) on the new upstream connection.");
+        Assert.True(rehydration!.Sequence > bootstrap!.Sequence,
+            "The rehydration item must follow the bootstrap session.update.");
+
         var nudge = await newConnection.ReceivedFrames.WaitForAsync(
             f => IsSystemMessageItem(f) && f.Sequence > rehydration!.Sequence,
             TimeSpan.FromSeconds(6), ct); // ResumeTimers' nudge_after_seconds=1s, generous headroom

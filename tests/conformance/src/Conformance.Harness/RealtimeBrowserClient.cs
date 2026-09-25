@@ -167,6 +167,20 @@ public sealed class RealtimeBrowserClient : IAsyncDisposable
     }
 
     /// <summary>
+    /// Severs the connection abruptly -- no Close frame is ever sent, unlike <see cref="CloseAsync"/>.
+    /// This is the real Wi-Fi-blip / dropped-connection path (PR #52 review "F1"): a genuinely
+    /// different code path on both sides than a graceful close. <see cref="ClientWebSocket.Abort"/>
+    /// tears the socket down locally (the .NET equivalent of the underlying TCP connection just
+    /// vanishing from under a browser tab); the reader loop's in-flight receive faults with a
+    /// <see cref="WebSocketException"/> rather than observing a Close-type
+    /// <see cref="WebSocketReceiveResult"/>, so <see cref="CloseStatus"/> stays null afterward --
+    /// correctly reflecting that no close code was ever negotiated. Callers should still await
+    /// <see cref="WaitForCloseAsync"/> afterward to know the reader loop has settled before
+    /// reconnecting, exactly as after <see cref="CloseAsync"/>.
+    /// </summary>
+    public void Abort() => _socket.Abort();
+
+    /// <summary>
     /// Awaits the reader loop observing the socket close (server Close frame or the connection
     /// dropping), bounded by <paramref name="timeout"/> instead of a fixed sleep, so tests can
     /// assert on <see cref="CloseStatus"/> deterministically: by the time this returns, the reader
