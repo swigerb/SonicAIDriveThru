@@ -302,5 +302,13 @@ public sealed record FunctionCallEvent(string Name, string ArgumentsJson, string
 /// `response.cancel` accepted during this wait interrupts it immediately (same
 /// <c>responseCts.Token</c>-linked cancellation <see cref="AudioDeltaEvent"/>'s pacing uses), so
 /// the scripted delay never actually elapses once a test cancels the response itself.
+///
+/// <paramref name="SuppressAudioDone"/> (PR #58 re-review "F1", pinning swigerb/SonicAIDriveThru#48
+/// S1): when true, this event's own automatic close-out of any still-open audio item (normally
+/// unconditional -- see the `CloseOpenAudioItemAsync()` call in the scripted-<see cref="DoneEvent"/>
+/// handler) is skipped, so `response.output_audio.done` is never sent for this response even
+/// though `AudioDeltaEvent`s were streamed first. Models a response that streamed real audio and
+/// then never completed it (cancelled/errored mid-stream) -- the one GA-legal shape
+/// `EchoSuppressor.on_response_done()`'s `_greeting_audio_seen` branch exists for.
 /// </summary>
-public sealed record DoneEvent(string Status = "completed", string? ErrorCode = null, string? ErrorMessage = null, string? ErrorType = null, TimeSpan? Pace = null) : ResponseEvent;
+public sealed record DoneEvent(string Status = "completed", string? ErrorCode = null, string? ErrorMessage = null, string? ErrorType = null, TimeSpan? Pace = null, bool SuppressAudioDone = false) : ResponseEvent;

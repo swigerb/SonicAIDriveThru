@@ -1119,7 +1119,13 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
                             await Task.Delay(donePace, connection.TimeProvider, responseCts.Token).ConfigureAwait(false);
                         }
 
-                        await CloseOpenAudioItemAsync().ConfigureAwait(false);
+                        if (!done.SuppressAudioDone)
+                        {
+                            await CloseOpenAudioItemAsync().ConfigureAwait(false);
+                        }
+                        // else (PR #58 re-review "F1"): leave any open audio item unclosed --
+                        // response.output_audio.done is never sent, modelling audio that streamed
+                        // and then never completed (see DoneEvent.SuppressAudioDone's doc comment).
 
                         var responseBody = new JsonObject
                         {
