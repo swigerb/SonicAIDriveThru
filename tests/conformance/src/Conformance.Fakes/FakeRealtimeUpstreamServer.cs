@@ -970,12 +970,17 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
                         };
                         if (done.ErrorCode is not null)
                         {
+                            // #28 N12: `error.type` was missing entirely -- GA's
+                            // RealtimeResponseStatus.error is `{ code, type }` (see DoneEvent's
+                            // doc comment for the exact citation); `message` is an extra field
+                            // kept for an existing scenario, not part of the documented shape.
                             responseBody["status_details"] = new JsonObject
                             {
                                 ["type"] = done.Status,
                                 ["error"] = new JsonObject
                                 {
                                     ["code"] = done.ErrorCode,
+                                    ["type"] = done.ErrorType,
                                     ["message"] = done.ErrorMessage,
                                 },
                             };

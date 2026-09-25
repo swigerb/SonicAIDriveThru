@@ -210,12 +210,19 @@ public sealed record ResponseScript(IReadOnlyList<ResponseEvent> Events)
         new DoneEvent(),
     ]);
 
+    // #28 N12: error.type values are not independently live-verified (GA's own reference only
+    // documents error.type as freeform "string", with the top-level RealtimeError.type property's
+    // examples -- "invalid_request_error", "server_error" -- as the closest guidance on the
+    // convention). "invalid_request_error" for the rate-limit case follows the standard OpenAI
+    // REST error taxonomy (a 429 is a client-side request problem, not a server fault); kept for
+    // behavioural parity/best-available, same caveat as GaSessionValidator's other unverified
+    // specifics.
     public static ResponseScript RateLimited(string hint = "Rate limit reached. Please try again in 2s.") => new([
-        new DoneEvent(Status: "failed", ErrorCode: "rate_limit_exceeded", ErrorMessage: hint),
+        new DoneEvent(Status: "failed", ErrorCode: "rate_limit_exceeded", ErrorMessage: hint, ErrorType: "invalid_request_error"),
     ]);
 
     public static ResponseScript Failed(string message = "The model failed to generate a response.") => new([
-        new DoneEvent(Status: "failed", ErrorCode: "server_error", ErrorMessage: message),
+        new DoneEvent(Status: "failed", ErrorCode: "server_error", ErrorMessage: message, ErrorType: "server_error"),
     ]);
 }
 
@@ -232,4 +239,15 @@ public sealed record AudioDeltaEvent(string Base64Delta, TimeSpan? Pace = null) 
 
 public sealed record FunctionCallEvent(string Name, string ArgumentsJson, string CallId) : ResponseEvent;
 
-public sealed record DoneEvent(string Status = "completed", string? ErrorCode = null, string? ErrorMessage = null) : ResponseEvent;
+/// <summary>
+/// <paramref name="ErrorMessage"/> is a superset addition beyond GA's documented
+/// `status_details.error` shape -- the reference schema (fetched 2026-09-24, same page cited by
+/// <see cref="GaSessionValidator"/>) enumerates exactly two properties on that object, `code` and
+/// `type` ("Error code, if any." / "The type of error."), no `message`. Sent anyway (#28 N12) as
+/// a harmless extra field a real client would just ignore, since an existing scenario
+/// (<c>Scripted_response_done_can_report_a_rate_limited_failure_with_a_hint</c>, issue #7) already
+/// asserts on it for a human-readable retry hint. <paramref name="ErrorType"/> is the field GA
+/// actually documents but the fake never sent until now -- see <see cref="ResponseScript"/>'s
+/// factory methods for what's fabricated versus GA-shaped.
+/// </summary>
+public sealed record DoneEvent(string Status = "completed", string? ErrorCode = null, string? ErrorMessage = null, string? ErrorType = null) : ResponseEvent;
