@@ -24,6 +24,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from azure.core.credentials import AzureKeyCredential
 from test_session_bootstrap import BROWSER_SESSION_UPDATE, FakeGARealtime
 
+import audio_pipeline
 import rtmt as rtmt_module
 import session_manager as session_manager_module
 from order_state import order_state_singleton
@@ -111,6 +112,74 @@ class BrowserSocketTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(msg.data, 4000)
         self.assertEqual(msg.extra, "idle_timeout")
         self.assertNotIn(session_id, order_state_singleton.sessions)
+
+
+class BargeInFilterTests(unittest.IsolatedAsyncioTestCase):
+    """PR #49 review round 5, "F1": `echo.on_barge_in` used to fire on the raw
+    `_MARKER_RESPONSE_CANCEL in msg.data` substring check, evaluated on the
+    browser's raw bytes *before* the frame was filtered/parsed -- so a frame
+    merely *containing* the substring "response.cancel" somewhere (e.g. buried
+    in an unrelated field of a session.update), without actually being that
+    type, could still disable echo suppression. It's now keyed on the
+    validated `sent_type` this coroutine already computes after
+    `_process_message_to_server` has run -- the same seam review round 2's F1
+    used for the idle-reset/nudge-cancel/greeting triggers -- so a dropped or
+    unrelated frame triggers nothing.
+    """
+
+    async def asyncSetUp(self):
+        self.fake = FakeGARealtime()
+        self.fake_server = TestServer(self.fake.app())
+        await self.fake_server.start_server()
+        self.rtmt = RTMiddleTier(
+            endpoint=str(self.fake_server.make_url("")),
+            deployment="gpt-realtime-test",
+            credentials=AzureKeyCredential("test-key"),
+            voice_choice="shimmer",
+        )
+        self.rtmt.system_message = "sys"
+        app = web.Application()
+        self.rtmt.attach_to_app(app, "/realtime")
+        self.client = TestClient(TestServer(app))
+        await self.client.start_server()
+
+    async def asyncTearDown(self):
+        await self.client.close()
+        await self.fake_server.close()
+
+    async def _until(self, predicate, timeout=5.0):
+        async def poll():
+            while not predicate():
+                await asyncio.sleep(0.01)
+        await asyncio.wait_for(poll(), timeout)
+
+    def _received_types(self):
+        return [e.get("type") for e in self.fake.received]
+
+    async def test_a_forged_substring_buried_in_an_unrelated_frame_does_not_trigger_barge_in(self):
+        with patch.object(audio_pipeline.EchoSuppressor, "on_barge_in") as mock_barge_in:
+            browser = await self.client.ws_connect("/realtime")
+            await self._until(lambda: len(self.fake.received) >= 1)  # bootstrap landed
+
+            # NOT a response.cancel -- a session.update whose *value* happens to
+            # contain the substring "response.cancel". The old substring check
+            # (`_MARKER_RESPONSE_CANCEL in msg.data`) would still have matched
+            # this, since it never parsed the frame first.
+            forged = (
+                '{"type":"session.update","session":{"turn_detection":'
+                '{"type":"server_vad"}},"note":"response.cancel"}'
+            )
+            await browser.send_str(forged)
+            await self._until(lambda: self._received_types().count("session.update") >= 2)
+
+            mock_barge_in.assert_not_called()
+
+            # Sanity: a genuine response.cancel still triggers it.
+            await browser.send_str(json.dumps({"type": "response.cancel"}))
+            await self._until(lambda: "response.cancel" in self._received_types())
+            mock_barge_in.assert_called_once()
+
+            await browser.close()
 
 
 class CompressionConfigTests(unittest.TestCase):

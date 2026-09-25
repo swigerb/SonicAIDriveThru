@@ -61,7 +61,7 @@ import os
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-__all__ = ["HOOKS_ENABLED", "now", "seconds"]
+__all__ = ["HOOKS_ENABLED", "hooks_enabled_now", "now", "seconds"]
 
 logger = logging.getLogger("sonic-drive-in")
 
@@ -74,6 +74,39 @@ _FIXED_NOW_ENV = "CONFORMANCE_FIXED_NOW"
 # app/backend/tests/test_conformance_hooks.py) rather than mutating this at
 # runtime.
 HOOKS_ENABLED = os.environ.get(_ENABLED_ENV, "").strip() == "1"
+
+
+def hooks_enabled_now() -> bool:
+    """Live re-check of ``CONFORMANCE_TEST_HOOKS``, independent of the frozen
+    ``HOOKS_ENABLED`` constant above.
+
+    ``HOOKS_ENABLED`` is intentionally read once at import time and stays
+    fixed for the process's lifetime, matching every other consumer of this
+    module (``now()``/``seconds()``) and this module's own guard test. That's
+    the right contract for a real backend process, which imports this module
+    exactly once.
+
+    But ``rtmt.py``'s browser->upstream ``response.create`` gate (PR #49
+    review round 2, "S1") runs inside a shared ``pytest`` process where a
+    wholly unrelated test file, ``test_conformance_hooks.py``, deliberately
+    ``importlib.reload()``s this module to a *disabled* state as part of
+    *its own* test isolation (see that file's
+    ``_reset_conformance_hooks_module`` autouse fixture) -- and leaves it
+    that way afterwards, since ``monkeypatch`` restores the env var but has
+    no way to know it should also reload this module again. Left unguarded,
+    that side effect would silently disable every ``response.create``-
+    dependent test in every *other* test file that happens to run later in
+    the same process (e.g. ``test_order_resume.py``, ``test_rate_limit.py``,
+    ``test_rtmt.py``), independent of whatever ``CONFORMANCE_TEST_HOOKS`` is
+    actually set to at that point.
+
+    This function re-reads the live env var on every call instead, so
+    ``rtmt.py``'s gate is immune to that unrelated module-reload churn. In a
+    real backend process (which never reloads this module) it is functionally
+    identical to ``HOOKS_ENABLED``.
+    """
+    return os.environ.get(_ENABLED_ENV, "").strip() == "1"
+
 
 
 def _parse_fixed_now(raw: str) -> datetime:

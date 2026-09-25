@@ -122,6 +122,39 @@ class TestInertWhenUnset:
         assert result.tzinfo is not None
 
 
+class TestHooksEnabledNow:
+    """`hooks_enabled_now()` (PR #49 review round 2, "S1") re-reads
+    CONFORMANCE_TEST_HOOKS live on every call, unlike the frozen
+    `HOOKS_ENABLED` constant -- see its docstring for why `rtmt.py`'s
+    `response.create` gate needs that: this very file's own
+    `_reset_conformance_hooks_module` fixture reloads the module to a
+    disabled state after every test here, which would otherwise silently
+    disable `response.create` for every test file that runs afterward in the
+    same pytest process, regardless of what CONFORMANCE_TEST_HOOKS is
+    actually set to at that point."""
+
+    def test_disabled_by_default(self):
+        assert conformance_hooks.hooks_enabled_now() is False
+
+    def test_enabled_when_env_var_is_the_literal_1(self, monkeypatch):
+        monkeypatch.setenv("CONFORMANCE_TEST_HOOKS", "1")
+        assert conformance_hooks.hooks_enabled_now() is True
+
+    @pytest.mark.parametrize("flag_value", ["0", "false", "yes", "TRUE", ""])
+    def test_only_the_literal_value_1_enables_it(self, monkeypatch, flag_value):
+        monkeypatch.setenv("CONFORMANCE_TEST_HOOKS", flag_value)
+        assert conformance_hooks.hooks_enabled_now() is False
+
+    def test_reflects_the_env_var_without_needing_a_module_reload(self, monkeypatch):
+        """The whole point of this function: no `importlib.reload()` needed
+        -- setting the env var alone is enough, even though the frozen
+        `HOOKS_ENABLED` constant stays whatever it already was."""
+        frozen_before = conformance_hooks.HOOKS_ENABLED
+        monkeypatch.setenv("CONFORMANCE_TEST_HOOKS", "1")
+        assert conformance_hooks.hooks_enabled_now() is True
+        assert conformance_hooks.HOOKS_ENABLED == frozen_before  # unchanged, no reload happened
+
+
 class TestActiveWhenSet:
     """CONFORMANCE_TEST_HOOKS=1 -> the fixed clock and timer overrides take
     effect. Exercising this positive path is what makes the inertness tests

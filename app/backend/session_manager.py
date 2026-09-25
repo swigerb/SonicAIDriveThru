@@ -253,6 +253,12 @@ class SessionManager:
         self._resume_index: dict[str, str] = {}     # digest -> session_id
         # Last few guest/carhop turns per session, replayed into a resumed upstream.
         self._transcripts: dict[str, deque[tuple[str, str]]] = {}
+        # The voice THIS session's guest picked via extension.set_voice, if any
+        # (#43, PR #49 review round 6, "S1"). Keyed by session_id -- never on
+        # RTMiddleTier -- so a pick can only ever be read back for the SAME
+        # guest's session (restored on resume, since detach/resume keeps the
+        # same session_id) and never leaks into a different, brand-new session.
+        self._voices: dict[str, str] = {}
         self._idle_check_task: asyncio.Task | None = None
         self._clock: Callable[[], float] = clock or time.monotonic
 
@@ -337,6 +343,19 @@ class SessionManager:
             return None
         return self._context_monitors.get(session_id)
 
+    def get_voice(self, session_id: str | None) -> str | None:
+        """The voice THIS session's guest last picked via extension.set_voice,
+        or None if they never picked one (the server's config-level default
+        applies). See `self._voices` for why this lives here and not on
+        RTMiddleTier."""
+        if session_id is None:
+            return None
+        return self._voices.get(session_id)
+
+    def set_voice(self, session_id: str | None, voice: str) -> None:
+        if session_id is not None:
+            self._voices[session_id] = voice
+
     # ── End / detach ──
 
     def end_session(self, session_id: str | None, reason: str = "ended") -> None:
@@ -355,6 +374,7 @@ class SessionManager:
         self._context_monitors.pop(session_id, None)
         self._last_activity.pop(session_id, None)
         self._transcripts.pop(session_id, None)
+        self._voices.pop(session_id, None)
         logger.info("Session %s ended (%s)", session_id, reason)
 
     def cleanup_session(self, ws: web.WebSocketResponse, session_id: str | None) -> None:

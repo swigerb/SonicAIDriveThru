@@ -15,7 +15,11 @@ namespace Conformance.Tests;
 /// equivalent case for `session.updated` -- and `session.updated` is not in
 /// `_PASSTHROUGH_SERVER_TYPES` either, so it fell through unmodified. Fixed in issue #27 by
 /// factoring the scrub into `RTMiddleTier._scrub_session_for_client` and routing both
-/// `session.created` and `session.updated` through it.
+/// `session.created` and `session.updated` through it. Since swigerb/SonicAIDriveThru#45,
+/// `_scrub_session_for_client`'s deny-list has itself been replaced by `_client_session_echo`, an
+/// allow-listed copy of `{type, event_id, session:{id, object, audio:{output:{voice}}}}` -- this
+/// scenario's two assertions still hold trivially, since neither `instructions` nor `tools` is in
+/// the allow-list at all.
 /// </summary>
 [Collection(ConformanceCollection.Name)]
 public sealed class SessionUpdatedClientVisibilityTests(ConformanceFixture fixture)

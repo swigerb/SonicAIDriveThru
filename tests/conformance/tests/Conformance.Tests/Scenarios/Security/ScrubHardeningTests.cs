@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Conformance.Fakes;
 using Conformance.Harness;
 using Xunit;
@@ -7,7 +8,10 @@ namespace Conformance.Tests.Scenarios.Security;
 
 /// <summary>
 /// swigerb/SonicAIDriveThru#29 (part 1, "scrub completeness"): the "hide max tokens" step in
-/// `RTMiddleTier._scrub_session_for_client` set only the *legacy* key
+/// `RTMiddleTier._scrub_session_for_client` (since replaced by the allow-listed
+/// `_client_session_echo` under swigerb/SonicAIDriveThru#45 -- an allow-list can't miss a field
+/// like this in the first place, since it never copies anything not explicitly named) set only
+/// the *legacy* key
 /// `max_response_output_tokens`, but `_to_ga_session` renames that to `max_output_tokens` on the
 /// way upstream, so GA's `session.updated` echo carried the real cap back under the *new* key
 /// untouched. The same echo also carries `model` (the internal Azure deployment name -- always
@@ -71,6 +75,68 @@ public sealed class ScrubHardeningTests(ConformanceFixture fixture)
             transcription.TryGetProperty("model", out _);
         Assert.False(hasLeakedTranscriptionModel,
             "The browser must never receive the transcription deployment name (audio.input.transcription.model) via session.updated.");
+    });
+
+    /// <summary>
+    /// swigerb/SonicAIDriveThru#45: `_GA_SESSION_TOP_LEVEL` (rtmt.py's `_to_ga_session` allow-list
+    /// of legitimate GA session top-level keys) includes `prompt`, `tracing`, `include` and
+    /// `truncation` -- newer GA session fields with no dedicated deny-list entry in the old
+    /// `_scrub_session_for_client`, so each would have reached the browser completely unscrubbed
+    /// the moment GA started echoing them back, exactly the gap `_client_session_echo`'s
+    /// allow-list closes structurally rather than needing a deny-list update per new GA field.
+    ///
+    /// PR #49 review round 2 (M3) closed the *other* half of this: the browser can no longer set
+    /// these fields upstream itself via its own `session.update` (`_CLIENT_SESSION_KEYS` only
+    /// allows `turn_detection`/`input_audio_transcription`) -- so this test can no longer use the
+    /// browser's own `session.update` as the vehicle to get `prompt`/`tracing`/`include`/
+    /// `truncation` onto the fake's effective session; that would now just prove M3 works, not
+    /// exercise #45 at all. Instead it seeds them directly onto the fake connection's
+    /// <see cref="RealtimeSessionState.EffectiveSession"/> before the browser's session.update
+    /// round-trips, standing in for "GA independently echoes these fields regardless of what any
+    /// client requested" -- the exact same reasoning `HandleSessionUpdateAsync` already applies to
+    /// `id`/`object`/`model` (server-assigned, always present regardless of client input).
+    /// Then asserts the *browser*-bound copy is exactly
+    /// <c>{type, event_id, session:{id, object, audio:{output:{voice}}}}</c> and nothing else --
+    /// black-box proof of the exact contract documented in
+    /// tests/conformance/README.md's "Session-echo allow-list" section.
+    /// </summary>
+    [Fact]
+    public Task Session_updated_relays_only_the_allow_listed_shape_even_with_every_ga_top_level_key_set() =>
+        fixture.RunAsync(async () =>
+    {
+        var ct = TestContext.Current.CancellationToken;
+
+        var connectionTask = fixture.Realtime.WaitForNextConnectionAsync(FrameTimeout, ct);
+        await using var browser = await RealtimeBrowserClient.ConnectAsync(fixture.Backend!.BaseUri, cancellationToken: ct);
+        var connection = await connectionTask;
+        Assert.True(connection is not null, "No upstream connection was accepted for the browser socket.");
+
+        // Seeded directly onto the fake's effective session -- not sent by the browser, which the
+        // M3 fix no longer permits for these keys (see summary above).
+        connection!.SessionState.EffectiveSession["prompt"] = new JsonObject { ["id"] = "pmpt_secret" };
+        connection.SessionState.EffectiveSession["tracing"] = "auto";
+        connection.SessionState.EffectiveSession["include"] = new JsonArray("item.input_audio_transcription.logprobs");
+        connection.SessionState.EffectiveSession["truncation"] = "auto";
+
+        // The browser's own (legitimate) session.update is what triggers the fake to re-emit
+        // session.updated with the now-seeded EffectiveSession folded in.
+        await browser.SendStartSessionAsync(cancellationToken: ct);
+
+        var updated = await browser.ReceivedFrames.WaitForAsync(
+            f => f.Sequence > 0 && f.Type == "session.updated", FrameTimeout, ct);
+        Assert.True(updated is not null, "Expected the browser's own session.update to produce a session.updated echo.");
+
+        var session = updated!.Json.GetProperty("session");
+        var topLevelKeys = new HashSet<string>(session.EnumerateObject().Select(p => p.Name), StringComparer.Ordinal);
+        Assert.Equal(new HashSet<string>(["id", "object", "audio"], StringComparer.Ordinal), topLevelKeys);
+
+        var audioKeys = new HashSet<string>(
+            session.GetProperty("audio").EnumerateObject().Select(p => p.Name), StringComparer.Ordinal);
+        Assert.Equal(new HashSet<string>(["output"], StringComparer.Ordinal), audioKeys);
+
+        var outputKeys = new HashSet<string>(
+            session.GetProperty("audio").GetProperty("output").EnumerateObject().Select(p => p.Name), StringComparer.Ordinal);
+        Assert.Equal(new HashSet<string>(["voice"], StringComparer.Ordinal), outputKeys);
     });
 
     /// <summary>

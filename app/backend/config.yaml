@@ -9,6 +9,11 @@ model:
   # OpenAI recommends for best quality. The picker offers all ten GA voices.
   # Env override: AZURE_OPENAI_REALTIME_VOICE_CHOICE.
   default_voice: "marin"
+  # Voices extension.set_voice (the picker) may choose from -- anything else
+  # is dropped with a WARNING, never forwarded upstream or adopted (PR #49
+  # review round 5, "M1"). Defaults to the ten GA voices in
+  # app/frontend/src/lib/voices.ts when omitted/empty; override per brand.
+  # allowed_voices: ["marin", "cedar", "shimmer", "sage", "coral", "ballad", "ash", "verse", "alloy", "echo"]
   # Guest-speech transcription model (session.audio.input.transcription.model).
   # `whisper-1` works on Azure with no extra deployment. gpt-4o-transcribe and
   # gpt-4o-mini-transcribe are ACCEPTED by session.update but every turn then

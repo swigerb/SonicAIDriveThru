@@ -141,6 +141,31 @@ class GuardTests(unittest.TestCase):
         guard.track(json.dumps({"type": "session.update", "event_id": "su_1", "session": {}}))
         self.assertEqual(guard.correlate({"type": "error", "error": {**RATE_LIMIT_ERROR, "event_id": "su_1"}}), "su_1")
 
+    def test_stamp_does_not_crash_on_a_non_string_event_id_dict(self):
+        # #31 S2 (PR #49 review round 5): a browser-forged {"event_id": {"a": 1}} on
+        # session.update used to reach guard.stamp() unchecked, where it's used as a
+        # dict key ("self._sent[event_id] = ...") -- unhashable, so it killed the socket
+        # with a raw TypeError instead of being dropped.
+        guard = _SessionUpdateGuard()
+        message = {"type": "session.update", "event_id": {"a": 1}, "session": {}}
+        stamped = guard.stamp(message)
+        self.assertIsInstance(stamped["event_id"], str)
+        self.assertTrue(stamped["event_id"])
+
+    def test_stamp_does_not_crash_on_a_non_string_event_id_list(self):
+        guard = _SessionUpdateGuard()
+        message = {"type": "session.update", "event_id": ["a"], "session": {}}
+        stamped = guard.stamp(message)
+        self.assertIsInstance(stamped["event_id"], str)
+        self.assertTrue(stamped["event_id"])
+
+    def test_stamp_ignores_an_empty_string_event_id_and_generates_its_own(self):
+        guard = _SessionUpdateGuard()
+        message = {"type": "session.update", "event_id": "", "session": {}}
+        stamped = guard.stamp(message)
+        self.assertIsInstance(stamped["event_id"], str)
+        self.assertTrue(stamped["event_id"])
+
 
 class RecoveryUnitTests(unittest.IsolatedAsyncioTestCase):
 
