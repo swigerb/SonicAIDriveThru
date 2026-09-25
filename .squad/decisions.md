@@ -650,6 +650,81 @@
   `_COMBO_SIDE_ITEMS` member); restored, pytest 794/794 and the filtered conformance run 6/6 green
   again.
 
+#### 45. Keyword-Fallback Precedence for the Happy-Hour Discount Question (Summer — Backend Dev, PR #61 review, must-fix 1)
+- **Bug:** `_keyword_fallback_happy_hour_discounted` checked the fountain-drink/Dr Pepper keywords
+  BEFORE the shake/blast/malt keywords. An off-menu name that happens to contain both a fountain
+  word and a shake/blast word (`"Cherry Limeade Shake"` — "limeade" + "shake";
+  `"Strawberry Lemonade Shake"`; `"Dr Pepper Shake"`; `"Sweet Tea Blast"` — "tea" + "blast")
+  resolved via the fountain branch and was unconditionally discounted, bypassing
+  `_SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED` (Brian's decision #44/decision below) entirely.
+- **Fix:** check the shake/blast/malt regex first; fall through to the fountain/Dr Pepper check
+  only if it doesn't match. `_keyword_fallback_combo_drink` (an unconditional `or` across all three
+  regexes) needed no change — it was never order-dependent, confirmed by a passing conformance
+  theory with the same four names (still fill the combo drink slot regardless of discount outcome).
+- **Two separate questions, still separate:** the combo-drink-slot question ("can this fill the
+  slot") stays order-independent; only the happy-hour-discount question ("is this half-price") is
+  precedence-sensitive, and now resolves shake/blast-first.
+- **Mutation check:** reverted the check order back to fountain-first — pytest
+  `KeywordFallbackPrecedenceTests` 1 failed / 2 passed (the "are not discounted" case goes red);
+  conformance `HappyHourDiscountTests`'s new theory: 4 failed / 4 passed (discount-side rows red,
+  combo-slot rows unaffected as expected). Restored; full pytest 797/797 and full conformance
+  407/407 (1 pre-existing skip) green again.
+
+#### 46. Happy-Hour Banner Wording States Shakes/Blasts/Sundaes Are Full Price (Summer — Backend Dev, PR #61 review, must-fix 2)
+- **Problem:** the runtime banner appended to `update_order`/`get_order` tool results said
+  `"drinks and slushes are half-price!"` and never mentioned shakes, Blasts, or sundaes at all —
+  the model had no signal in the tool result itself that those categories are full price (#39's
+  decision), only a standing system-prompt instruction it could forget or override.
+- **Change:** banner text now reads `"[HAPPY HOUR ACTIVE: slushes and fountain drinks are
+  half-price; shakes, Blasts and sundaes are full price]"` in both `update_order` and `get_order`.
+  `system_prompt.yaml`'s trigger condition updated to `"+ slush or fountain-drink order"` (matches
+  the half-price scope exactly). Dropped the standing "Shakes & Blasts and ice cream are full
+  price" line added for #44/#60 — now redundant since the banner states the same rule every time
+  happy hour is active; the rule is stated once, not twice.
+- **Dead code removed:** `hints.yaml`'s `system_hints.happy_hour_active` entry deleted. Confirmed
+  dead first (re-verified this round, not just relying on the prior round's finding): grepped the
+  whole repo including all test files for `happy_hour_active` and `get_hints_data` — only caller of
+  hints data is `PromptLoader.get_hints()`, which reads solely `upsell_hints`; no test referenced
+  the key either.
+- **No existing test asserted the old banner text** (checked `app/backend/tests` and
+  `tests/conformance` — zero matches) — nothing stale to update, but added
+  `HappyHourBannerWordingTests` for ongoing coverage.
+- **Mutation check:** reverted the banner string to the old wording — 1 of 3 new pytest tests
+  failed; restored, all green (pytest 800/800 total).
+
+#### 47. More Tots Alias Forms, README Contract, and a Size-Word Fail-Safe Pin (Summer — Backend Dev, PR #61 review, must-fix 3 + should-fix 4/5)
+- **Investigated first (per the review's explicit instruction):** what does `_menu_key()` do to a
+  hyphen? Confirmed a hyphen is NOT collapsed to a space — it is not whitespace, so neither
+  `strip_modifiers()`'s `.split()`/`" ".join(...)` pass nor any of `_menu_key()`'s three
+  symbol-replacements (`®`, `™`, curly apostrophe) touch it
+  (`_menu_key("Tater-Tot") == "tater-tot"`, not `"tater tot"`). This directly reverses decision
+  #44's earlier assumption ("considered and rejected: hyphenated forms... can be added later if it
+  turns out to matter") — it did turn out to matter, and needed its own explicit keys, not
+  automatic coverage from the space-separated forms.
+- **`_TOTS_ALIASES` extended:** one-word forms (`tatertot`, `tatertots`, `tatortot`, `tatortots`)
+  and hyphenated forms (`tater-tot`, `tater-tots`, `tator-tot`, `tator-tots`). `"Totts"`
+  (doubled-T typo) and `"Tater Tot's"` (stray apostrophe) deliberately excluded — confirmed still
+  charged in full.
+- **Pricing check:** `update_order`'s unit price always comes from the tool-call argument, never
+  from `menu_utils` — confirmed the alias mechanism only ever changes combo-slot classification,
+  never a standalone item's price. An alias ordered standalone prices however the caller's
+  tool-call argument says (same as before this change).
+- **Other variants considered:** none seemed worth adding beyond what's covered (plural/singular,
+  case, spacing, one-word, hyphenated, the tator/tater misspelling) — flagging for Brian/Rick to
+  confirm nothing else spoken is missing.
+- **README updated:** the combo-side-slot sentence now explicitly credits `_TOTS_ALIASES`; the
+  alias paragraph lists the exact post-`_menu_key()` lowercase keys as the contract, states the
+  hyphen-preservation rule, and states that size words embedded in the name text (not bracketed)
+  are not stripped.
+- **Size-word fail-safe pinned (no behaviour change — confirmed current behaviour already matched
+  before writing the pin):** `"Large Tater Tots"` (size word in the name text) is charged in full;
+  `"Tater Tots (Large)"` (size word as a bracketed modifier) still absorbs.
+- **Mutation check:** removed the four new alias-key groups from `_TOTS_ALIASES` — pytest
+  `MoreTotsAliasFormsTests` 3 failed / 2 passed; conformance
+  `One_word_and_hyphenated_tots_alias_forms_absorb_into_the_combo_side_slot`: 9 failed / 0 passed
+  (Rick's "M4"). Restored; full pytest 807/807 and full conformance 419/419 (1 pre-existing skip)
+  green again.
+
 - All meaningful changes require team consensus
 - Document architectural decisions here
 - Keep history focused on work, decisions focused on direction
