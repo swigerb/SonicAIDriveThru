@@ -7,7 +7,12 @@ from zoneinfo import ZoneInfo
 
 import conformance_hooks
 from config_loader import get_config
-from menu_utils import canonical_size_key, infer_combo_component, normalize_size
+from menu_utils import (
+    canonical_size_key,
+    infer_combo_component,
+    is_happy_hour_discounted,
+    normalize_size,
+)
 from models import OrderItem, OrderSummary
 from money_utils import format_money, to_decimal
 
@@ -32,11 +37,23 @@ def is_happy_hour() -> bool:
 
 
 def _infer_combo_component(item_name: str) -> str:
-    """Combo-slot/happy-hour bucket check (sides vs drinks vs "" for neither).
+    """Combo-slot-filling check only (sides vs drinks vs "" for neither).
 
-    Delegates to the shared ``infer_combo_component`` in menu_utils to avoid drift (#39).
+    Delegates to the shared ``infer_combo_component`` in menu_utils to avoid drift (#39). This is
+    a SEPARATE question from happy-hour discount eligibility -- see ``_is_happy_hour_discounted``
+    below -- and must never be used to derive it (PR #50 review).
     """
     return infer_combo_component(item_name)
+
+
+def _is_happy_hour_discounted(item_name: str) -> bool:
+    """Happy-hour discount eligibility check only -- SEPARATE from combo-slot-filling above.
+
+    Delegates to the shared ``is_happy_hour_discounted`` in menu_utils to avoid drift (#39 / PR
+    #50 review: don't derive this from ``_infer_combo_component`` -- they happen to agree on most
+    items today, but combo-slot rules and happy-hour rules are independent business questions.
+    """
+    return is_happy_hour_discounted(item_name)
 
 
 @dataclass
@@ -82,7 +99,7 @@ class OrderState:
         total = Decimal("0")
         for item in order_items:
             item_total = to_decimal(item.price) * item.quantity
-            if happy_hour and _infer_combo_component(item.item) == "drinks":
+            if happy_hour and _is_happy_hour_discounted(item.item):
                 item_total *= happy_hour_discount
             total += item_total
         tax = total * tax_rate

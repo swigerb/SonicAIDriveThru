@@ -1,305 +1,485 @@
 {
-  "description": "Golden category table (issue #39): every menuItems.json entry mapped to its combo-slot/happy-hour bucket (sides, drinks, or none). Source of truth: app/backend/menu_utils.py::infer_combo_component. Sundaes (Hot Fudge Sundae, Caramel Sundae) are none per Brian decision on #39 (full price during happy hour -- happy hour is drinks only). The four hot-dog entrees (All-American Dog, Chili Cheese Coney, Footlong Quarter Pound Coney, Corn Dog) are none -- real food items, not a fillable combo side/drink slot, despite living in the Hot Dogs & Tots JSON category alongside real sides. Everything else follows its raw menuItems.json category.",
+  "description": "Golden category table (issue #39; corrected in PR #50 review for the combo side-slot pricing regression): every menuItems.json entry mapped to two INDEPENDENT fields -- comboSlot (side|drinks|none: can this item fill a combo's included side/drink slot for free) and happyHourDiscounted (true|false: does this item get the happy-hour discount). These are deliberately separate columns, not one shared bucket (PR #50 review) -- a future change to one must not silently change the other. size/unitPrice are the representative (Medium, else Standard, else first-listed) size/price from menuItems.json used by the C# combo-absorption Theory (GoldenMenuComboSlotTheoryTests.cs) -- not a pricing contract on their own. Source of truth: app/backend/menu_utils.py::infer_combo_component (comboSlot) and ::is_happy_hour_discounted (happyHourDiscounted). comboSlot=\"sides\" is an explicit allow-list of exactly Tots and Groovy Fries -- the menu's own combo description says \"your choice of a side (Tots or Fries) and a drink\" -- NOT the whole Hot Dogs & Tots / Extras & Sides JSON category (that wider mapping was the PR #50 pricing regression: 9+ items were being silently absorbed for free into a combo's side slot). comboSlot=\"drinks\" is unchanged from dev: every Slushes & Drinks item, plus every Shakes & Ice Cream item except the two sundaes (Hot Fudge Sundae, Caramel Sundae -- Brian's #39 decision: full price during happy hour, not a combo drink either). happyHourDiscounted mirrors comboSlot==\"drinks\" today except it is derived independently in code -- Shakes & Ice Cream (minus sundaes) is currently discounted pending Brian's ruling (see menu_utils._SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED, a single flag so his eventual answer is a one-line change). Hot-dog entrees (All-American Dog, Chili Cheese Coney, Footlong Quarter Pound Coney, Corn Dog) are comboSlot=none/happyHourDiscounted=false -- real food items, not a fillable combo slot, despite sharing the Hot Dogs & Tots JSON category with Tots and Groovy Fries.",
   "items": [
     {
       "item": "SuperSONIC® Double Cheeseburger",
       "category": "Burgers & Sandwiches",
-      "bucket": "none"
+      "comboSlot": "none",
+      "happyHourDiscounted": false,
+      "size": "Standard",
+      "unitPrice": 6.59
     },
     {
       "item": "SuperSONIC® Bacon Double Cheeseburger",
       "category": "Burgers & Sandwiches",
-      "bucket": "none"
+      "comboSlot": "none",
+      "happyHourDiscounted": false,
+      "size": "Standard",
+      "unitPrice": 7.39
     },
     {
       "item": "SONIC® Cheeseburger",
       "category": "Burgers & Sandwiches",
-      "bucket": "none"
+      "comboSlot": "none",
+      "happyHourDiscounted": false,
+      "size": "Standard",
+      "unitPrice": 5.29
     },
     {
       "item": "All-American SONIC Smasher™",
       "category": "Burgers & Sandwiches",
-      "bucket": "none"
+      "comboSlot": "none",
+      "happyHourDiscounted": false,
+      "size": "Standard",
+      "unitPrice": 5.79
     },
     {
       "item": "All-American Bacon SONIC Smasher™",
       "category": "Burgers & Sandwiches",
-      "bucket": "none"
+      "comboSlot": "none",
+      "happyHourDiscounted": false,
+      "size": "Standard",
+      "unitPrice": 6.79
     },
     {
       "item": "Jr Double Cheeseburger",
       "category": "Burgers & Sandwiches",
-      "bucket": "none"
+      "comboSlot": "none",
+      "happyHourDiscounted": false,
+      "size": "Standard",
+      "unitPrice": 3.49
     },
     {
       "item": "Double SONIC Smasher™",
       "category": "Burgers & Sandwiches",
-      "bucket": "none"
+      "comboSlot": "none",
+      "happyHourDiscounted": false,
+      "size": "Standard",
+      "unitPrice": 6.59
     },
     {
       "item": "Crispy Chicken Sandwich",
       "category": "Burgers & Sandwiches",
-      "bucket": "none"
+      "comboSlot": "none",
+      "happyHourDiscounted": false,
+      "size": "Standard",
+      "unitPrice": 5.59
     },
     {
       "item": "Triple SONIC Smasher™",
       "category": "Burgers & Sandwiches",
-      "bucket": "none"
+      "comboSlot": "none",
+      "happyHourDiscounted": false,
+      "size": "Standard",
+      "unitPrice": 7.59
     },
     {
       "item": "Fish Sandwich",
       "category": "Burgers & Sandwiches",
-      "bucket": "none"
+      "comboSlot": "none",
+      "happyHourDiscounted": false,
+      "size": "Standard",
+      "unitPrice": 4.99
     },
     {
       "item": "All-American Dog",
       "category": "Hot Dogs & Tots",
-      "bucket": "none"
+      "comboSlot": "none",
+      "happyHourDiscounted": false,
+      "size": "Standard",
+      "unitPrice": 3.19
     },
     {
       "item": "Chili Cheese Coney",
       "category": "Hot Dogs & Tots",
-      "bucket": "none"
+      "comboSlot": "none",
+      "happyHourDiscounted": false,
+      "size": "Standard",
+      "unitPrice": 3.19
     },
     {
       "item": "Footlong Quarter Pound Coney",
       "category": "Hot Dogs & Tots",
-      "bucket": "none"
+      "comboSlot": "none",
+      "happyHourDiscounted": false,
+      "size": "Standard",
+      "unitPrice": 5.29
     },
     {
       "item": "Tots",
       "category": "Hot Dogs & Tots",
-      "bucket": "sides"
+      "comboSlot": "sides",
+      "happyHourDiscounted": false,
+      "size": "Medium",
+      "unitPrice": 2.79
     },
     {
       "item": "Groovy Fries",
       "category": "Hot Dogs & Tots",
-      "bucket": "sides"
+      "comboSlot": "sides",
+      "happyHourDiscounted": false,
+      "size": "Medium",
+      "unitPrice": 2.79
     },
     {
       "item": "Corn Dog",
       "category": "Hot Dogs & Tots",
-      "bucket": "none"
+      "comboSlot": "none",
+      "happyHourDiscounted": false,
+      "size": "Standard",
+      "unitPrice": 1.99
     },
     {
       "item": "Chili Cheese Tots",
       "category": "Hot Dogs & Tots",
-      "bucket": "sides"
+      "comboSlot": "none",
+      "happyHourDiscounted": false,
+      "size": "Medium",
+      "unitPrice": 3.79
     },
     {
       "item": "Mozzarella Sticks",
       "category": "Hot Dogs & Tots",
-      "bucket": "sides"
+      "comboSlot": "none",
+      "happyHourDiscounted": false,
+      "size": "Medium",
+      "unitPrice": 4.89
     },
     {
       "item": "Onion Rings",
       "category": "Hot Dogs & Tots",
-      "bucket": "sides"
+      "comboSlot": "none",
+      "happyHourDiscounted": false,
+      "size": "Medium",
+      "unitPrice": 3.89
     },
     {
       "item": "Ched 'R' Peppers",
       "category": "Hot Dogs & Tots",
-      "bucket": "sides"
+      "comboSlot": "none",
+      "happyHourDiscounted": false,
+      "size": "Medium",
+      "unitPrice": 5.19
     },
     {
       "item": "Cherry Limeade",
       "category": "Slushes & Drinks",
-      "bucket": "drinks"
+      "comboSlot": "drinks",
+      "happyHourDiscounted": true,
+      "size": "Medium",
+      "unitPrice": 2.89
     },
     {
       "item": "Ocean Water®",
       "category": "Slushes & Drinks",
-      "bucket": "drinks"
+      "comboSlot": "drinks",
+      "happyHourDiscounted": true,
+      "size": "Medium",
+      "unitPrice": 2.89
     },
     {
       "item": "Blue Raspberry Slush",
       "category": "Slushes & Drinks",
-      "bucket": "drinks"
+      "comboSlot": "drinks",
+      "happyHourDiscounted": true,
+      "size": "Medium",
+      "unitPrice": 2.79
     },
     {
       "item": "Strawberry Slush",
       "category": "Slushes & Drinks",
-      "bucket": "drinks"
+      "comboSlot": "drinks",
+      "happyHourDiscounted": true,
+      "size": "Medium",
+      "unitPrice": 3.29
     },
     {
       "item": "Cherry Slush",
       "category": "Slushes & Drinks",
-      "bucket": "drinks"
+      "comboSlot": "drinks",
+      "happyHourDiscounted": true,
+      "size": "Medium",
+      "unitPrice": 2.79
     },
     {
       "item": "All Natural Lemonade",
       "category": "Slushes & Drinks",
-      "bucket": "drinks"
+      "comboSlot": "drinks",
+      "happyHourDiscounted": true,
+      "size": "Medium",
+      "unitPrice": 3.39
     },
     {
       "item": "Grape Slush",
       "category": "Slushes & Drinks",
-      "bucket": "drinks"
+      "comboSlot": "drinks",
+      "happyHourDiscounted": true,
+      "size": "Medium",
+      "unitPrice": 2.79
     },
     {
       "item": "Cranberry Limeade",
       "category": "Slushes & Drinks",
-      "bucket": "drinks"
+      "comboSlot": "drinks",
+      "happyHourDiscounted": true,
+      "size": "Medium",
+      "unitPrice": 2.89
     },
     {
       "item": "Sweet Iced Tea",
       "category": "Slushes & Drinks",
-      "bucket": "drinks"
+      "comboSlot": "drinks",
+      "happyHourDiscounted": true,
+      "size": "Medium",
+      "unitPrice": 2.49
     },
     {
       "item": "Strawberry Limeade",
       "category": "Slushes & Drinks",
-      "bucket": "drinks"
+      "comboSlot": "drinks",
+      "happyHourDiscounted": true,
+      "size": "Medium",
+      "unitPrice": 2.89
     },
     {
       "item": "Vanilla Classic Shake",
       "category": "Shakes & Ice Cream",
-      "bucket": "drinks"
+      "comboSlot": "drinks",
+      "happyHourDiscounted": true,
+      "size": "Medium",
+      "unitPrice": 4.69
     },
     {
       "item": "Chocolate Classic Shake",
       "category": "Shakes & Ice Cream",
-      "bucket": "drinks"
+      "comboSlot": "drinks",
+      "happyHourDiscounted": true,
+      "size": "Medium",
+      "unitPrice": 4.69
     },
     {
       "item": "Strawberry Classic Shake",
       "category": "Shakes & Ice Cream",
-      "bucket": "drinks"
+      "comboSlot": "drinks",
+      "happyHourDiscounted": true,
+      "size": "Medium",
+      "unitPrice": 4.69
     },
     {
       "item": "Peanut Butter Classic Shake",
       "category": "Shakes & Ice Cream",
-      "bucket": "drinks"
+      "comboSlot": "drinks",
+      "happyHourDiscounted": true,
+      "size": "Medium",
+      "unitPrice": 4.69
     },
     {
       "item": "SONIC Blast® made with REESE’S",
       "category": "Shakes & Ice Cream",
-      "bucket": "drinks"
+      "comboSlot": "drinks",
+      "happyHourDiscounted": true,
+      "size": "Medium",
+      "unitPrice": 5.89
     },
     {
       "item": "SONIC Blast® made with OREO® Cookie Pieces",
       "category": "Shakes & Ice Cream",
-      "bucket": "drinks"
+      "comboSlot": "drinks",
+      "happyHourDiscounted": true,
+      "size": "Medium",
+      "unitPrice": 5.89
     },
     {
       "item": "OREO® Cheesecake Master Shake®",
       "category": "Shakes & Ice Cream",
-      "bucket": "drinks"
+      "comboSlot": "drinks",
+      "happyHourDiscounted": true,
+      "size": "Medium",
+      "unitPrice": 5.39
     },
     {
       "item": "Hot Fudge Sundae",
       "category": "Shakes & Ice Cream",
-      "bucket": "none"
+      "comboSlot": "none",
+      "happyHourDiscounted": false,
+      "size": "Standard",
+      "unitPrice": 3.19
     },
     {
       "item": "Banana Classic Shake",
       "category": "Shakes & Ice Cream",
-      "bucket": "drinks"
+      "comboSlot": "drinks",
+      "happyHourDiscounted": true,
+      "size": "Medium",
+      "unitPrice": 4.69
     },
     {
       "item": "Caramel Sundae",
       "category": "Shakes & Ice Cream",
-      "bucket": "none"
+      "comboSlot": "none",
+      "happyHourDiscounted": false,
+      "size": "Standard",
+      "unitPrice": 3.19
     },
     {
       "item": "SONIC® Cheeseburger Combo",
       "category": "Combos",
-      "bucket": "none"
+      "comboSlot": "none",
+      "happyHourDiscounted": false,
+      "size": "Standard",
+      "unitPrice": 8.49
     },
     {
       "item": "SuperSONIC® Double Cheeseburger Combo",
       "category": "Combos",
-      "bucket": "none"
+      "comboSlot": "none",
+      "happyHourDiscounted": false,
+      "size": "Standard",
+      "unitPrice": 10.19
     },
     {
       "item": "SuperSONIC® Bacon Double Cheeseburger Combo",
       "category": "Combos",
-      "bucket": "none"
+      "comboSlot": "none",
+      "happyHourDiscounted": false,
+      "size": "Standard",
+      "unitPrice": 10.99
     },
     {
       "item": "All-American SONIC Smasher™ Combo",
       "category": "Combos",
-      "bucket": "none"
+      "comboSlot": "none",
+      "happyHourDiscounted": false,
+      "size": "Standard",
+      "unitPrice": 9.49
     },
     {
       "item": "All-American Bacon SONIC Smasher™ Combo",
       "category": "Combos",
-      "bucket": "none"
+      "comboSlot": "none",
+      "happyHourDiscounted": false,
+      "size": "Standard",
+      "unitPrice": 10.49
     },
     {
       "item": "Crispy Chicken Sandwich Combo",
       "category": "Combos",
-      "bucket": "none"
+      "comboSlot": "none",
+      "happyHourDiscounted": false,
+      "size": "Standard",
+      "unitPrice": 9.29
     },
     {
       "item": "Double SONIC Smasher™ Combo",
       "category": "Combos",
-      "bucket": "none"
+      "comboSlot": "none",
+      "happyHourDiscounted": false,
+      "size": "Standard",
+      "unitPrice": 10.19
     },
     {
       "item": "Fish Sandwich Combo",
       "category": "Combos",
-      "bucket": "none"
+      "comboSlot": "none",
+      "happyHourDiscounted": false,
+      "size": "Standard",
+      "unitPrice": 8.49
     },
     {
       "item": "Jr Double Cheeseburger Combo",
       "category": "Combos",
-      "bucket": "none"
+      "comboSlot": "none",
+      "happyHourDiscounted": false,
+      "size": "Standard",
+      "unitPrice": 6.99
     },
     {
       "item": "Triple SONIC Smasher™ Combo",
       "category": "Combos",
-      "bucket": "none"
+      "comboSlot": "none",
+      "happyHourDiscounted": false,
+      "size": "Standard",
+      "unitPrice": 11.29
     },
     {
       "item": "Cheese Tots",
       "category": "Extras & Sides",
-      "bucket": "sides"
+      "comboSlot": "none",
+      "happyHourDiscounted": false,
+      "size": "Medium",
+      "unitPrice": 3.39
     },
     {
       "item": "Cheese Groovy Fries",
       "category": "Extras & Sides",
-      "bucket": "sides"
+      "comboSlot": "none",
+      "happyHourDiscounted": false,
+      "size": "Medium",
+      "unitPrice": 3.39
     },
     {
       "item": "Chili Cheese Groovy Fries",
       "category": "Extras & Sides",
-      "bucket": "sides"
+      "comboSlot": "none",
+      "happyHourDiscounted": false,
+      "size": "Medium",
+      "unitPrice": 3.79
     },
     {
       "item": "Premium Chicken Bites",
       "category": "Extras & Sides",
-      "bucket": "sides"
+      "comboSlot": "none",
+      "happyHourDiscounted": false,
+      "size": "Medium",
+      "unitPrice": 5.69
     },
     {
       "item": "FRITOS® Chili Cheese Wrap",
       "category": "Extras & Sides",
-      "bucket": "sides"
+      "comboSlot": "none",
+      "happyHourDiscounted": false,
+      "size": "Standard",
+      "unitPrice": 2.99
     },
     {
       "item": "Soft Pretzel Twist",
       "category": "Extras & Sides",
-      "bucket": "sides"
+      "comboSlot": "none",
+      "happyHourDiscounted": false,
+      "size": "Standard",
+      "unitPrice": 1.99
     },
     {
       "item": "Fritos Chili Cheese Pie",
       "category": "Extras & Sides",
-      "bucket": "sides"
+      "comboSlot": "none",
+      "happyHourDiscounted": false,
+      "size": "Medium",
+      "unitPrice": 3.49
     },
     {
       "item": "Crispy Tenders - 3 Piece",
       "category": "Extras & Sides",
-      "bucket": "sides"
+      "comboSlot": "none",
+      "happyHourDiscounted": false,
+      "size": "Standard",
+      "unitPrice": 5.19
     },
     {
       "item": "Crispy Tenders - 5 Piece",
       "category": "Extras & Sides",
-      "bucket": "sides"
+      "comboSlot": "none",
+      "happyHourDiscounted": false,
+      "size": "Standard",
+      "unitPrice": 6.19
     },
     {
       "item": "FRITOS® Chili Cheese Jr. Wrap",
       "category": "Extras & Sides",
-      "bucket": "sides"
+      "comboSlot": "none",
+      "happyHourDiscounted": false,
+      "size": "Standard",
+      "unitPrice": 1.89
     }
   ]
 }

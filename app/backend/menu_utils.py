@@ -19,6 +19,7 @@ __all__ = [
     "canonical_size_key",
     "infer_category",
     "infer_combo_component",
+    "is_happy_hour_discounted",
     "MENU_CATEGORY_MAP",
 ]
 
@@ -157,66 +158,100 @@ def infer_category(item_name: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Combo-component bucket classification (#39)
+# Combo-slot classification & happy-hour discount eligibility (#39, PR #50 review)
 #
-# Used for BOTH combo-slot-filling (which standalone items a combo can absorb into its side/
-# drink slots) and happy-hour discount eligibility ("happy hour = drinks only"). Deliberately
-# kept separate from ``infer_category`` above, whose raw category strings are relied on
-# elsewhere (extras validation, upsell hints, search categorisation) and must not change.
+# These are two SEPARATE questions and must never be derived from one shared bucket (Rick's PR
+# #50 review): "can this item fill a combo's included side/drink slot" (``infer_combo_component``)
+# vs. "does this item get the happy-hour discount" (``is_happy_hour_discounted``). They agree on
+# almost everything today, but that's incidental, not structural -- e.g. Shakes & Blasts are
+# currently happy-hour-discounted pending Brian's ruling (see the single flag below) regardless of
+# whether they can ever fill a combo's drink slot, and a future change to one must not silently
+# change the other.
 # ---------------------------------------------------------------------------
 
-# Items whose true bucket contradicts their raw JSON category, checked first: the four hot-dog
-# entrees live in the "Hot Dogs & Tots" category alongside real sides (Tots, Onion Rings, Ched 'R'
-# Peppers, ...), and the two sundaes live in "Shakes & Ice Cream" alongside real shakes/blasts.
-# Per Brian's #39 decision, sundaes are full price during happy hour -- a sundae isn't a drink,
-# so it must not be discounted or fill a combo's drink slot.
-_BUCKET_EXCEPTIONS: dict[str, str] = {
-    "all-american dog": "",
-    "chili cheese coney": "",
-    "footlong quarter pound coney": "",
-    "corn dog": "",
-    "hot fudge sundae": "",
-    "caramel sundae": "",
-}
+# Combo SIDE slot: the menu's own combo description says "your choice of a side (Tots or Fries)
+# and a drink" -- this is a literal, explicit allow-list of exactly those two items (any size),
+# NOT the whole "Hot Dogs & Tots"/"Extras & Sides" JSON category. Mapping the whole category to
+# "sides" was a pricing regression caught in PR #50 review: Crispy Tenders (3pc/5pc), Premium
+# Chicken Bites, both FRITOS(R) wraps, Fritos Chili Cheese Pie, Soft Pretzel Twist, Mozzarella
+# Sticks, Onion Rings, Ched 'R' Peppers, and the Cheese/Chili-Cheese Tots & Fries variants were
+# all being silently absorbed for free into a combo's side slot instead of charged in full
+# (measured regression: Cheeseburger Combo + Crispy Tenders 5pc totalled $8.49 instead of $15.98).
+_COMBO_SIDE_ITEMS = frozenset({"tots", "groovy fries"})
 
-# Raw JSON category string (already lower-cased by MENU_CATEGORY_MAP) -> combo-slot/happy-hour
-# bucket. Anything not listed here (Burgers & Sandwiches, Combos, or an unmapped category)
-# defaults to "" -- not a fillable side/drink slot and not happy-hour-discountable.
-_CATEGORY_BUCKET: dict[str, str] = {
-    "hot dogs & tots": "sides",
-    "extras & sides": "sides",
-    "slushes & drinks": "drinks",
-    "shakes & ice cream": "drinks",
-}
+# Combo DRINK slot: unchanged from dev's original behaviour (confirmed via git history) -- every
+# "Slushes & Drinks" item, plus every "Shakes & Ice Cream" item except the two sundaes (Brian's
+# #39 decision: a sundae isn't a drink, so it can't fill a combo's drink slot or be discounted).
+_COMBO_DRINK_CATEGORIES = frozenset({"slushes & drinks", "shakes & ice cream"})
+_SUNDAES = frozenset({"hot fudge sundae", "caramel sundae"})
 
 # Word-boundary so a side item merely *containing* the substring "pepper" (e.g. "Ched 'R'
 # Peppers") isn't misclassified as the drink "Dr Pepper" (#39 / #28 N19 root cause).
 _DR_PEPPER_RE = re.compile(r"\bdr\.?\s*pepper\b")
 
+_DRINK_KEYWORDS = ("slush", "limeade", "ocean water", "drink", "tea", "lemonade", "shake", "blast", "malt", "coke", "sprite", "root beer")
+
+
+def _keyword_fallback_is_drink(normalized: str) -> bool:
+    """Keyword scan used ONLY for items that aren't in ``menuItems.json`` at all (e.g. a spoken
+    item never added to the menu). "Dr Pepper" matches on a word boundary, never a bare "pepper"
+    substring (#39 / #28 N19 root cause)."""
+    return bool(_DR_PEPPER_RE.search(normalized)) or any(kw in normalized for kw in _DRINK_KEYWORDS)
+
 
 def infer_combo_component(item_name: str) -> str:
-    """Classify *item_name* into its combo-slot/happy-hour bucket.
+    """Classify *item_name* for combo-SLOT-FILLING only.
 
-    Returns ``"sides"``, ``"drinks"``, or ``""`` (not fillable as a combo side/drink slot and not
-    happy-hour-discountable -- this covers combos, burgers/sandwiches, hot-dog entrees, and
-    sundaes). Category comes from ``menuItems.json`` first; keyword fallback only applies to
-    items that aren't in the menu at all (#39).
+    Returns ``"sides"``, ``"drinks"``, or ``""`` (can't fill either combo slot). This answers
+    ONLY "can this item fill a combo's included side/drink slot" -- happy-hour discount
+    eligibility is a SEPARATE question, answered by ``is_happy_hour_discounted`` below, and must
+    never be derived from this function's result (PR #50 review). Category comes from
+    ``menuItems.json`` first; keyword fallback only applies to items that aren't in the menu at
+    all (#39).
     """
     normalized = item_name.lower()
-    if normalized in _BUCKET_EXCEPTIONS:
-        return _BUCKET_EXCEPTIONS[normalized]
+    if normalized in _COMBO_SIDE_ITEMS:
+        return "sides"
+    if normalized in _SUNDAES:
+        return ""
 
     category = MENU_CATEGORY_MAP.get(normalized)
     if category is not None:
-        return _CATEGORY_BUCKET.get(category, "")
+        return "drinks" if category in _COMBO_DRINK_CATEGORIES else ""
 
     # Not in the menu at all (e.g. a spoken item never added to menuItems.json) -- fall back to
-    # keyword scanning, using a word-boundary match for "dr pepper" specifically.
-    if "tot" in normalized or "fries" in normalized or "onion rings" in normalized:
+    # keyword scanning. Deliberately conservative: only the two allow-listed side names, never a
+    # bare "fries"/"tot" substring match on other Hot Dogs & Tots / Extras & Sides items.
+    if "tots" in normalized or "groovy fries" in normalized:
         return "sides"
-    if _DR_PEPPER_RE.search(normalized) or any(
-        kw in normalized
-        for kw in ("slush", "limeade", "ocean water", "drink", "tea", "lemonade", "shake", "blast", "malt", "coke", "sprite", "root beer")
-    ):
+    if _keyword_fallback_is_drink(normalized):
         return "drinks"
     return ""
+
+
+# Pending Brian's ruling (#39 follow-up / PR #50 review): Shakes & Blasts are currently
+# happy-hour-discounted, matching dev's existing behaviour. Flip this ONE flag to ``False`` the
+# moment he decides otherwise (leaving Slushes & Drinks discounted) -- no other code needs to
+# change.
+_SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED = True
+
+
+def is_happy_hour_discounted(item_name: str) -> bool:
+    """Whether *item_name* gets the happy-hour discount -- a SEPARATE question from
+    ``infer_combo_component`` above (PR #50 review): don't derive one from the other. Sundaes are
+    never discounted (Brian's #39 decision). See ``_SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED``
+    above for the one open question (Shakes & Blasts, pending Brian)."""
+    normalized = item_name.lower()
+    if normalized in _SUNDAES:
+        return False
+
+    category = MENU_CATEGORY_MAP.get(normalized)
+    if category == "slushes & drinks":
+        return True
+    if category == "shakes & ice cream":
+        return _SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED
+    if category is not None:
+        return False
+
+    # Not in the menu at all -- same keyword fallback as the combo-drink-slot check.
+    return _keyword_fallback_is_drink(normalized)

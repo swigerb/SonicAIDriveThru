@@ -120,11 +120,13 @@ public sealed class ComboAbsorptionTests(HappyHourJustBeforeOpenFixture fixture)
                 ("add", "Tots", "medium", 1, 2.79m),
                 ("add", "Cherry Limeade", "medium", 1, 2.89m),
                 ("reset", "", "", 0, 0m),
-                // A fresh combo of the same kind, then only ONE new side (Onion Rings) absorbed.
+                // A fresh combo of the same kind, then only ONE new side (Groovy Fries) absorbed.
                 // The reported #41 example is literally this shape ("...Combo w/ Medium Tots &
-                // Medium Cherry Limeade & Medium Onion Rings" after reset+fresh-combo+one side).
+                // Medium Cherry Limeade & Medium Groovy Fries" after reset+fresh-combo+one side).
+                // (PR #50 review: Onion Rings is not a combo-side allow-list item -- see
+                // GoldenMenuComboSlotTheoryTests -- so it can no longer stand in here.)
                 ("add", "SONIC® Cheeseburger Combo", "standard", 1, 8.49m),
-                ("add", "Onion Rings", "medium", 1, 3.89m),
+                ("add", "Groovy Fries", "medium", 1, 2.79m),
             ],
             roundTripIndex, ct);
 
@@ -133,7 +135,7 @@ public sealed class ComboAbsorptionTests(HappyHourJustBeforeOpenFixture fixture)
             .Single(i => i.GetProperty("item").GetString()!.Contains("Combo"))
             .GetProperty("display").GetString();
 
-        Assert.Contains("Onion Rings", comboDisplay);
+        Assert.Contains("Groovy Fries", comboDisplay);
         Assert.DoesNotContain("Tots", comboDisplay);
         Assert.DoesNotContain("Cherry Limeade", comboDisplay);
     });

@@ -294,13 +294,13 @@ class OrderStateTests(unittest.TestCase):
         self.assertNotIn("Tots", combo_item.display, "Reset must clear absorbed_side_display, not just the absorbed_sides count")
 
     def test_combo_absorbs_only_one_side(self):
-        """Two standalone sides, combo absorbs only one."""
+        """Two standalone valid sides (Tots, Groovy Fries), combo absorbs only one."""
         session_id = order_state_singleton.create_session()
         order_state_singleton.handle_order_update(session_id, "add", "Tots", "medium", 1, 2.79)
-        order_state_singleton.handle_order_update(session_id, "add", "Onion Rings", "medium", 1, 3.29)
+        order_state_singleton.handle_order_update(session_id, "add", "Groovy Fries", "medium", 1, 2.79)
         order_state_singleton.handle_order_update(session_id, "add", "SuperSONIC Cheeseburger Combo", "standard", 1, 8.49)
         items = order_state_singleton.get_order_items(session_id)
-        side_items = [i for i in items if i.item in ("Tots", "Onion Rings")]
+        side_items = [i for i in items if i.item in ("Tots", "Groovy Fries")]
         self.assertEqual(len(side_items), 1, "Only one side should remain after absorption")
 
     def test_combo_absorbs_only_one_drink(self):
@@ -498,18 +498,38 @@ class OrderStateTests(unittest.TestCase):
         self.assertAlmostEqual(items[0].price, 2.79, places=2)
 
     def test_extra_side_not_absorbed_when_combo_full(self):
-        """Second side added after combo slot filled stays as standalone."""
+        """Second valid side (Groovy Fries) added after combo slot filled stays as standalone."""
         session_id = order_state_singleton.create_session()
         order_state_singleton.handle_order_update(session_id, "add", "SuperSONIC Cheeseburger Combo", "standard", 1, 8.49)
         order_state_singleton.handle_order_update(session_id, "add", "Tots", "medium", 1, 2.79)  # absorbed
-        result_info = order_state_singleton.handle_order_update(session_id, "add", "Onion Rings", "medium", 1, 3.29)  # standalone
+        result_info = order_state_singleton.handle_order_update(session_id, "add", "Groovy Fries", "medium", 1, 2.79)  # standalone
         items = order_state_singleton.get_order_items(session_id)
         item_names = [i.item for i in items]
         self.assertNotIn("Tots", item_names)
-        self.assertIn("Onion Rings", item_names)
+        self.assertIn("Groovy Fries", item_names)
         self.assertFalse(result_info.get("absorbed_into_combo", False))
         summary = order_state_singleton.get_order_summary(session_id)
-        self.assertAlmostEqual(summary.total, 8.49 + 3.29, places=2)
+        self.assertAlmostEqual(summary.total, 8.49 + 2.79, places=2)
+
+    def test_non_allowlisted_side_never_absorbed_free_into_combo(self):
+        """PR #50 must-fix regression: only Tots and Groovy Fries can fill a combo's included
+        side slot (the menu's own combo description says "your choice of a side (Tots or
+        Fries) and a drink"). Every other former "sides"-bucket item (Onion Rings, Mozzarella
+        Sticks, Ched 'R' Peppers, Crispy Tenders, Premium Chicken Bites, the FRITOS(R) wraps,
+        Fritos Chili Cheese Pie, Soft Pretzel Twist, and the Cheese/Chili-Cheese Tots & Fries
+        variants) must be charged in full alongside a combo, never silently absorbed for free."""
+        session_id = order_state_singleton.create_session()
+        order_state_singleton.handle_order_update(session_id, "add", "SONIC® Cheeseburger Combo", "standard", 1, 8.49)
+        result_info = order_state_singleton.handle_order_update(session_id, "add", "Crispy Tenders - 5 Piece", "standard", 1, 6.19)
+        items = order_state_singleton.get_order_items(session_id)
+        item_names = [i.item for i in items]
+        self.assertIn("Crispy Tenders - 5 Piece", item_names, "Non-allow-listed side must remain a standalone line, not be absorbed")
+        self.assertFalse(result_info.get("absorbed_into_combo", False))
+        summary = order_state_singleton.get_order_summary(session_id)
+        self.assertAlmostEqual(summary.total, 8.49 + 6.19, places=2, msg="Rick's PR #50 regression: must total 14.68, not 8.49")
+
+        req = order_state_singleton.get_combo_requirements(session_id)
+        self.assertIn("a side (fries or tots)", req["missing_items"], "The combo's side slot is still unfilled -- Crispy Tenders doesn't count")
 
     # ── Combo conversion with mods regression tests (mod-in-combo-name bug) ──
 
