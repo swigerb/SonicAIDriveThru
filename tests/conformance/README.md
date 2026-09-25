@@ -1313,7 +1313,8 @@ correctly does not match.
 **Precedence between the two keyword lists matters for the discount question, but not for the
 combo-drink-slot question (PR #61 review, must-fix 1).** An off-menu name can contain both a
 fountain word and a shake/blast word at once — `"Cherry Limeade Shake"` (`"limeade"` + `"shake"`),
-`"Sweet Tea Blast"` (`"tea"` + `"blast"`), `"Dr Pepper Shake"`. `_keyword_fallback_combo_drink` is
+`"Strawberry Lemonade Shake"` (`"lemonade"` + `"shake"`), `"Sweet Tea Blast"` (`"tea"` + `"blast"`),
+`"Dr Pepper Shake"`. `_keyword_fallback_combo_drink` is
 an unconditional `or` across all three regexes, so it is not order-dependent — any one of these
 names fills the combo drink slot regardless of which keyword matches first.
 `_keyword_fallback_happy_hour_discounted`, however, must check the shake/blast/malt regex **first**
