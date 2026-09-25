@@ -470,7 +470,13 @@ class SessionUpdateFallbackTests(_RealtimeHarness):
     async def test_unrelated_errors_do_not_trigger_fallback(self):
         browser = await self.client.ws_connect("/realtime")
         await self._until_browser(browser, "session.updated")     # nothing of ours in flight now
-        await browser.send_json({"type": "conversation.item.delete", "item_id": "nope", "event_id": "client_evt_1"})
+        # swigerb/SonicAIDriveThru#31: conversation.item.delete is no longer
+        # forwarded upstream at all -- it isn't in the browser->upstream
+        # allow-list (the real frontend never sends it), so it can no longer
+        # serve as an "unrelated error" vehicle here. Two
+        # input_audio_buffer.commit frames (still allow-listed) stand in
+        # instead, each independently rejected by the fake.
+        await browser.send_json({"type": "input_audio_buffer.commit"})
         await browser.send_json({"type": "input_audio_buffer.commit"})
         await self._until(lambda: len(self.fake.errors) >= 2)
         events = await self._browser_events(browser)
@@ -478,7 +484,7 @@ class SessionUpdateFallbackTests(_RealtimeHarness):
         self.assertEqual(self._fallbacks(), [])
         self.assertEqual(len(self._session_updates()), 1)
         self.assertEqual(sorted(e["error"]["code"] for e in events if e["type"] == "error"),
-                         ["input_audio_buffer_commit_empty", "item_not_found"])
+                         ["input_audio_buffer_commit_empty", "input_audio_buffer_commit_empty"])
         await browser.close()
 
 

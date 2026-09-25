@@ -171,6 +171,90 @@ def _drop_from_client(item: dict) -> bool:
     return item.get("role") == "system"
 
 
+# ── Browser → upstream event allow-list (swigerb/SonicAIDriveThru#31) ──
+
+# Every event type a browser is allowed to send upstream. Derived from what
+# `useRealtime.tsx` (the only frontend code that talks to this socket)
+# actually transmits: `session.update`, `input_audio_buffer.append`/`.clear`,
+# `response.cancel`, plus the legacy `input_audio_buffer.commit` (kept for
+# parity with `_PASSTHROUGH_CLIENT_TYPES`'s fast path -- a malformed/short
+# frame that misses that path's regex still reaches this slow-path check and
+# must still be allowed through). `response.create` is not sent by the real
+# frontend today, but is deliberately kept allow-listed: it is used across
+# many existing conformance scenarios (Ordering/BargeIn/Security) as a
+# same-effect stand-in for a server-VAD-triggered turn, so dropping it
+# outright would treat legitimate test/ops traffic as an attack. Any
+# `"response"` override object on it is still stripped in
+# `_filter_client_to_server` below, so no instruction/tool override can
+# reach upstream through it either way.
+#
+# `extension.*` types are deliberately NOT listed here: they are fully
+# consumed by `_forward_messages`'s from-client-to-server loop (resume,
+# end_session, set_verbose_logging, set_log_to_file, set_voice) before a
+# message ever reaches `_process_message_to_server`, so they never need an
+# entry on this side. A malicious `extension.middle_tier_tool_response` (or
+# any other `extension.*`) sent *directly* by the browser -- documented in
+# tests/conformance/README.md's GA-validation-fidelity finding #3 as
+# currently forwarded unfiltered and rejected only by the real upstream
+# service -- falls through unmatched and is correctly dropped by this
+# allow-list, since it is not one of the entries below.
+_CLIENT_ALLOWED_TYPES = frozenset({
+    "session.update",
+    "input_audio_buffer.append",
+    "input_audio_buffer.clear",
+    "input_audio_buffer.commit",
+    "response.cancel",
+    "response.create",
+})
+
+
+def _filter_client_to_server(message: dict, session_id: str | None = None) -> dict | None:
+    """Allow-list and strip a browser→upstream event before
+    `_process_message_to_server` forwards it (swigerb/SonicAIDriveThru#31).
+
+    Before this filter, only `session.update` was recognised by name --
+    every other client event type, including ones the real frontend never
+    sends, fell through unmatched and was forwarded to the upstream socket
+    completely unchanged. A malicious/compromised browser could therefore:
+
+    1. Send `response.create` carrying a `response.instructions` /
+       `response.tools` / `response.tool_choice` override, hijacking the
+       carhop's prompt or tool surface for that one turn.
+    2. Send `conversation.item.create` with `role: "system"` (or its
+       `"developer"` alias), injecting an operator-trusted instruction into
+       the transcript the model conditions on.
+    3. Send `conversation.item.retrieve` to read back any conversation item
+       verbatim -- including middle-tier-authored ones (rehydration/nudge/
+       tool-result items) that `_drop_from_client` only protects on the
+       server-to-client side, never on a direct client-initiated retrieval.
+
+    The frontend legitimately sends neither `conversation.item.create` nor
+    `conversation.item.retrieve` (verified: no `app/frontend/src` code sends
+    either), so both are simply absent from `_CLIENT_ALLOWED_TYPES` --
+    rejecting the whole event type closes vectors 2 and 3 more robustly than
+    filtering their dangerous sub-fields would. Anything not in the
+    allow-list (these two, or any unrecognised/future type) is dropped
+    entirely: not forwarded, and the socket is not closed -- an unexpected
+    frame on an otherwise-legitimate session is not itself proof of
+    compromise, so we log once at WARNING and keep serving the session.
+
+    Returns the (possibly rewritten) message to forward, or `None` if the
+    whole event must be dropped.
+    """
+    msg_type = message.get("type", "")
+
+    if msg_type not in _CLIENT_ALLOWED_TYPES:
+        logger.warning("Dropped disallowed client→server event type %r (session=%s)", msg_type, session_id)
+        return None
+
+    if msg_type == "response.create" and "response" in message:
+        logger.warning(
+            "Stripped response-level override from client response.create (session=%s)", session_id)
+        message = {k: v for k, v in message.items() if k != "response"}
+
+    return message
+
+
 class ToolResultDirection(Enum):
     TO_SERVER = 1
     TO_CLIENT = 2
@@ -1046,6 +1130,13 @@ class RTMiddleTier:
             return data
 
         message = json.loads(data)
+        session_id = self._sessions.get_session_id(ws)
+        filtered = _filter_client_to_server(message, session_id=session_id)
+        if filtered is None:
+            return None
+        if filtered is not message:
+            data = json.dumps(filtered)
+        message = filtered
         msg_type = message.get("type", "")
         updated_message = data
         if message is not None:
@@ -1070,7 +1161,6 @@ class RTMiddleTier:
                           len(session["tools"]), tool_names, session["tool_choice"])
                     updated_message = json.dumps(message)
                     # Track system message + tool schemas in context window
-                    session_id = self._sessions.get_session_id(ws)
                     ctx_monitor = self._sessions.get_context_monitor(session_id)
                     if ctx_monitor:
                         ctx_monitor.add_content(session.get("instructions", ""))
