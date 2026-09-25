@@ -200,6 +200,42 @@ public static class BackendProfiles
     });
 
     /// <summary>
+    /// PR #54 review follow-up (Rick, post-merge): dedicated profile for
+    /// <c>A_retry_is_not_guest_activity_the_idle_clock_still_closes_the_socket_on_schedule</c>,
+    /// replacing its previous home on <see cref="ShortTimers"/>. That test measures the *gap*
+    /// between two hypotheses (idle clock correctly ignores retries vs. a retry wrongly touching
+    /// it) via wall-clock elapsed time, so its ceiling assertion's margin is exactly the distance
+    /// between "latest realistic correct-code close" and "earliest possible mutant close" --
+    /// unlike every other timer-driven scenario in this suite, widening the *budget itself* here
+    /// (not just idle/grace) directly widens that margin, because both hypotheses' predicted
+    /// close times scale with CONFORMANCE_IDLE_TIMEOUT_SECONDS while only the mutant's also
+    /// depends on the two retry-delay values. ShortTimers' 1s idle_timeout against 0.2s/0.4s
+    /// retry delays measured a correct-code close at 1.013-1.207s (idle_timeout=1s plus at most
+    /// one 0.2s sweep pass) against a would-be mutant close no earlier than ~1.6s (0.2s+0.4s=0.6s
+    /// of retry delay resetting last_activity, plus the 1s idle_timeout from there) -- a 1.4s
+    /// ceiling left only ~190ms of headroom on the correct-code side, tight enough to flake under
+    /// this suite's own heavy concurrent load. Widening idle_timeout to 2s and the retry delays to
+    /// 0.3s/1.2s scales both predictions apart much further: correct code closes by ~2.0-2.2s
+    /// (idle_timeout=2s plus at most one sweep pass), while the mutant can't close before ~3.5s
+    /// (0.3s+1.2s=1.5s of reset last_activity, plus 2s idle_timeout from there) -- a 2.8s ceiling
+    /// now sits almost exactly halfway between the two, leaving ~0.6s of margin on either side
+    /// instead of ~190ms.
+    /// </summary>
+    public static BackendProfile RateLimitIdleInteractionTimers { get; } = new(
+        "RateLimitIdleInteractionTimers", new Dictionary<string, string>
+        {
+            ["CONFORMANCE_TEST_HOOKS"] = "1",
+            ["CONFORMANCE_IDLE_TIMEOUT_SECONDS"] = "2",
+            ["CONFORMANCE_GRACE_SECONDS"] = "2",
+            ["CONFORMANCE_NUDGE_AFTER_SECONDS"] = "2",
+            ["CONFORMANCE_FIRST_FRAME_TIMEOUT_SECONDS"] = "2",
+            ["CONFORMANCE_GREETING_TIMEOUT_SECONDS"] = "2",
+            ["CONFORMANCE_RATE_LIMIT_RETRY_DELAY_SECONDS"] = "0.3",
+            ["CONFORMANCE_RATE_LIMIT_SECOND_RETRY_DELAY_SECONDS"] = "1.2",
+            ["CONFORMANCE_SWEEP_INTERVAL_SECONDS"] = "0.2",
+        });
+
+    /// <summary>
     /// Hooks enabled with the clock frozen at <paramref name="instant"/>, for time-based business
     /// logic such as app/backend/order_state.py's happy-hour pricing. Timers are left at their
     /// production defaults.

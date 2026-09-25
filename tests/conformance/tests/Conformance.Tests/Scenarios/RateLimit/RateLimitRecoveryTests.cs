@@ -70,6 +70,13 @@ public sealed class RateLimitRecoveryTests(ShortTimersConformanceFixture fixture
     // see that file's doc comment for why (echo-suppression's post-greeting cooldown needs
     // several real seconds of headroom that ShortTimers' 1s idle/nudge budget can't provide).
 
+    // A_retry_is_not_guest_activity_the_idle_clock_still_closes_the_socket_on_schedule moved to
+    // RateLimitIdleInteractionTests.cs on the dedicated RateLimitIdleInteractionTimers profile
+    // (PR #54 review follow-up, Rick, post-merge): ShortTimers' 1s idle_timeout against 0.2s/0.4s
+    // retry delays left this test's ceiling assertion only ~190ms of headroom between the latest
+    // realistic correct-code close and the earliest possible mutant close -- see that profile's
+    // own doc comment for the full math and the wider (2s/0.3s/1.2s) values that fix it.
+
     [Fact]
     public Task A_pending_retry_is_cancelled_by_detach() => fixture.RunAsync(async () =>
     {
@@ -108,57 +115,6 @@ public sealed class RateLimitRecoveryTests(ShortTimersConformanceFixture fixture
             f => f.Sequence > boundary && f.Type == "response.create", TimeSpan.FromSeconds(1.5), ct);
         Assert.True(thirdResponseCreate is null,
             "Expected no retried response.create -- detaching should have cancelled the pending retry.");
-    });
-
-    [Fact]
-    public Task A_retry_is_not_guest_activity_the_idle_clock_still_closes_the_socket_on_schedule() => fixture.RunAsync(async () =>
-    {
-        var ct = TestContext.Current.CancellationToken;
-        var connectionTask = fixture.Realtime.WaitForNextConnectionAsync(FrameTimeout, ct);
-        await using var browser = await RealtimeBrowserClient.ConnectAsync(fixture.Backend!.BaseUri, cancellationToken: ct);
-        var connection = await ConnectAndGetPastGreetingAsync(connectionTask, browser, ct);
-
-        // PR #54 review: the previous version of this test only asserted the close arrived
-        // *within 6 seconds*, which cannot distinguish "the idle clock fired on schedule from the
-        // response.create" from "a retry silently touched the idle clock, delaying it" -- both
-        // easily land inside a 6s window. Two scripted failures push both of rate_limit.py's
-        // retries out (FIRST_RETRY_BOUNDS's ~0.2s, then SECOND_RETRY_BOUNDS's ~0.4s after that,
-        // i.e. ~0.6s total), giving a wide, robust gap between the two hypotheses: if retries are
-        // correctly NOT guest activity, idle_timeout=1s from the response.create below plus at
-        // most one 0.2s sweep pass closes by ~1.2s; if a retry wrongly touched the idle clock
-        // (rtmt.py's RateLimitRecovery is constructed with target_ws.send_str directly as
-        // _send_upstream, bypassing from_client_to_server's touch_activity entirely -- see class
-        // doc comment), last activity would reset to ~0.6s and the close would instead land no
-        // earlier than ~1.6s. A stopwatch started at the same response.create send and stopped
-        // when the close is observed measures which actually happened.
-        connection.Script.Enqueue(NoHintRateLimited());
-        connection.Script.Enqueue(NoHintRateLimited());
-
-        // This response.create is the *last real client activity* the idle clock will ever see --
-        // sending it touches last_activity (rtmt.py: response.create is not an audio-append
-        // marker, so from_client_to_server's touch_activity(session_id) call fires for it just
-        // like any other non-audio client frame).
-        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
-        await browser.SendResponseCreateAsync(ct);
-
-        // Confirm both retries actually ran (attempt:1 notification only fires on the *second*
-        // failure) before measuring the close -- otherwise a harness regression that silently
-        // drops a scripted failure could make this pass for the wrong reason (fewer retries than
-        // intended, less activity-touching opportunity for the mutation to expose).
-        var attempt1Notification = await browser.ReceivedFrames.WaitForAsync(
-            f => f.Type == "extension.rate_limited" && f.Json.GetProperty("attempt").GetInt32() == 1,
-            FrameTimeout, ct);
-        Assert.True(attempt1Notification is not null,
-            "Expected extension.rate_limited{attempt:1} after the second scripted failure.");
-
-        await browser.WaitForCloseAsync(TimeSpan.FromSeconds(6), ct);
-        stopwatch.Stop();
-        Assert.Equal((System.Net.WebSockets.WebSocketCloseStatus)4000, browser.CloseStatus);
-        Assert.Equal("idle_timeout", browser.CloseStatusDescription);
-        Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(1.4),
-            $"Idle close took {stopwatch.Elapsed.TotalSeconds:F2}s after the response.create -- expected " +
-            "~1.0-1.2s (idle_timeout plus at most one sweep pass). Anything approaching ~1.6s+ would mean " +
-            "a retry reset the idle clock instead of being correctly ignored by it.");
     });
 
     [Fact]

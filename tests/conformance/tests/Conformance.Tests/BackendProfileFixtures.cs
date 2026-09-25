@@ -40,6 +40,24 @@ public sealed class RateLimitTimersConformanceCollection : ICollectionFixture<Ra
 }
 
 /// <summary>
+/// PR #54 review follow-up (Rick, post-merge): dedicated collection/process for
+/// <see cref="BackendProfiles.RateLimitIdleInteractionTimers"/> -- see that profile's doc comment
+/// for why <c>RateLimitIdleInteractionTests.A_retry_is_not_guest_activity_...</c> needs its own,
+/// wider idle/retry-delay margin rather than staying on <see cref="ShortTimersConformanceFixture"/>.
+/// </summary>
+public sealed class RateLimitIdleInteractionTimersConformanceFixture : ConformanceFixture
+{
+    protected override BackendProfile Profile => BackendProfiles.RateLimitIdleInteractionTimers;
+}
+
+[CollectionDefinition(Name)]
+public sealed class RateLimitIdleInteractionTimersConformanceCollection
+    : ICollectionFixture<RateLimitIdleInteractionTimersConformanceFixture>
+{
+    public const string Name = "ConformanceRateLimitIdleInteractionTimers";
+}
+
+/// <summary>
 /// See <see cref="BackendProfiles.ResumeTimers"/>'s doc comment: an 8-second idle/grace budget
 /// (instead of <see cref="ShortTimersConformanceFixture"/>'s 1-second one) for the multi-round-trip
 /// resume-handshake scenarios that aren't testing idle behaviour themselves. See that profile's
