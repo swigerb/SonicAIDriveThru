@@ -772,6 +772,31 @@ never disagree about which physical size a given spelling means. See
 `GoldenOrderPricingData.Route44.Aliases`/`Route44AliasCases` in this suite for the full alias list
 (now including the punctuation variants `"44 oz"`, `"Route-44"`, `"rt. 44"`).
 
+**`items[].item` may carry a parenthesized customization suffix, and every menuItems.json-based
+classification must strip it before looking anything up (PR #50 review, second round)**:
+customizations travel *inside* `item_name` itself (e.g. `"Tots (Extra Crispy)"`,
+`"Cherry Limeade (Extra Cherries)"` — see `tools.py`'s `update_order`), not as a separate field. A
+naive `item_name.lower()` lookup against `menu_utils.MENU_CATEGORY_MAP` therefore misses every
+customised item and silently falls through to keyword-substring guessing, which can disagree with
+the item's own real menu category — the concrete regression Rick caught in review: a Cheeseburger
+Combo plus `"Chili Cheese Tots (Extra Cheese)"` was absorbing the tots for free (matching the bare
+substring `"tots"`) instead of charging $3.79 in full, because the true item ("Chili Cheese Tots")
+is a real `menuItems.json` item that is *not* one of the two combo-side-slot items. The fix is one
+shared rule, `menu_utils.strip_modifiers()` (a customised name minus its trailing `(...)` suffix,
+whitespace-collapsed), used everywhere a raw item name is turned into a lookup key:
+`infer_category`, `infer_combo_component`, `is_happy_hour_discounted` (all via the private
+`_menu_key()` wrapper) *and* `order_state.py`'s combo-conversion base-name matching (auto-removing a
+standalone entree when its combo is added) — one implementation, so lookup and combo-conversion
+matching can never drift apart on how a customization suffix is stripped. A direct implication: an
+unknown/off-menu item (customised or not) **never** falls back into the combo side slot — only the
+literal, allow-listed `"tots"`/`"groovy fries"` names do (post-modifier-stripping); the drink
+keyword fallback remains for genuinely off-menu fountain drinks (Dr Pepper, Coke, Sprite, root
+beer, ...) and for shakes/blasts/malts, but the latter obey
+`menu_utils._SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED` for the happy-hour-discount question exactly
+like their on-menu counterparts do — that flag is the single switch for every shake/blast, plain or
+customised, on-menu or off. See `app/backend/tests/test_menu_utils.py::CustomisedItemMenuLookupTests`
+and `CustomisedItemMenuLookupTests.cs` in this suite.
+
 All four money fields (`items[].price`, `total`, `tax`, `finalTotal`) are numbers on the wire (not
 quoted, unlike the golden file's storage format) and must always be parsed via
 `JsonElement.GetDecimal()` per the money contract above. Any valid JSON spelling of the same numeric
