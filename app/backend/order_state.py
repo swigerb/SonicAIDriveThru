@@ -2,12 +2,20 @@ import logging
 import os
 import uuid
 from dataclasses import dataclass
+from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 import conformance_hooks
 from config_loader import get_config
-from menu_utils import infer_category, normalize_size
+from menu_utils import (
+    _menu_key,
+    canonical_size_key,
+    infer_combo_component,
+    is_happy_hour_discounted,
+    normalize_size,
+)
 from models import OrderItem, OrderSummary
+from money_utils import format_money, to_decimal
 
 __all__ = ["OrderState", "SessionIdentifiers", "order_state_singleton", "is_happy_hour"]
 
@@ -30,22 +38,23 @@ def is_happy_hour() -> bool:
 
 
 def _infer_combo_component(item_name: str) -> str:
-    """Lightweight category check for combo component validation (sides vs drinks).
+    """Combo-slot-filling check only (sides vs drinks vs "" for neither).
 
-    Delegates to the shared ``infer_category`` in menu_utils to avoid drift.
+    Delegates to the shared ``infer_combo_component`` in menu_utils to avoid drift (#39). This is
+    a SEPARATE question from happy-hour discount eligibility -- see ``_is_happy_hour_discounted``
+    below -- and must never be used to derive it (PR #50 review).
     """
-    cat = infer_category(item_name)
-    if cat in ("sides",):
-        return "sides"
-    if cat in ("drinks", "slushes", "shakes", "shakes & ice cream", "slushes & drinks"):
-        return "drinks"
-    # Fallback: keyword scan for items that don't hit the JSON map
-    n = item_name.lower()
-    if "tot" in n or "fries" in n or "onion rings" in n:
-        return "sides"
-    if any(kw in n for kw in ("slush", "limeade", "ocean water", "drink", "tea", "lemonade", "shake", "blast", "malt", "coke", "sprite", "pepper", "root beer")):
-        return "drinks"
-    return ""
+    return infer_combo_component(item_name)
+
+
+def _is_happy_hour_discounted(item_name: str) -> bool:
+    """Happy-hour discount eligibility check only -- SEPARATE from combo-slot-filling above.
+
+    Delegates to the shared ``is_happy_hour_discounted`` in menu_utils to avoid drift (#39 / PR
+    #50 review: don't derive this from ``_infer_combo_component`` -- they happen to agree on most
+    items today, but combo-slot rules and happy-hour rules are independent business questions.
+    """
+    return is_happy_hour_discounted(item_name)
 
 
 @dataclass
@@ -64,40 +73,72 @@ class OrderState:
             cls._instance.sessions = {}
         return cls._instance
 
+    def _reset_order_state(self, session: dict) -> None:
+        """Clear every per-session order-state field (#41): the order lines themselves plus the
+        combo-absorption bookkeeping (counts *and* display strings). ``create_session`` and
+        ``reset_order`` both delegate here so they can never drift out of sync again — the
+        original bug was ``reset_order`` clearing the absorbed counts but not the absorbed
+        *display* strings, so a fresh combo's display after reset still showed the previous
+        order's absorbed component names.
+        """
+        session["order_state"] = []
+        session["absorbed_sides"] = 0
+        session["absorbed_drinks"] = 0
+        session["absorbed_side_display"] = ""
+        session["absorbed_drink_display"] = ""
+
     def _update_summary(self, session_id: str):
         session = self.sessions[session_id]
         order_items = session["order_state"]
         happy_hour = is_happy_hour()
-        total = 0.0
+        # #46: accumulate in exact Decimal, with NO intermediate rounding anywhere in this
+        # calculation. Only the very last step below converts to float, once, at the Pydantic
+        # model boundary -- eliminating the compounding float-multiplication noise that used to
+        # make the spoken total drift a fraction of a cent off the golden values.
+        happy_hour_discount = to_decimal(_biz_cfg.get("happy_hour_discount", 0.5))
+        tax_rate = to_decimal(_biz_cfg.get("tax_rate", 0.08))
+        total = Decimal("0")
         for item in order_items:
-            item_total = item.price * item.quantity
-            if happy_hour and _infer_combo_component(item.item) == "drinks":
-                item_total *= _biz_cfg.get("happy_hour_discount", 0.5)
+            item_total = to_decimal(item.price) * item.quantity
+            if happy_hour and _is_happy_hour_discounted(item.item):
+                item_total *= happy_hour_discount
             total += item_total
-        tax = total * _biz_cfg.get("tax_rate", 0.08)
+        tax = total * tax_rate
         finalTotal = total + tax
-        summary = OrderSummary(items=order_items, total=total, tax=tax, finalTotal=finalTotal)
+        summary = OrderSummary(
+            items=order_items,
+            total=float(total),
+            tax=float(tax),
+            finalTotal=float(finalTotal),
+            totalDisplay=format_money(total),
+            taxDisplay=format_money(tax),
+            finalTotalDisplay=format_money(finalTotal),
+        )
         session["order_summary"] = summary
         # Cache the JSON representation to avoid repeated Pydantic serialization
         session["order_summary_json"] = summary.model_dump_json()
-        logger.debug("Order summary updated for session %s (items=%d, total=%.2f)", session_id, len(order_items), finalTotal)
+        logger.debug("Order summary updated for session %s (items=%d, total=%s)", session_id, len(order_items), finalTotal)
 
     def create_session(self) -> str:
         session_id = str(uuid.uuid4())
         session_token = str(uuid.uuid4())
-        empty_summary = OrderSummary(items=[], total=0.0, tax=0.0, finalTotal=0.0)
+        empty_summary = OrderSummary(
+            items=[],
+            total=0.0,
+            tax=0.0,
+            finalTotal=0.0,
+            totalDisplay=format_money(0),
+            taxDisplay=format_money(0),
+            finalTotalDisplay=format_money(0),
+        )
         self.sessions[session_id] = {
-            "order_state": [],
             "order_summary": empty_summary,
             "order_summary_json": empty_summary.model_dump_json(),
             "session_token": session_token,
             "round_trip_index": 0,
             "round_trip_token": self._format_round_trip_token(session_token, 0),
-            "absorbed_sides": 0,
-            "absorbed_drinks": 0,
-            "absorbed_side_display": "",
-            "absorbed_drink_display": "",
         }
+        self._reset_order_state(self.sessions[session_id])
         logger.info("Session created: %s", session_id)
         return session_id
 
@@ -113,6 +154,12 @@ class OrderState:
         order_state = session["order_state"]
         result_info = {}
 
+        # #40: canonicalize the size to a single alias-resolved key BEFORE any matching/merging
+        # so different spellings of the same physical size (e.g. "rt44" vs "route 44" vs "44 oz"
+        # vs "ROUTE44") collapse onto one order line and can be removed with any alias, not only
+        # the one it was added with.
+        size = canonical_size_key(size)
+
         resolved = normalize_size(size)
         formatted_size = f"{resolved} " if resolved else ""
 
@@ -123,14 +170,16 @@ class OrderState:
 
             # ── Combo conversion: auto-remove matching standalone entree ──
             if is_combo:
-                combo_base = item_name.lower().replace(" combo", "").replace("®", "").strip()
-                # Strip parenthesized mods so "burger (Pickles Only)" matches "burger"
-                if "(" in combo_base:
-                    combo_base = combo_base[:combo_base.find("(")].strip()
+                # Shared lookup-key rule (menu_utils._menu_key, PR #50 review round 4) so
+                # "burger (Pickles Only)" matches "burger" using the EXACT same normalisation the
+                # menu-lookup functions use elsewhere (paren-stripping, whitespace/NBSP collapse,
+                # lowercasing, "®" removal) -- one rule, one implementation, not two independently
+                # maintained copies of the same "®"-removal logic.
+                combo_base = _menu_key(item_name).replace(" combo", "").strip()
                 for i, existing in enumerate(order_state):
                     if "combo" in existing.item.lower():
                         continue  # skip other combos
-                    existing_base = existing.item.split("(")[0].strip().lower().replace("®", "")
+                    existing_base = _menu_key(existing.item)
                     if existing_base == combo_base:
                         # Carry customization mods (e.g., "Pickles Only") to the combo
                         if "(" in existing.item:
@@ -327,15 +376,16 @@ class OrderState:
         else:
             summary_str = parts[0]
 
-        total = session["order_summary"].finalTotal
-        return f"I have {summary_str}. Your total is {total:.2f}. "
+        # #47/PR #50 follow-up: read the already-computed finalTotalDisplay directly instead of
+        # re-deriving it with format_money(finalTotal) -- there must be exactly one place that
+        # turns the exact Decimal total into a "$0.00" string, so every spoken/displayed money
+        # surface can never drift out of sync with another.
+        return f"I have {summary_str}. Your total is {session['order_summary'].finalTotalDisplay}. "
 
     def reset_order(self, session_id: str):
-        """Clears all items from the current session's order."""
+        """Clears all items and per-session order state from the current session's order (#41)."""
         session = self.sessions[session_id]
-        session["order_state"] = []
-        session["absorbed_sides"] = 0
-        session["absorbed_drinks"] = 0
+        self._reset_order_state(session)
         self._update_summary(session_id)
         logger.info("Order fully reset for session %s", session_id)
 

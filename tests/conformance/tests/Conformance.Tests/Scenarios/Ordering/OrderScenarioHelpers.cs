@@ -241,6 +241,23 @@ public static class OrderScenarioHelpers
     public static decimal GetOrderFinalTotal(string orderSummaryJson) =>
         JsonDocument.Parse(orderSummaryJson).RootElement.GetProperty("finalTotal").GetDecimal();
 
+    /// <summary>
+    /// PR #50 review (should-fix 1, Rick's X1): the wire schema carries pre-rendered
+    /// <c>totalDisplay</c>/<c>taxDisplay</c>/<c>finalTotalDisplay</c> strings alongside the exact
+    /// decimal numbers (#46/#47 single-source-of-truth). These three accessors let tests assert
+    /// the *Display strings directly instead of only the underlying decimals, so a mutation that
+    /// breaks display formatting (e.g. swapping ROUND_HALF_UP for ROUND_HALF_EVEN) is caught even
+    /// when the raw JSON numbers are still exact.
+    /// </summary>
+    public static string GetOrderTotalDisplay(string orderSummaryJson) =>
+        JsonDocument.Parse(orderSummaryJson).RootElement.GetProperty("totalDisplay").GetString()!;
+
+    public static string GetOrderTaxDisplay(string orderSummaryJson) =>
+        JsonDocument.Parse(orderSummaryJson).RootElement.GetProperty("taxDisplay").GetString()!;
+
+    public static string GetOrderFinalTotalDisplay(string orderSummaryJson) =>
+        JsonDocument.Parse(orderSummaryJson).RootElement.GetProperty("finalTotalDisplay").GetString()!;
+
     public static int GetOrderItemCount(string orderSummaryJson) =>
         JsonDocument.Parse(orderSummaryJson).RootElement.GetProperty("items").GetArrayLength();
 

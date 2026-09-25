@@ -93,6 +93,21 @@ describe("order resume in the app", () => {
         expect(screen.getByLabelText("app.stopRecording")).toBeInTheDocument();
     });
 
+    it("session_resumed carries the backend's *Display money strings through to the ticket", async () => {
+        // PR #50 review follow-up: OrderSummaryWire's *Display fields must survive a resume, not
+        // just a fresh order -- the resumed ticket should read the exact backend-rounded strings
+        // (single source of truth), never fall back to a client-side re-round of the numerics.
+        await startConversationWithTots();
+        await act(async () => rt.params.onConnectionLost(transportDrop));
+
+        const order = { ...orderOf(TOTS, LIMEADE), totalDisplay: "$X-TOTAL", taxDisplay: "$X-TAX", finalTotalDisplay: "$X-FINAL" };
+        await act(async () => rt.params.onReceivedSessionResumed(resumedMsg(order)));
+
+        expect(screen.getByText("$X-TOTAL")).toBeInTheDocument();
+        expect(screen.getByText("$X-TAX")).toBeInTheDocument();
+        expect(screen.getByText("$X-FINAL")).toBeInTheDocument();
+    });
+
     it("falls back to tap-to-continue when the browser won't restart the mic", async () => {
         await startConversationWithTots();
         await act(async () => rt.params.onConnectionLost(transportDrop));

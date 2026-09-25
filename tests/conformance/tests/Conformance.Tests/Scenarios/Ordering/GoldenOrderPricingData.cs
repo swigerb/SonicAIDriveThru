@@ -72,6 +72,7 @@ public sealed record ComboAbsorptionScenario(
 /// conforming backend exists (true) -- see the README's "Rendering money for display" section.
 /// </summary>
 public sealed record SpokenTotalCase(
+    string Tag,
     string Description,
     IReadOnlyList<ComboStep> Steps,
     bool HappyHour,

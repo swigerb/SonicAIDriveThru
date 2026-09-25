@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, patch
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from menu_utils import (
+    canonical_size_key,
     infer_category,
     normalize_size,
 )
@@ -29,11 +30,13 @@ from tools import (
     _format_size_human_readable,
     _is_extra_item,
     _search_cache,
+    _search_cfg,
     _SearchCache,
     get_order,
     reset_order,
     search,
     update_order,
+    validate_customization,
 )
 
 # ── Helpers ──
@@ -147,6 +150,56 @@ class SearchErrorHandlingTests(unittest.TestCase):
         self.assertEqual(call_count, 2)
         self.assertIn("[1]", result.text)
 
+    def test_timeout_bounds_the_iteration_not_just_the_initial_call(self):
+        """PR #50 review (should-fix 4): ``azure-search-documents``' async ``SearchClient.search``
+        is lazy -- calling it does no HTTP I/O; the real request only happens once the returned
+        async-iterable is actually iterated (see the comment above ``_fetch_records`` in
+        tools.py). A mock client whose ``search()`` call returns instantly but whose iteration
+        sleeps past the configured timeout reproduces exactly that shape: if
+        ``asyncio.wait_for`` only wrapped the (instant) ``search()`` call, this would never time
+        out. With the fix wrapping the whole collect, it must."""
+        async def _slow_iteration_search(**kwargs):
+            async def _iter():
+                await asyncio.sleep(0.2)
+                yield {"id": "1", "name": "Cherry Limeade", "category": "Slushes", "sizes": "N/A"}
+            return _iter()  # the call itself returns immediately -- the delay is in iterating
+
+        client = AsyncMock()
+        client.search = _slow_iteration_search
+        with patch.dict(_search_cfg, {"timeout_seconds": 0.05}):
+            result = _run(search(client, "cfg", "id", "description", "embedding", False, {"query": "limeade"}))
+        self.assertEqual(result.destination, ToolResultDirection.TO_SERVER)
+        self.assertTrue("try that again" in result.text.lower() or "trouble" in result.text.lower())
+
+    def test_hanging_iterator_times_out_via_search_service_unavailable_error_key(self):
+        """PR #50 review (second round, should-fix, kills Y5): the previous test above proves
+        the timeout fires, but with no ``_prompt_loader`` configured it only ever exercises the
+        hardcoded fallback string in ``tools.py`` -- it can never notice if the *error key*
+        requested on timeout drifted away from ``"search_service_unavailable"`` (e.g. a typo'd
+        key, or accidentally reusing a different error's key), because the fallback text is
+        returned before ``render_error`` is ever called. This test wires up the real
+        ``PromptLoader(brand="sonic")`` (the actual ``error_messages.yaml`` used in production)
+        so the returned text is not the source-code fallback but the literal rendered value of
+        ``search_service_unavailable`` -- reproducing the same hanging-iterator shape (the
+        ``search()`` call returns instantly, the real HTTP request happens during iteration) with
+        ``timeout_seconds: 0.05``."""
+        from prompt_loader import PromptLoader
+
+        async def _hanging_iteration_search(**kwargs):
+            async def _iter():
+                await asyncio.sleep(10)
+                yield {"id": "1", "name": "Cherry Limeade", "category": "Slushes", "sizes": "N/A"}
+
+            return _iter()
+
+        client = AsyncMock()
+        client.search = _hanging_iteration_search
+        loader = PromptLoader(brand="sonic")
+        with patch.dict(_search_cfg, {"timeout_seconds": 0.05}), patch("tools._prompt_loader", loader):
+            result = _run(search(client, "cfg", "id", "description", "embedding", False, {"query": "limeade"}))
+        self.assertEqual(result.destination, ToolResultDirection.TO_SERVER)
+        self.assertEqual(result.text, loader.render_error("search_service_unavailable"))
+
 
 class SearchCacheTests(unittest.TestCase):
     """Test search result caching."""
@@ -236,6 +289,19 @@ class UpdateOrderAddTests(unittest.TestCase):
         self.assertIn("Cherry Limeade", result.text)
         summary = order_state_singleton.get_order_summary(sid)
         self.assertEqual(len(summary.items), 1)
+
+    def test_delta_text_spoken_total_matches_finalTotalDisplay_exactly(self):
+        """PR #50 review follow-up: the delta text's spoken total must be the exact same string
+        as summary.finalTotalDisplay -- there is exactly one format_money() call per mutation
+        (inside OrderSummary), and every spoken surface downstream reads that string rather than
+        recomputing its own."""
+        sid = _make_session()
+        result = _run(update_order({
+            "action": "add", "item_name": "Tots",
+            "size": "medium", "quantity": 1, "price": 2.79,
+        }, sid))
+        summary = order_state_singleton.get_order_summary(sid)
+        self.assertIn(summary.finalTotalDisplay, result.text)
 
     def test_add_multiple_quantity(self):
         sid = _make_session()
@@ -534,6 +600,22 @@ class NormalizeSizeTests(unittest.TestCase):
         self.assertEqual(normalize_size("44"), "Route 44")
         self.assertEqual(normalize_size("44oz"), "Route 44")
 
+    def test_punctuation_and_spelling_aliases_still_display_route_44(self):
+        """PR #50 review follow-up: "Route-44" and "rt. 44" must display like every other Route
+        44 spelling -- these previously fell through to "" because normalize_size looked up
+        SIZE_ALIASES verbatim instead of sharing canonical_size_key's punctuation-stripped lookup.
+        """
+        self.assertEqual(normalize_size("Route-44"), "Route 44")
+        self.assertEqual(normalize_size("rt. 44"), "Route 44")
+        self.assertEqual(normalize_size("44 oz"), "Route 44")
+
+    def test_extra_large_alias_displays_extra_large(self):
+        """PR #50 review follow-up: "Extra Large" must resolve through the same alias table as
+        its own short form "xl" so the two spellings can never end up on different order lines.
+        """
+        self.assertEqual(normalize_size("Extra Large"), "Extra Large")
+        self.assertEqual(normalize_size("xl"), "Extra Large")
+
     def test_hidden_sizes_return_empty(self):
         self.assertEqual(normalize_size("standard"), "")
         self.assertEqual(normalize_size("n/a"), "")
@@ -557,6 +639,32 @@ class NormalizeSizeTests(unittest.TestCase):
 
     def test_none_input_returns_empty(self):
         self.assertEqual(normalize_size(None), "")
+
+
+class CanonicalSizeKeyTests(unittest.TestCase):
+    """canonical_size_key is the wire contract: items[].size on the order-summary payload is
+    documented (README, tests/conformance) to always be this canonical, lowercase, alias-resolved
+    key -- never the raw spoken/typed spelling and never the human-readable display string. These
+    tests pin every known Route 44 spelling (including the punctuation variants added by PR #50
+    review item X3) and the Extra Large/xl pair onto a single key each, so two different spellings
+    of the same size can never land on two different order lines.
+    """
+
+    def test_route_44_aliases_all_collapse_to_one_key(self):
+        aliases = ["rt44", "rt 44", "44", "44oz", "44 oz", "route44", "Route-44", "rt. 44", "Route 44", "ROUTE 44"]
+        for alias in aliases:
+            with self.subTest(alias=alias):
+                self.assertEqual(canonical_size_key(alias), "route 44")
+
+    def test_extra_large_and_xl_collapse_to_one_key(self):
+        self.assertEqual(canonical_size_key("Extra Large"), "xl")
+        self.assertEqual(canonical_size_key("xl"), "xl")
+        self.assertEqual(canonical_size_key("XL"), "xl")
+
+    def test_key_is_always_lowercase(self):
+        for raw in ["MEDIUM", "Small", "  Large  ", "RT44"]:
+            with self.subTest(raw=raw):
+                self.assertEqual(canonical_size_key(raw), canonical_size_key(raw).lower())
 
 
 class InferCategoryTests(unittest.TestCase):
@@ -665,6 +773,32 @@ class ExtrasValidationTests(unittest.TestCase):
             "size": "standard", "quantity": 1, "price": 0.79,
         }, sid))
         self.assertEqual(result.destination, ToolResultDirection.TO_SERVER)
+
+
+class ValidateCustomizationTests(unittest.TestCase):
+    """PR #50 review (third round, minor): validate_customization() used to strip parenthesized
+    modifiers itself via item_name.split("(")[0] — a second, independent implementation of the
+    same rule already centralized as menu_utils.strip_modifiers(). It now reuses that one helper."""
+
+    def test_customised_item_name_is_recognised_by_category_lookup(self):
+        # "Cherry Limeade (Light Ice)" must classify the same as "Cherry Limeade" so the
+        # forbidden-mod list for slushes/drinks (which includes "cheese") still applies.
+        error = validate_customization("Cherry Limeade (Light Ice)", "extra cheese")
+        self.assertIsNotNone(error)
+
+    def test_error_message_base_name_excludes_the_modifier_suffix(self):
+        error = validate_customization("Cherry Limeade (Light Ice)", "extra cheese")
+        self.assertNotIn("(Light Ice)", error)
+        self.assertIn("Cherry Limeade", error)
+
+    def test_plain_item_name_without_modifiers_is_unaffected(self):
+        error = validate_customization("Cherry Limeade", "extra cheese")
+        self.assertIsNotNone(error)
+        self.assertIn("Cherry Limeade", error)
+
+    def test_valid_customization_returns_none(self):
+        error = validate_customization("Cherry Limeade (Light Ice)", "extra cherries")
+        self.assertIsNone(error)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

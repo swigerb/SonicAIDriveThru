@@ -178,11 +178,7 @@ public sealed class UpdateOrderAddRemoveModifyTests(ConformanceFixture fixture)
         return data;
     }
 
-    [Fact(Skip = "order_state.py merges/removes Route 44 lines by matching the raw, un-normalised " +
-                 "size string instead of a canonical size key, so different aliases for the same " +
-                 "physical size ('rt44' vs 'route 44') produce two separate order lines instead " +
-                 "of merging -- #40. Not fixing Python; tracked for the C# backend.",
-        SkipWhen = nameof(BackendUnderTest.IsPython), SkipType = typeof(BackendUnderTest))]
+    [Fact]
     public Task Adding_the_same_drink_with_two_different_Route_44_aliases_merges_into_one_line() => fixture.RunAsync(async () =>
     {
         var ct = TestContext.Current.CancellationToken;
@@ -207,11 +203,32 @@ public sealed class UpdateOrderAddRemoveModifyTests(ConformanceFixture fixture)
         Assert.Equal($"{golden.Route44.ExpectedDisplayPrefix} Cherry Limeade", items[0].GetProperty("display").GetString());
     });
 
-    [Fact(Skip = "order_state.py matches remove against the raw, un-normalised size string, so " +
-                 "removing with a different Route 44 alias than the one used to add (e.g. adding " +
-                 "'rt44' then removing '44oz') is a silent no-op and the line survives -- #40. " +
-                 "Not fixing Python; tracked for the C# backend.",
-        SkipWhen = nameof(BackendUnderTest.IsPython), SkipType = typeof(BackendUnderTest))]
+    /// <summary>PR #50 review (second round, should-fix, kills Rick's Y2): "Extra Large" and "xl"
+    /// must canonicalize to the same size key, exactly like the Route 44 aliases above, so two
+    /// adds spelled differently merge into one order line rather than silently creating two.</summary>
+    [Fact]
+    public Task Adding_the_same_drink_with_Extra_Large_and_xl_merges_into_one_line() => fixture.RunAsync(async () =>
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (browser, connection, roundTripIndex) = await OrderScenarioHelpers.ConnectAndGreetAsync(fixture, ct);
+        await using var _ = browser;
+
+        var result = await OrderScenarioHelpers.RunOrderStepsAsync(
+            connection, browser,
+            [
+                ("add", "Latte", "Extra Large", 1, 4.29m),
+                ("add", "Latte", "xl", 1, 4.29m),
+            ],
+            roundTripIndex, ct);
+
+        var order = JsonDocument.Parse(result.ToolResultJson!).RootElement;
+        var items = order.GetProperty("items");
+        Assert.Equal(1, items.GetArrayLength());
+        Assert.Equal(2, items[0].GetProperty("quantity").GetInt32());
+        Assert.Equal("Extra Large Latte", items[0].GetProperty("display").GetString());
+    });
+
+    [Fact]
     public Task Removing_a_Route_44_drink_with_a_different_alias_than_it_was_added_with_removes_it() => fixture.RunAsync(async () =>
     {
         var ct = TestContext.Current.CancellationToken;
