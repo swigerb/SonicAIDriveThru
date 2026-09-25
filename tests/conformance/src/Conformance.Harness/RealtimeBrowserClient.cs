@@ -27,12 +27,32 @@ public sealed class RealtimeBrowserClient : IAsyncDisposable
     /// </summary>
     private static readonly TimeSpan DisposeGracePeriod = TimeSpan.FromSeconds(2);
 
-    private readonly ClientWebSocket _socket = new();
+    /// <remarks>
+    /// Typed as the abstract <see cref="WebSocket"/> base class, not <see cref="ClientWebSocket"/>,
+    /// specifically so <see cref="CreateForTesting"/> (PR #52 CI follow-up round 4) can wrap an
+    /// arbitrary fake in place of a real connection -- see that factory's doc comment for why.
+    /// </remarks>
+    private readonly WebSocket _socket;
     private readonly CancellationTokenSource _readerCts = new();
     private readonly TaskCompletionSource _closed = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private Task? _readerTask;
     private WebSocketCloseStatus? _observedCloseStatus;
     private string? _observedCloseStatusDescription;
+
+    /// <summary>
+    /// Captured once, eagerly, right after a real <see cref="ClientWebSocket"/> connects (see
+    /// <see cref="ConnectAsync"/>) -- <c>ClientWebSocket.HttpResponseHeaders</c> is a
+    /// <see cref="ClientWebSocket"/>-only member, unavailable once <see cref="_socket"/> is typed
+    /// as the base <see cref="WebSocket"/> class, so this is read out while the concrete type is
+    /// still known rather than read lazily off <see cref="_socket"/> every time
+    /// <see cref="NegotiatedExtensions"/> is queried.
+    /// </summary>
+    private string? _negotiatedExtensions;
+
+    private RealtimeBrowserClient(WebSocket socket)
+    {
+        _socket = socket;
+    }
 
     /// <summary>Every frame the backend has sent down to this client, in arrival order.</summary>
     public FrameLog ReceivedFrames { get; } = new();
@@ -68,28 +88,51 @@ public sealed class RealtimeBrowserClient : IAsyncDisposable
             .ConfigureAwait(false);
         var token = tokenResponse.GetProperty("token").GetString();
 
-        var client = new RealtimeBrowserClient();
+        var clientSocket = new ClientWebSocket();
         // Without this, ClientWebSocket.HttpResponseHeaders is always null regardless of what the
         // server actually negotiated, which silently made NegotiatedExtensions always null too —
         // the deflate test could never fail no matter what the backend did.
-        client._socket.Options.CollectHttpResponseDetails = true;
+        clientSocket.Options.CollectHttpResponseDetails = true;
         if (offerDeflate)
         {
-            client._socket.Options.DangerousDeflateOptions = new WebSocketDeflateOptions();
+            clientSocket.Options.DangerousDeflateOptions = new WebSocketDeflateOptions();
         }
 
         // Real browsers always send Origin on a WebSocket handshake, even same-origin. Default to
         // the backend's own HTTP origin, matching how app/backend/static is actually served.
-        client._socket.Options.SetRequestHeader("Origin", origin ?? $"{backendBaseUri.Scheme}://{backendBaseUri.Authority}");
+        clientSocket.Options.SetRequestHeader("Origin", origin ?? $"{backendBaseUri.Scheme}://{backendBaseUri.Authority}");
 
         // Built manually rather than via UriBuilder: UriBuilder.Scheme silently resets Port to
         // the new scheme's default port when the current port matches the old scheme's default,
         // which would corrupt the dynamically-allocated backend port used throughout the suite.
         var wsUri = new Uri($"ws://{backendBaseUri.Host}:{backendBaseUri.Port}/realtime?token={Uri.EscapeDataString(token ?? "")}");
-        await client._socket.ConnectAsync(wsUri, cancellationToken).ConfigureAwait(false);
+        await clientSocket.ConnectAsync(wsUri, cancellationToken).ConfigureAwait(false);
+
+        var client = new RealtimeBrowserClient(clientSocket)
+        {
+            _negotiatedExtensions = clientSocket.HttpResponseHeaders?.TryGetValue("Sec-WebSocket-Extensions", out var values) == true
+                ? string.Join(", ", values)
+                : null,
+        };
         client._readerTask = client.PumpReceivedFramesAsync(client._readerCts.Token);
         return client;
     }
+
+    /// <summary>
+    /// PR #52 CI follow-up round 4 (swigerb/SonicAIDriveThru#28): test-only seam replacing round
+    /// 3's thread-pool-starvation technique (see <c>Conformance.Tests</c>' fault-handling tests
+    /// for the full history of why). Wraps an arbitrary <see cref="WebSocket"/> -- typically a
+    /// fake whose <see cref="WebSocket.CloseOutputAsync"/> is rigged to throw a specific fault --
+    /// directly, bypassing the real HTTP/WS handshake <see cref="ConnectAsync"/> performs and
+    /// never starting the background reader loop (<c>_readerTask</c> stays <c>null</c>, which
+    /// <see cref="DisposeAsync"/>'s own cleanup already tolerates). This lets a test pin exactly
+    /// what <see cref="CloseAsync"/>/<see cref="DisposeAsync"/> do when the underlying socket
+    /// faults in a specific way, deterministically and instantly -- no real socket, no real
+    /// thread, no timing, so no platform-dependent behaviour to reproduce or accidentally
+    /// destabilize. <c>internal</c>, exposed to <c>Conformance.Tests</c> via
+    /// <c>InternalsVisibleTo</c> (see <c>AssemblyInfo.cs</c>).
+    /// </summary>
+    internal static RealtimeBrowserClient CreateForTesting(WebSocket socket) => new(socket);
 
     /// <summary>The exact `session.update` useRealtime.tsx's startSession() sends.</summary>
     public Task SendStartSessionAsync(bool enableInputAudioTranscription = true, CancellationToken cancellationToken = default)
@@ -157,10 +200,7 @@ public sealed class RealtimeBrowserClient : IAsyncDisposable
         WebSocketJson.SendAsync(_socket, JsonSerializer.SerializeToElement(command), cancellationToken);
 
     /// <summary>The negotiated `Sec-WebSocket-Extensions` response header, or null if none was granted.</summary>
-    public string? NegotiatedExtensions =>
-        _socket.HttpResponseHeaders?.TryGetValue("Sec-WebSocket-Extensions", out var values) == true
-            ? string.Join(", ", values)
-            : null;
+    public string? NegotiatedExtensions => _negotiatedExtensions;
 
     /// <summary>
     /// Initiates a graceful WebSocket close by sending a Close frame. Uses

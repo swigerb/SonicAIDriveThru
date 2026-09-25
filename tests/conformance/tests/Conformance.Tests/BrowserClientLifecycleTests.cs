@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Sockets;
 using System.Net.WebSockets;
 using Xunit;
 using Conformance.Harness;
@@ -171,12 +172,34 @@ public sealed class BrowserClientLifecycleTests(ConformanceFixture fixture)
     /// contention to be meaningful, and the honest round-1 "can't force it alone" note above is
     /// preserved rather than deleted, since it was true and is why round 2 was necessary.
     ///
-    /// Round 3 (isolation fix): the *deterministic* per-test reproduction technique for the same
-    /// bug -- forcing genuine thread-pool starvation rather than relying on full-suite contention
-    /// -- now lives in <c>ThreadPoolStarvationCloseTests</c> (its own file, its own
-    /// <c>DisableParallelization</c> collection), not in this class, since its process-wide
-    /// <c>ThreadPool.SetMinThreads</c> calls would otherwise perturb every other collection's
-    /// timing while xUnit runs collections in parallel.
+    /// Round 3 (isolation attempt, itself superseded): a *deterministic* per-test reproduction
+    /// briefly lived in a separate <c>ThreadPoolStarvationCloseTests</c> class/collection, forcing
+    /// genuine thread-pool starvation (<c>ThreadPool.SetMinThreads(1, 1)</c> plus occupying every
+    /// worker with blocking tasks) instead of relying on full-suite contention. It was isolated
+    /// into its own <c>DisableParallelization</c> collection so its process-wide
+    /// <c>ThreadPool.SetMinThreads</c> call couldn't perturb other collections' timing while xUnit
+    /// runs collections in parallel.
+    ///
+    /// Round 4 (root-caused and replaced): that isolation fix (commit 422b6e1) still crashed CI
+    /// run 36091977281 with a native "Stack overflow." while the isolated collection was running
+    /// alone. Root cause: the occupier-task count was <c>ThreadPool.GetMaxThreads()</c>'s worker
+    /// ceiling times 2 -- and that ceiling defaults to <c>32767</c> on both this machine and the
+    /// CI runner (confirmed by probing <c>ThreadPool.GetMaxThreads</c> directly), so every run of
+    /// either starvation test spawned <b>65,534</b> real, dedicated (<c>LongRunning</c>) OS
+    /// threads. That is inherently unsafe on *any* machine, not just Linux specifically -- it just
+    /// happened to survive (at a cost of ~35 extra seconds of thread creation/teardown overhead)
+    /// on this 24-core/large-memory workstation, while the CI runner's tighter resource limits hit
+    /// a genuine allocation failure partway through spawning them. That failure then needed to be
+    /// reported (the runtime tries to build a stack trace for it via <c>Exception.ToString()</c>,
+    /// which itself needs to allocate/initialize more runtime state via
+    /// <c>RuntimeType.InitializeCache()</c>), which failed again for the same reason, recursing
+    /// through the CLR's own exception-dispatch machinery until the native stack was exhausted --
+    /// exactly the <c>RhThrowEx</c>/<c>DispatchEx</c>/<c>Exception.ToString()</c> recursion in the
+    /// CI trace. This is not a fixable *bound* on the occupier count (any thread-pool-starvation
+    /// technique's safety margin is inherently platform- and load-dependent); it is replaced
+    /// entirely below by <see cref="RealtimeBrowserClient.CreateForTesting"/>, a deterministic,
+    /// zero-thread, zero-timing unit-level seam that pins the exact fault-handling behaviour
+    /// directly instead of trying to reproduce it via real scheduling contention.
     /// </summary>
     [Fact]
     public async Task Explicit_close_does_not_throw_when_the_peer_aborts_first()
@@ -187,6 +210,74 @@ public sealed class BrowserClientLifecycleTests(ConformanceFixture fixture)
 
         await browser.CloseAsync(cancellationToken: ct);
 
+        await browser.DisposeAsync();
+    }
+
+    /// <summary>
+    /// PR #52 CI follow-up round 4 (swigerb/SonicAIDriveThru#28): deterministic, unit-level proof
+    /// that <see cref="RealtimeBrowserClient.CloseAsync"/> treats the exact fault
+    /// <c>ManagedWebSocket</c> was observed producing for a peer TCP reset mid-send (round 2:
+    /// <see cref="OperationCanceledException"/> wrapping <see cref="IOException"/> wrapping
+    /// <see cref="System.Net.Sockets.SocketException"/>) as a benign "already closed" rather than
+    /// letting it escape -- with zero real sockets, zero real threads, and zero timing dependence,
+    /// replacing round 3's thread-pool-starvation technique (see the class doc comment above for
+    /// why that was unsafe by construction, not just flaky on Linux).
+    /// <see cref="ThrowingCloseFakeSocket"/> is injected directly via
+    /// <see cref="RealtimeBrowserClient.CreateForTesting"/>, bypassing the real HTTP/WS handshake
+    /// and the background reader loop entirely.
+    ///
+    /// Mutation-check: removing <c>CloseAsync</c>'s <c>catch (OperationCanceledException) when
+    /// (!cancellationToken.IsCancellationRequested)</c> clause turns this test red (with exactly
+    /// <see cref="ThrowingCloseFakeSocket"/>'s thrown exception, uncaught); restoring it turns it
+    /// green. See the PR #52 CI follow-up report for the run log.
+    /// </summary>
+    [Fact]
+    public async Task Explicit_close_does_not_throw_when_the_peer_resets_mid_send()
+    {
+        var browser = RealtimeBrowserClient.CreateForTesting(new ThrowingCloseFakeSocket());
+        await browser.CloseAsync(cancellationToken: TestContext.Current.CancellationToken);
+    }
+
+    /// <summary>
+    /// PR #52 CI follow-up round 4: the flip side of
+    /// <see cref="Explicit_close_does_not_throw_when_the_peer_resets_mid_send"/> -- proves the
+    /// <c>when (!cancellationToken.IsCancellationRequested)</c> guard genuinely discriminates
+    /// rather than unconditionally swallowing every <see cref="OperationCanceledException"/>. When
+    /// the *caller's own* token is what requested cancellation, <c>CloseAsync</c> must still
+    /// propagate -- even though the underlying fault happens to look identical (an
+    /// <see cref="OperationCanceledException"/> out of the same <see cref="ThrowingCloseFakeSocket"/>).
+    /// This is the exact safety property the round-2 fix's <c>when</c> guard exists for; without a
+    /// test like this, a future edit could accidentally drop the guard (making the catch
+    /// unconditional, silently swallowing genuine caller cancellations) without any test noticing.
+    /// </summary>
+    [Fact]
+    public async Task Explicit_close_propagates_a_genuine_caller_cancellation()
+    {
+        var browser = RealtimeBrowserClient.CreateForTesting(new ThrowingCloseFakeSocket());
+        using var cts = new CancellationTokenSource();
+        await cts.CancelAsync();
+
+        await Assert.ThrowsAsync<OperationCanceledException>(() => browser.CloseAsync(cancellationToken: cts.Token));
+    }
+
+    /// <summary>
+    /// PR #52 CI follow-up round 4: same technique and same round-2 finding as
+    /// <see cref="Explicit_close_does_not_throw_when_the_peer_resets_mid_send"/>, but exercising
+    /// <see cref="RealtimeBrowserClient.DisposeAsync"/>'s own independent attempt at a graceful
+    /// <c>CloseOutputAsync</c> directly. <c>DisposeAsync</c> takes no <see cref="CancellationToken"/>
+    /// parameter at all (its internal <c>CloseOutputAsync</c> call always passes
+    /// <see cref="CancellationToken.None"/>), so unlike <c>CloseAsync</c> there is no
+    /// caller-cancellation case to test here -- its added <c>catch (OperationCanceledException)</c>
+    /// is unconditional (see that method's doc comment for why that's safe).
+    ///
+    /// Mutation-check: removing <c>DisposeAsync</c>'s <c>catch (OperationCanceledException)</c>
+    /// clause turns this test red (with exactly <see cref="ThrowingCloseFakeSocket"/>'s thrown
+    /// exception, uncaught); restoring it turns it green.
+    /// </summary>
+    [Fact]
+    public async Task Plain_disposal_does_not_throw_when_the_peer_resets_mid_send()
+    {
+        var browser = RealtimeBrowserClient.CreateForTesting(new ThrowingCloseFakeSocket());
         await browser.DisposeAsync();
     }
 
@@ -357,12 +448,7 @@ public sealed class BrowserClientLifecycleTests(ConformanceFixture fixture)
     /// for the client to send anything, so it lands regardless of exactly when
     /// <see cref="RealtimeBrowserClient.CloseAsync"/> is called relative to it.
     /// </summary>
-    /// <remarks>
-    /// Internal (not private) so <see cref="ThreadPoolStarvationCloseTests"/> -- which lives in its
-    /// own <c>DisableParallelization</c> collection so its process-wide <c>ThreadPool.SetMinThreads</c>
-    /// calls can't perturb other collections' timing -- can reuse it without duplicating it.
-    /// </remarks>
-    internal sealed class AbruptPeerFakeBackend : IAsyncDisposable
+    private sealed class AbruptPeerFakeBackend : IAsyncDisposable
     {
         private readonly HttpListener _listener = new();
         private readonly TimeSpan _abortDelay;
@@ -446,5 +532,69 @@ public sealed class BrowserClientLifecycleTests(ConformanceFixture fixture)
                 // Best-effort teardown of the accept loop.
             }
         }
+    }
+
+    /// <summary>
+    /// PR #52 CI follow-up round 4 (swigerb/SonicAIDriveThru#28): replaces round 3's
+    /// thread-pool-starvation reproduction technique (see
+    /// <see cref="Explicit_close_does_not_throw_when_the_peer_aborts_first"/>'s doc comment for
+    /// the full history of why that was unsafe by construction -- it spawned
+    /// <c>ThreadPool.GetMaxThreads()</c>'s worker ceiling times 2 (65,534 on both this machine and
+    /// the CI runner, since that ceiling defaults to 32767) real dedicated OS threads every run,
+    /// which crashed CI run 36091977281 with a native stack overflow while the runtime was already
+    /// out of resources trying to report a resulting allocation failure).
+    ///
+    /// A minimal <see cref="WebSocket"/> stand-in whose <see cref="CloseOutputAsync"/> always
+    /// throws exactly the exception shape <c>ManagedWebSocket</c> was observed producing for a
+    /// peer TCP reset encountered mid-send (PR #52 CI follow-up round 2, CI run 36085091969):
+    /// <see cref="OperationCanceledException"/> wrapping <see cref="IOException"/> wrapping
+    /// <see cref="SocketException"/>. Injected directly into <see cref="RealtimeBrowserClient"/>
+    /// via its internal <see cref="RealtimeBrowserClient.CreateForTesting"/> seam, which bypasses
+    /// the real HTTP/WS handshake and never starts the background reader loop -- so none of this
+    /// type's other members (<see cref="ReceiveAsync"/>, <see cref="SendAsync"/>,
+    /// <see cref="CloseAsync"/>) are ever exercised by the tests that use it, and deliberately
+    /// throw <see cref="NotSupportedException"/> rather than silently no-op, so a future test that
+    /// accidentally does exercise them fails loudly instead of passing for the wrong reason.
+    /// </summary>
+    private sealed class ThrowingCloseFakeSocket : WebSocket
+    {
+        private WebSocketState _state = WebSocketState.Open;
+
+        public override WebSocketCloseStatus? CloseStatus => null;
+
+        public override string? CloseStatusDescription => null;
+
+        public override WebSocketState State => _state;
+
+        public override string? SubProtocol => null;
+
+        public override void Abort() => _state = WebSocketState.Aborted;
+
+        public override Task CloseAsync(
+            WebSocketCloseStatus closeStatus, string? statusDescription, CancellationToken cancellationToken) =>
+            throw new NotSupportedException($"{nameof(ThrowingCloseFakeSocket)} only rigs {nameof(CloseOutputAsync)}.");
+
+        public override Task CloseOutputAsync(
+            WebSocketCloseStatus closeStatus, string? statusDescription, CancellationToken cancellationToken)
+        {
+            // Mirrors CI run 36085091969's exact exception chain verbatim (PR #52 CI follow-up
+            // round 2) -- the fault CloseAsync/DisposeAsync's added catch clauses exist to treat
+            // as "already closed" rather than let escape.
+            var socketException = new SocketException((int)SocketError.ConnectionReset);
+            var ioException = new IOException(
+                "Unable to write data to the transport connection: An existing connection was forcibly closed by the remote host.",
+                socketException);
+            throw new OperationCanceledException("The operation was canceled.", ioException);
+        }
+
+        public override void Dispose() => _state = WebSocketState.Closed;
+
+        public override Task<WebSocketReceiveResult> ReceiveAsync(ArraySegment<byte> buffer, CancellationToken cancellationToken) =>
+            throw new NotSupportedException(
+                $"{nameof(ThrowingCloseFakeSocket)} never receives -- the reader loop is never started (see CreateForTesting).");
+
+        public override Task SendAsync(
+            ArraySegment<byte> buffer, WebSocketMessageType messageType, bool endOfMessage, CancellationToken cancellationToken) =>
+            throw new NotSupportedException($"{nameof(ThrowingCloseFakeSocket)} only rigs {nameof(CloseOutputAsync)}.");
     }
 }
