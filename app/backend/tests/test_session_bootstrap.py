@@ -280,6 +280,24 @@ class SessionBootstrapTests(_RealtimeHarness):
         self.assertEqual(self.fake.errors, [])
         await browser.close()
 
+    async def test_unknown_voice_is_rejected_not_forwarded(self):
+        """PR #49 review round 5, "M1": extension.set_voice trusted ANY
+        non-empty string and forwarded it upstream immediately (unlocked
+        path) -- a forged voice name reached the real GA endpoint, and (via
+        the then process-wide self.voice_choice) every later guest's
+        bootstrap too. Only a value from the server's own voice allow-list
+        may ever be forwarded or adopted."""
+        browser = await self.client.ws_connect("/realtime")
+        await self._until(lambda: len(self._session_updates()) >= 1)
+        before = len(self._session_updates())
+        await browser.send_json({"type": "extension.set_voice", "voice": "rick_probe_voice"})
+        await asyncio.sleep(0.2)
+
+        self.assertEqual(len(self._session_updates()), before,
+                          "an unknown voice must never be forwarded upstream")
+        self.assertNotEqual(self.fake.session.get("voice"), "rick_probe_voice")
+        await browser.close()
+
     async def test_bootstrap_does_not_trigger_an_unprompted_greeting(self):
         """Greeting belongs to the browser's session.update (mic pressed), not to
         the bootstrap session.updated that arrives as soon as the page connects."""

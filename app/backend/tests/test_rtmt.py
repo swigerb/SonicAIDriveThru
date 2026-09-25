@@ -47,6 +47,7 @@ from rtmt import (
     _filter_client_to_server,
     _origin_matches_host,
     _sanitize_turn_detection,
+    _sanitize_voice,
     _to_ga_session,
     create_hmac_token,
     validate_hmac_token,
@@ -2083,6 +2084,38 @@ class ExtensionSetVoiceTests(unittest.TestCase):
             session = json.loads(rtmt.build_voice_update(v))["session"]
             self.assertEqual(session["audio"]["output"]["voice"], v)
             self.assertNotIn("voice", session)
+
+    def test_rtmt_defaults_allowed_voices_to_the_ten_ga_voices(self):
+        """No config.yaml / configure_realtime_model call at all (e.g. a bare
+        `RTMiddleTier(...)` in a script or test) must still reject a forged
+        voice -- the allow-list defaults on construction, not only once
+        `configure_realtime_model` runs."""
+        rtmt = self._make_rtmt()
+        self.assertEqual(rtmt.allowed_voices, GA_REALTIME_VOICES)
+
+
+class SanitizeVoiceTests(unittest.TestCase):
+    """PR #49 review round 5, "M1": extension.set_voice must only ever adopt
+    a value from the server's own voice allow-list."""
+
+    def test_known_voice_is_returned(self):
+        self.assertEqual(_sanitize_voice("coral", GA_REALTIME_VOICES), "coral")
+
+    def test_unknown_voice_is_rejected(self):
+        self.assertIsNone(_sanitize_voice("rick_probe_voice", GA_REALTIME_VOICES))
+
+    def test_empty_string_is_rejected(self):
+        self.assertIsNone(_sanitize_voice("", GA_REALTIME_VOICES))
+
+    def test_non_string_is_rejected(self):
+        for candidate in (None, 1, ["coral"], {"voice": "coral"}, True):
+            self.assertIsNone(_sanitize_voice(candidate, GA_REALTIME_VOICES), candidate)
+
+    def test_custom_allow_list_is_honoured(self):
+        """A per-brand override (config.yaml's model.allowed_voices) narrows
+        or replaces the default set entirely."""
+        self.assertEqual(_sanitize_voice("marin", frozenset({"marin"})), "marin")
+        self.assertIsNone(_sanitize_voice("coral", frozenset({"marin"})))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -373,6 +373,33 @@ def _filter_client_to_server(message: dict, session_id: str | None = None) -> di
     return {k: v for k, v in message.items() if k in allowed_keys}
 
 
+# Voices `extension.set_voice` may adopt (PR #49 review round 5, "M1"). The
+# handler used to trust ANY non-empty string the browser sent, forward it
+# upstream immediately (unlocked path), and -- before #43 was fixed -- adopt
+# it as the process-wide default for every later guest too. Defaults to the
+# ten GA voices `app/frontend/src/lib/voices.ts` offers the picker (kept in
+# sync by hand: the frontend is deliberately not imported into the Python
+# backend). Overridable per brand via config.yaml's `model.allowed_voices`
+# (see `configure_realtime_model`) for sibling drive-thru brand deployments.
+_DEFAULT_ALLOWED_VOICES = frozenset({
+    "alloy", "ash", "ballad", "coral", "echo",
+    "sage", "shimmer", "verse", "marin", "cedar",
+})
+
+
+def _sanitize_voice(candidate: Any, allowed_voices: frozenset[str]) -> str | None:
+    """Validate a browser-supplied `extension.set_voice` value.
+
+    Returns the voice name if it is a non-empty string present in
+    `allowed_voices`, else `None`. Callers must drop the whole message and
+    log a WARNING on `None` rather than forwarding an unknown value upstream
+    or adopting it as this connection's (or any future connection's) voice.
+    """
+    if isinstance(candidate, str) and candidate in allowed_voices:
+        return candidate
+    return None
+
+
 # Exact-match fast path for the browser's mic-audio frame (PR #49 review
 # round 2, "M1"). `_process_message_to_server`'s previous fast path used
 # `audio_pipeline.TYPE_RE` -- an unanchored `"type":"..."` substring search --
@@ -749,6 +776,9 @@ class RTMiddleTier:
     max_tokens: int | None = None
     disable_audio: bool | None = None
     voice_choice: str | None = None
+    # Server-side allow-list extension.set_voice may pick from (PR #49 review
+    # round 5, "M1"); see `_DEFAULT_ALLOWED_VOICES` and `configure_realtime_model`.
+    allowed_voices: frozenset[str] = _DEFAULT_ALLOWED_VOICES
     # audio.input.transcription.model. whisper-1 works on Azure without its own
     # deployment; gpt-4o(-mini)-transcribe are ACCEPTED by session.update but
     # then fail every turn with DeploymentNotFound unless deployed separately.
@@ -1670,8 +1700,16 @@ class RTMiddleTier:
                                     if ext_msg.get("type") == "extension.set_voice":
                                         if session_id:
                                             self._sessions.touch_activity(session_id)
-                                        new_voice = ext_msg.get("voice", "")
-                                        if new_voice:
+                                        # M1: only a value from the server's own allow-list may
+                                        # ever be forwarded or adopted -- anything else (a forged
+                                        # voice name) is dropped with a WARNING, not forwarded
+                                        # upstream and not adopted anywhere.
+                                        new_voice = _sanitize_voice(ext_msg.get("voice"), self.allowed_voices)
+                                        if new_voice is None:
+                                            logger.warning(
+                                                "Dropped extension.set_voice with an unknown/invalid voice %r (session=%s)",
+                                                ext_msg.get("voice"), session_id)
+                                        else:
                                             self.voice_choice = new_voice
                                             logger.info("Voice changed to %s for session %s", new_voice, session_id)
                                             if assistant_audio_seen:
@@ -1887,6 +1925,11 @@ def configure_realtime_model(rtmt: RTMiddleTier, model_cfg: dict, environ: Any =
     rtmt.parallel_tool_calls = None if parallel is None else bool(parallel)
     switch = env.get("AZURE_OPENAI_REALTIME_REASONING_MODEL")
     rtmt.reasoning_model = parse_reasoning_model(switch if switch else model_cfg.get("reasoning_model"))
+    configured_voices = model_cfg.get("allowed_voices")
+    if configured_voices:
+        rtmt.allowed_voices = frozenset(str(v) for v in configured_voices)
+    else:
+        rtmt.allowed_voices = _DEFAULT_ALLOWED_VOICES
     if rtmt.reasoning_effort is not None and not rtmt._reasoning_model():
         logger.info("Deployment %s is not treated as a reasoning model (reasoning_model=%s); `reasoning` "
                     "(effort=%s) will not be sent", rtmt.deployment,
