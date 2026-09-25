@@ -505,6 +505,12 @@
   `ComboSlotTests` and `HappyHourDiscountTests` in `CustomisedItemMenuLookupTests.cs`. Mutation
   check: reverting either regex to its round-4 form fails exactly the 6 new conformance rows (3
   combo-slot + 3 happy-hour), the other 16 stay green.
+- **README documentation corrections (should-fix 2):** "lowercase" is now stated as
+  culture-invariant (C#'s `ToLowerInvariant()`, not the culture-sensitive `ToLower()`); the
+  whitespace-collapse step now states the Python-side rule precisely (`str.isspace()`, which
+  Python's `str.split()` uses internally) and notes that every `menuItems.json` name's whitespace
+  is either an ASCII space or a single NBSP, so C#'s `char.IsWhiteSpace` — which also treats NBSP
+  as whitespace — agrees on every real name without special-casing.
 
 #### 42. Customised Items Must Be Normalised Before Every Menu Lookup (Summer — Backend Dev, PR #50 review round 2)
 - **Root cause: customizations live *inside* `item_name`, and lookups didn't account for that.**

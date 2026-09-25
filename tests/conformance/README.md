@@ -808,10 +808,15 @@ C# does the same thing, not just "something similar")**, applied in this order t
    `"Tots (Extra (Really) Crispy)"` — only partially matches and leaves a stray `)` in the result
    (`"Tots Crispy)"`); this is a deliberate fail-safe, not a bug: the mangled string matches no real
    menu key, so the item falls through to full-price/no-discount rather than risking a wrong match.
-2. Collapse all whitespace via `str.split()`/`" ".join(...)`, which treats Unicode whitespace
-   (including U+00A0 NBSP, present verbatim in some `menuItems.json` names, e.g. the OREO Blast) the
-   same as an ordinary space — no special-casing needed.
-3. Lowercase (`str.lower()`).
+2. Collapse all whitespace via `str.split()`/`" ".join(...)`, which uses the same definition as
+   Python's `str.isspace()` — this treats Unicode whitespace (including U+00A0 NBSP, present
+   verbatim in some `menuItems.json` names, e.g. the OREO Blast) the same as an ordinary space, no
+   special-casing needed. Every whitespace character actually used across `menuItems.json` names is
+   either an ordinary ASCII space or a single NBSP, and C#'s `char.IsWhiteSpace` also classifies
+   NBSP as whitespace, so a C# reimplementation agrees on every real name without any extra rule.
+3. Lowercase, **culture-invariantly** (`str.lower()` on the Python side; C# must use
+   `ToLowerInvariant()`, not the culture-sensitive `ToLower()`, so casing can never depend on the
+   host's current culture/locale).
 4. Remove the `®` character (`str.replace("®", "")`). This used to be a second, separate rule that
    only lived in `order_state.py`'s combo-conversion base-name matching; PR #50 review round 4 found
    that `MENU_CATEGORY_MAP` itself was still keyed by bare `name.lower()` (no `®` removal), so a
