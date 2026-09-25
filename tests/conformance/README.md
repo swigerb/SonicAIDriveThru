@@ -751,7 +751,10 @@ summary:
   ],
   "total": <number>,
   "tax": <number>,
-  "finalTotal": <number>
+  "finalTotal": <number>,
+  "totalDisplay": "<$0.00 string>",
+  "taxDisplay": "<$0.00 string>",
+  "finalTotalDisplay": "<$0.00 string>"
 }
 ```
 
@@ -763,6 +766,23 @@ value is equivalent on the wire (`10.185`, `10.1850`, `1.0185e1` all parse to th
 value, per `AssertMoneyEqual`. `search`'s `tool_result` is always `null`
 (it's `ToolResultDirection.TO_SERVER`-only and never reaches the browser at all) — its
 model-visible content is instead the plain-text `function_call_output` sent upstream.
+
+**`totalDisplay`/`taxDisplay`/`finalTotalDisplay` (#47, additive)**: three extra string fields on
+`OrderSummary` (`app/backend/models.py`), each the exact-decimal, `format_money()`-rendered
+`"$0.00"` string for the corresponding numeric field — i.e. the *same* round-half-up display rule
+documented below in "Rendering money for display", computed server-side from the pre-float-conversion
+`Decimal` before it's ever exposed as a JSON number. They are additive: every existing consumer that
+only reads the four numeric fields is unaffected, and this suite's exact-decimal contract above still
+applies unchanged to `total`/`tax`/`finalTotal`/`items[].price`. They exist because the frontend
+ticket (`app/frontend/src/components/ui/order-summary.tsx`) previously re-derived its own display
+strings from the numeric fields with `.toFixed(2)`, which cannot reliably distinguish e.g.
+`88.04499999999999` from `88.045` (both meant to be the exact decimal `88.045`) once either has
+already degraded into a noisy IEEE-754 double — the backend's `Decimal` pipeline is the only place
+with access to the true exact value, so it is the single source of truth for what the guest reads
+on the ticket. Pydantic auto-fills any of the three fields that a caller omits (via
+`format_money()` on the numeric field), so pre-existing direct `OrderSummary(...)` construction
+sites never need to change, but `order_state.py`'s two real call sites pass the more-precise,
+pre-float-conversion values explicitly.
 
 ### Rendering money for display (PR #38 re-review should-fix 2)
 
@@ -782,11 +802,12 @@ for half-cent-landing totals: it rendered with `float`'s `:.2f` format specifier
 through IEEE-754 double and can disagree with *every* consistent decimal rounding rule (round half
 away from zero, round half to even, etc.) depending on the specific value's binary representation.
 As of #46, every spoken-money surface (`tools.py`'s prompt/template paths, `order_state.py`'s
-`get_order` readback) routes through `format_money()`, which derives its `Decimal` from the same
-pre-float-conversion values used for the exact wire numerics and rounds with `ROUND_HALF_UP` — so it
-now agrees with this suite's round-half-up rule exactly, including for values that land precisely on
-a half cent (e.g. `5.265` → `$5.27`, never `$5.26`). The previously `Skip`'d half-cent spoken-text
-assertions (`SpokenTotalHalfCentTests`, referencing #46) are un-skipped and green.
+`get_order` readback, and the `*Display` wire fields above) routes through `format_money()`, which
+derives its `Decimal` from the same pre-float-conversion values used for the exact wire numerics and
+rounds with `ROUND_HALF_UP` — so it now agrees with this suite's round-half-up rule exactly,
+including for values that land precisely on a half cent (e.g. `5.265` → `$5.27`, never `$5.26`). The
+previously `Skip`'d half-cent spoken-text assertions (`SpokenTotalHalfCentTests`, referencing #46)
+are un-skipped and green.
 
 ### `response.cancel` still emits the normal `.done`-shaped events (#8 follow-up)
 

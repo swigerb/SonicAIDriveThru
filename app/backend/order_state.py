@@ -87,7 +87,15 @@ class OrderState:
             total += item_total
         tax = total * tax_rate
         finalTotal = total + tax
-        summary = OrderSummary(items=order_items, total=float(total), tax=float(tax), finalTotal=float(finalTotal))
+        summary = OrderSummary(
+            items=order_items,
+            total=float(total),
+            tax=float(tax),
+            finalTotal=float(finalTotal),
+            totalDisplay=format_money(total),
+            taxDisplay=format_money(tax),
+            finalTotalDisplay=format_money(finalTotal),
+        )
         session["order_summary"] = summary
         # Cache the JSON representation to avoid repeated Pydantic serialization
         session["order_summary_json"] = summary.model_dump_json()
@@ -96,7 +104,15 @@ class OrderState:
     def create_session(self) -> str:
         session_id = str(uuid.uuid4())
         session_token = str(uuid.uuid4())
-        empty_summary = OrderSummary(items=[], total=0.0, tax=0.0, finalTotal=0.0)
+        empty_summary = OrderSummary(
+            items=[],
+            total=0.0,
+            tax=0.0,
+            finalTotal=0.0,
+            totalDisplay=format_money(0),
+            taxDisplay=format_money(0),
+            finalTotalDisplay=format_money(0),
+        )
         self.sessions[session_id] = {
             "order_summary": empty_summary,
             "order_summary_json": empty_summary.model_dump_json(),
