@@ -86,7 +86,27 @@ public sealed class BrowserConformanceFixture : IAsyncLifetime
     /// <summary>
     /// Wraps a scenario body exactly like <see cref="ConformanceFixture.RunAsync"/> (whose
     /// diagnostics-on-failure and no-leaked-connections checks this still gets, via
-    /// delegation) but additionally honours a missing-browser-channel skip.
+    /// delegation) but additionally honours a missing-browser-channel skip, and re-verifies (never
+    /// blindly swallows) a "new backend error(s) above the baseline" failure that turns out to be
+    /// composed entirely of <see cref="IsBenignProactorTeardownIncident"/> matches (see that
+    /// method's own doc comment for the root cause and evidence).
+    ///
+    /// This test category is the only one in the suite that drives a *real* browser (Playwright's
+    /// Chromium) against a live `/realtime` WebSocket, and both a genuine page reload
+    /// (<c>page.ReloadAsync()</c>, itself part of what several of these scenarios legitimately
+    /// need to exercise -- e.g. "reload restores the session") and ordinary Playwright
+    /// <c>IBrowserContext</c>/page teardown at the end of a test sever that live socket the same
+    /// abrupt way a real browser tab closing or navigating away would (WebSocket close code 1001,
+    /// "going away"), not the clean, explicit code-1000 close every other scenario's plain .NET
+    /// <c>RealtimeBrowserClient</c> uses. On Windows only, that abrupt severance can race CPython's
+    /// ProactorEventLoop teardown path and log one benign, well-known
+    /// <c>ConnectionResetError: [WinError 10054]</c> that has nothing to do with this scenario's
+    /// own assertions or with rtmt.py's own application logic -- see
+    /// <see cref="IsBenignProactorTeardownIncident"/>. Swallowing that specific, positively
+    /// re-verified failure here (rather than loosening <see cref="ConformanceFixture.RunAsync"/>'s
+    /// shared, zero-tolerance check, or granting every Browser scenario a blind numeric error
+    /// allowance that could just as easily mask two unrelated real bugs) keeps every other
+    /// scenario in the suite -- Browser or not -- exactly as strict as before.
     /// </summary>
     public async Task RunAsync(Func<Task> body)
     {
@@ -95,7 +115,69 @@ public sealed class BrowserConformanceFixture : IAsyncLifetime
             Assert.Skip(_browserSkipReason);
             return;
         }
-        await _inner.RunAsync(body).ConfigureAwait(false);
+
+        var filteredBefore = Backend?.UnhandledErrorCount(IsBenignProactorTeardownIncident) ?? 0;
+        try
+        {
+            await _inner.RunAsync(body).ConfigureAwait(false);
+        }
+        catch (InvalidOperationException ex) when (
+            Backend is not null &&
+            ex.Message.Contains("new backend error(s) above the baseline", StringComparison.Ordinal) &&
+            Backend.UnhandledErrorCount(IsBenignProactorTeardownIncident) == filteredBefore)
+        {
+            // _inner.RunAsync's own unfiltered check just failed on *something* new, but
+            // re-counting with the benign-aware filter shows the filtered count never moved at
+            // all -- every "new" incident it saw was positively identified, by exact content, as
+            // this one known-benign signature and nothing else. A genuine new backend defect
+            // always moves the filtered count too and is never swallowed here.
+        }
+    }
+
+    /// <summary>
+    /// True for an unhandled-error incident that is exactly CPython's documented, still-open (as
+    /// of the 3.12 runtime this suite pins), Windows-only ProactorEventLoop teardown race:
+    /// <c>Lib/asyncio/proactor_events.py</c>'s <c>_call_connection_lost</c> calls
+    /// <c>self._sock.shutdown(socket.SHUT_RDWR)</c> from its <c>finally:</c> block with no
+    /// exception handling around it at all (confirmed by reading that source directly against
+    /// the pinned runtime); if the peer has *already* reset the TCP connection by the time that
+    /// scheduled callback runs -- which a real browser abruptly severing a live WebSocket
+    /// (context/page teardown, or a genuine <c>page.ReloadAsync()</c>, both close code 1001) can
+    /// easily race -- <c>shutdown()</c> raises <c>ConnectionResetError: [WinError 10054]</c>. That
+    /// raise happens inside asyncio's own default unhandled-callback-exception handler, entirely
+    /// outside rtmt.py's <c>_forward_messages</c> (whose own <c>except ConnectionResetError:
+    /// pass</c> only guards its own coroutine body, never event-loop machinery scheduled
+    /// separately from it) -- no application-code change could ever catch it, and the equivalent
+    /// Linux/macOS <c>SelectorEventLoop</c> transport-close path has no such call at all, so this
+    /// exact race cannot manifest there. See https://github.com/python/cpython/issues/83413
+    /// (still open).
+    ///
+    /// Because of asyncio's specific "Exception in callback" log shape (as opposed to a plain
+    /// <c>logger.exception(...)</c>), this single Python-side event is actually logged as *two*
+    /// separate <see cref="CapturedProcessOutput.CountUnhandledErrors()"/> incidents -- a
+    /// one-line <c>ERROR:asyncio:Exception in callback ...</c> header (its very next line,
+    /// <c>handle: &lt;Handle ...&gt;</c>, is not indented, so it doesn't chain onto the header as
+    /// a continuation) immediately followed by a second incident starting at
+    /// <c>Traceback (most recent call last):</c>. Both are matched here, individually, by exact
+    /// content -- this method is invoked once per incident by
+    /// <see cref="CapturedProcessOutput.CountUnhandledErrors(Func{IReadOnlyList{string}, bool})"/>.
+    /// </summary>
+    internal static bool IsBenignProactorTeardownIncident(IReadOnlyList<string> incidentLines)
+    {
+        if (incidentLines is [
+                "ERROR:asyncio:Exception in callback _ProactorBasePipeTransport._call_connection_lost(None)",
+            ])
+        {
+            return true;
+        }
+
+        return incidentLines.Count > 0 &&
+            incidentLines[0] is "Traceback (most recent call last):" &&
+            incidentLines[^1].StartsWith(
+                "ConnectionResetError: [WinError 10054]", StringComparison.Ordinal) &&
+            incidentLines.Any(line =>
+                line.Contains("proactor_events.py", StringComparison.Ordinal) &&
+                line.Contains("_call_connection_lost", StringComparison.Ordinal));
     }
 }
 
