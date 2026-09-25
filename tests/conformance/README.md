@@ -770,22 +770,23 @@ The exact-decimal contract above governs every wire/golden numeric field (`total
 `finalTotal`, `items[].price`) — there is no rounding anywhere in that arithmetic. Separately, the
 **spoken/human-readable `$X.XX` text** the model reads back to the guest (and any `.2f`-style
 display formatting) is presentation-only and follows its own, additional rule: round the exact
-decimal to two places using **round half away from zero** (C#: `decimal` value with
-`Math.Round(value, 2, MidpointRounding.AwayFromZero)`). This rule only ever consumes the exact
-decimal as input — it must never feed back into subtotal/tax/finalTotal math, and it is
-independent of (not a replacement for) the wire/golden exact-decimal contract.
+decimal to two places using **round half up** (C#: `decimal` value with
+`Math.Round(value, 2, MidpointRounding.AwayFromZero)`; Python: `app/backend/money_utils.py::format_money`,
+which converts the value to `Decimal` first — never through a binary `float` intermediate — and
+rounds with `decimal.ROUND_HALF_UP`). This rule only ever consumes the exact decimal as input — it
+must never feed back into subtotal/tax/finalTotal math, and it is independent of (not a
+replacement for) the wire/golden exact-decimal contract.
 
-Python's actual behavior does not implement this (or any single) decimal rounding rule for
-half-cent-landing totals: it renders with `float`'s `:.2f` format specifier, which round-trips
+**(#46, resolved)** Python previously did not implement this (or any single) decimal rounding rule
+for half-cent-landing totals: it rendered with `float`'s `:.2f` format specifier, which round-trips
 through IEEE-754 double and can disagree with *every* consistent decimal rounding rule (round half
 away from zero, round half to even, etc.) depending on the specific value's binary representation.
-Rick's 200k-order simulation found hundreds of disagreements for values that land exactly on a half
-cent. Golden cases whose `finalTotal` lands exactly on a half cent (e.g. a scenario engineered so
-pre-tax subtotal + tax produces an `X.XX5` total) therefore have their spoken-text assertion
-`Skip`'d, referencing #46 — this is a known, filed Python defect, not a harness or contract defect.
-Non-half-cent cases are not affected by this ambiguity and their spoken-text assertions stay
-active, so a backend that (for example) speaks the pre-tax subtotal instead of the final total is
-still caught today.
+As of #46, every spoken-money surface (`tools.py`'s prompt/template paths, `order_state.py`'s
+`get_order` readback) routes through `format_money()`, which derives its `Decimal` from the same
+pre-float-conversion values used for the exact wire numerics and rounds with `ROUND_HALF_UP` — so it
+now agrees with this suite's round-half-up rule exactly, including for values that land precisely on
+a half cent (e.g. `5.265` → `$5.27`, never `$5.26`). The previously `Skip`'d half-cent spoken-text
+assertions (`SpokenTotalHalfCentTests`, referencing #46) are un-skipped and green.
 
 ### `response.cancel` still emits the normal `.done`-shaped events (#8 follow-up)
 

@@ -28,7 +28,7 @@ public sealed class SpokenTotalTests(HappyHourJustBeforeOpenFixture fixture)
     {
         var ct = TestContext.Current.CancellationToken;
         var golden = GoldenOrderPricingData.Load(RepoPaths.FindRepoRoot());
-        var spokenCase = golden.SpokenTotalCases.Single(c => !c.LandsOnHalfCent);
+        var spokenCase = golden.SpokenTotalCases.Single(c => c.Tag == "activeNonHalfCent");
         Assert.False(spokenCase.HappyHour, "This fixture pins the clock outside the happy-hour window.");
 
         var (browser, connection, roundTripIndex) = await OrderScenarioHelpers.ConnectAndGreetAsync(fixture, ct);
@@ -46,6 +46,51 @@ public sealed class SpokenTotalTests(HappyHourJustBeforeOpenFixture fixture)
         Assert.Contains(spokenCase.ExpectedSpokenTotalText, result.FunctionCallOutputText, StringComparison.Ordinal);
     });
 
+    /// <summary>Rick's N21 (#46): a whole-cent total whose cents happen to be a multiple of ten
+    /// (e.g. $10.80) must still render both trailing decimal places, not truncate to "$10.8".</summary>
+    [Fact]
+    public Task Spoken_total_with_trailing_zero_shows_two_decimal_places() => fixture.RunAsync(async () =>
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var golden = GoldenOrderPricingData.Load(RepoPaths.FindRepoRoot());
+        var spokenCase = golden.SpokenTotalCases.Single(c => c.Tag == "trailingZero");
+        Assert.False(spokenCase.HappyHour, "This fixture pins the clock outside the happy-hour window.");
+
+        var (browser, connection, roundTripIndex) = await OrderScenarioHelpers.ConnectAndGreetAsync(fixture, ct);
+        await using var _ = browser;
+
+        var steps = spokenCase.Steps.Select(s => (s.Action, s.Item, s.Size, s.Quantity, s.Price));
+        var result = await OrderScenarioHelpers.RunOrderStepsAsync(connection, browser, steps, roundTripIndex, ct);
+
+        OrderScenarioHelpers.AssertMoneyEqual(
+            spokenCase.ExpectedFinalTotal, OrderScenarioHelpers.GetOrderFinalTotal(result.ToolResultJson!));
+
+        Assert.Contains(spokenCase.ExpectedSpokenTotalText, result.FunctionCallOutputText, StringComparison.Ordinal);
+    });
+
+    /// <summary>Rick's N21 (#46): a non-midpoint value whose thousandths digit forces a round-up
+    /// (9.0396 -> $9.04), distinct from the exact-half-cent case above -- proves the fix isn't
+    /// merely a ceiling that rounds every fractional cent up.</summary>
+    [Fact]
+    public Task Spoken_total_rounds_up_a_non_midpoint_value() => fixture.RunAsync(async () =>
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var golden = GoldenOrderPricingData.Load(RepoPaths.FindRepoRoot());
+        var spokenCase = golden.SpokenTotalCases.Single(c => c.Tag == "roundUpNonMidpoint");
+        Assert.False(spokenCase.HappyHour, "This fixture pins the clock outside the happy-hour window.");
+
+        var (browser, connection, roundTripIndex) = await OrderScenarioHelpers.ConnectAndGreetAsync(fixture, ct);
+        await using var _ = browser;
+
+        var steps = spokenCase.Steps.Select(s => (s.Action, s.Item, s.Size, s.Quantity, s.Price));
+        var result = await OrderScenarioHelpers.RunOrderStepsAsync(connection, browser, steps, roundTripIndex, ct);
+
+        OrderScenarioHelpers.AssertMoneyEqual(
+            spokenCase.ExpectedFinalTotal, OrderScenarioHelpers.GetOrderFinalTotal(result.ToolResultJson!));
+
+        Assert.Contains(spokenCase.ExpectedSpokenTotalText, result.FunctionCallOutputText, StringComparison.Ordinal);
+    });
+
 }
 
 // Separate class/collection because this case needs happy hour ACTIVE (the half-cent finalTotal
@@ -54,14 +99,12 @@ public sealed class SpokenTotalTests(HappyHourJustBeforeOpenFixture fixture)
 [Collection(HappyHourAtOpenCollection.Name)]
 public sealed class SpokenTotalHalfCentTests(HappyHourAtOpenFixture fixture)
 {
-    [Fact(Skip = "Lands exactly on a half cent; Python's float `:.2f` formatting does not " +
-                 "reproduce any single consistent rounding convention for such totals -- #46.",
-        SkipWhen = nameof(BackendUnderTest.IsPython), SkipType = typeof(BackendUnderTest))]
+    [Fact]
     public Task Spoken_total_text_matches_the_exact_final_total_half_cent() => fixture.RunAsync(async () =>
     {
         var ct = TestContext.Current.CancellationToken;
         var golden = GoldenOrderPricingData.Load(RepoPaths.FindRepoRoot());
-        var spokenCase = golden.SpokenTotalCases.Single(c => c.LandsOnHalfCent);
+        var spokenCase = golden.SpokenTotalCases.Single(c => c.Tag == "halfCent");
         Assert.True(spokenCase.HappyHour, "This fixture pins the clock inside the happy-hour window.");
 
         var (browser, connection, roundTripIndex) = await OrderScenarioHelpers.ConnectAndGreetAsync(fixture, ct);

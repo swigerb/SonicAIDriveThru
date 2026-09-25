@@ -2,12 +2,14 @@ import logging
 import os
 import uuid
 from dataclasses import dataclass
+from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 import conformance_hooks
 from config_loader import get_config
 from menu_utils import canonical_size_key, infer_combo_component, normalize_size
 from models import OrderItem, OrderSummary
+from money_utils import format_money, to_decimal
 
 __all__ = ["OrderState", "SessionIdentifiers", "order_state_singleton", "is_happy_hour"]
 
@@ -71,19 +73,25 @@ class OrderState:
         session = self.sessions[session_id]
         order_items = session["order_state"]
         happy_hour = is_happy_hour()
-        total = 0.0
+        # #46: accumulate in exact Decimal, with NO intermediate rounding anywhere in this
+        # calculation. Only the very last step below converts to float, once, at the Pydantic
+        # model boundary -- eliminating the compounding float-multiplication noise that used to
+        # make the spoken total drift a fraction of a cent off the golden values.
+        happy_hour_discount = to_decimal(_biz_cfg.get("happy_hour_discount", 0.5))
+        tax_rate = to_decimal(_biz_cfg.get("tax_rate", 0.08))
+        total = Decimal("0")
         for item in order_items:
-            item_total = item.price * item.quantity
+            item_total = to_decimal(item.price) * item.quantity
             if happy_hour and _infer_combo_component(item.item) == "drinks":
-                item_total *= _biz_cfg.get("happy_hour_discount", 0.5)
+                item_total *= happy_hour_discount
             total += item_total
-        tax = total * _biz_cfg.get("tax_rate", 0.08)
+        tax = total * tax_rate
         finalTotal = total + tax
-        summary = OrderSummary(items=order_items, total=total, tax=tax, finalTotal=finalTotal)
+        summary = OrderSummary(items=order_items, total=float(total), tax=float(tax), finalTotal=float(finalTotal))
         session["order_summary"] = summary
         # Cache the JSON representation to avoid repeated Pydantic serialization
         session["order_summary_json"] = summary.model_dump_json()
-        logger.debug("Order summary updated for session %s (items=%d, total=%.2f)", session_id, len(order_items), finalTotal)
+        logger.debug("Order summary updated for session %s (items=%d, total=%s)", session_id, len(order_items), finalTotal)
 
     def create_session(self) -> str:
         session_id = str(uuid.uuid4())
@@ -333,7 +341,7 @@ class OrderState:
             summary_str = parts[0]
 
         total = session["order_summary"].finalTotal
-        return f"I have {summary_str}. Your total is {total:.2f}. "
+        return f"I have {summary_str}. Your total is {format_money(total)}. "
 
     def reset_order(self, session_id: str):
         """Clears all items and per-session order state from the current session's order (#41)."""
