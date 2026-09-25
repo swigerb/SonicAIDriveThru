@@ -357,7 +357,8 @@ def _sanitize_turn_detection(
         _warn_dropped_frame(
             limiter,
             "Sanitized client turn_detection: dropped out-of-bounds/invalid sub-key(s) %s and "
-            "disallowed sub-key(s) %s (session=%s)", dropped, extra, session_id)
+            "disallowed sub-key(s) %s (session=%s)",
+            _truncate_key_list_for_log(dropped), _truncate_key_list_for_log(extra), session_id)
     return sanitized
 
 
@@ -379,6 +380,30 @@ def _truncate_for_log(value: Any, max_len: int = 64) -> str:
     if len(text) <= max_len:
         return text
     return f"{text[:max_len]}...(truncated, {len(text)} chars total)"
+
+
+def _truncate_key_list_for_log(keys: list, max_items: int = 10) -> str:
+    """Render a browser-supplied list of dict key NAMES for a log line,
+    bounded in both dimensions (PR #58 re-review, "F2").
+
+    `_truncate_for_log` bounds any single browser-supplied *value*, but the
+    stripped/disallowed key-name lists logged by `_filter_client_to_server`
+    (top-level keys) and `_sanitize_turn_detection` (`turn_detection`
+    sub-keys) were passed straight to `%s` as a Python list -- a forged frame
+    can put an arbitrarily long string as a dict key (JSON object keys are
+    just strings), or supply a huge number of bogus keys, and either one
+    reproduces the same unbounded-log-line risk `_truncate_for_log` closes
+    for values. Each key name is truncated individually first (so one
+    pathological key can't blow up the line even when `max_items` would
+    otherwise keep it), then the list itself is capped to the first
+    `max_items` entries with a "(+N more)" count for the rest.
+    """
+    rendered = [_truncate_for_log(k) for k in keys[:max_items]]
+    remaining = len(keys) - len(rendered)
+    text = f"[{', '.join(rendered)}]"
+    if remaining > 0:
+        text += f" (+{remaining} more)"
+    return text
 
 
 class _ClientFrameDropWarningLimiter:
@@ -506,7 +531,7 @@ def _filter_client_to_server(
     if dropped_keys:
         _warn_dropped_frame(
             limiter, "Stripped disallowed top-level key(s) %s from client %s (session=%s)",
-            dropped_keys, msg_type, session_id)
+            _truncate_key_list_for_log(dropped_keys), msg_type, session_id)
 
     filtered = {k: v for k, v in message.items() if k in allowed_keys}
 

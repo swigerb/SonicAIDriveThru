@@ -61,6 +61,7 @@ from rtmt import (
     _to_ga_session,
     _ToolFailureTracker,
     _truncate_for_log,
+    _truncate_key_list_for_log,
     create_hmac_token,
     validate_hmac_token,
 )
@@ -895,6 +896,45 @@ class TruncateForLogTests(unittest.TestCase):
         rendered = _truncate_for_log(value, max_len=64)
         self.assertNotIn("truncated", rendered)
         self.assertEqual(rendered, repr(value))
+
+
+class TruncateKeyListForLogTests(unittest.TestCase):
+    """PR #58 re-review ("F2"): the browser-supplied key-NAME lists logged at
+    WARNING by `_filter_client_to_server` (stripped top-level keys) and
+    `_sanitize_turn_detection` (disallowed sub-keys) went through `%s`
+    unbounded -- a forged frame with a single multi-megabyte key name, or a
+    huge number of bogus keys, could still produce a multi-megabyte log line
+    even after `_truncate_for_log` capped every other browser-supplied value.
+    `_truncate_key_list_for_log` must bound both dimensions: any individual
+    key name's length, and how many key names are rendered at all.
+    """
+
+    def test_short_key_list_is_rendered_unchanged(self):
+        rendered = _truncate_key_list_for_log(["foo", "bar"])
+        self.assertEqual(rendered, "['foo', 'bar']")
+
+    def test_one_megabyte_key_name_gives_a_bounded_log_line(self):
+        huge_key = "k" * (1024 * 1024)
+        rendered = _truncate_key_list_for_log([huge_key])
+        # Comfortably less than the 1 MB input -- the per-key truncation applies even
+        # when there's only a single key, well under the max_items cap.
+        self.assertLess(len(rendered), 200)
+        self.assertIn("truncated", rendered)
+
+    def test_more_than_max_items_keys_are_capped_with_a_count(self):
+        keys = [f"key{i}" for i in range(25)]
+        rendered = _truncate_key_list_for_log(keys, max_items=10)
+        for i in range(10):
+            self.assertIn(f"'key{i}'", rendered)
+        for i in range(10, 25):
+            self.assertNotIn(f"'key{i}'", rendered)
+        self.assertIn("(+15 more)", rendered)
+
+    def test_many_huge_key_names_still_give_a_bounded_log_line(self):
+        keys = ["k" * (1024 * 1024) for _ in range(100)]
+        rendered = _truncate_key_list_for_log(keys, max_items=10)
+        self.assertLess(len(rendered), 2000)
+        self.assertIn("(+90 more)", rendered)
 
 
 class ClientFrameDropWarningLimiterTests(unittest.TestCase):
