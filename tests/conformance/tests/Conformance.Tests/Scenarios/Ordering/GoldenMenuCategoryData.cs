@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Conformance.Harness;
 
 namespace Conformance.Tests.Scenarios.Ordering;
@@ -17,7 +18,15 @@ public sealed record MenuCategoryCase(string Item, string Category, string Combo
 
 public sealed record GoldenMenuCategoryData(string Description, IReadOnlyList<MenuCategoryCase> Items)
 {
-    private static readonly JsonSerializerOptions Options = new() { PropertyNameCaseInsensitive = true };
+    // PR #50 review cheap follow-up: unitPrice is now a quoted exact-decimal string in the golden
+    // JSON (matching golden-order-pricing.json's money convention), so AllowReadingFromString lets
+    // it deserialize straight into `decimal` with no intermediate `double` -- consistent with every
+    // other golden money value in this test suite.
+    private static readonly JsonSerializerOptions Options = new()
+    {
+        PropertyNameCaseInsensitive = true,
+        NumberHandling = JsonNumberHandling.AllowReadingFromString,
+    };
 
     public static GoldenMenuCategoryData Load(string repoRoot)
     {
