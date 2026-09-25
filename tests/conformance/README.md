@@ -1271,13 +1271,27 @@ all because there is no word boundary between "milk" and "shake" (both are word 
 guest's spoken `"Chocolate Milkshake"` fell all the way through to unclassified. Matching either a
 normal word boundary OR the literal `"milk"` immediately before the keyword resolves that specific
 compound without loosening the boundary for anything else — a nonsense `"Overshake Deluxe"` still
-correctly does not match. Every genuine on-menu item still resolves via `MENU_CATEGORY_MAP`
+correctly does not match.
+
+**Precedence between the two keyword lists matters for the discount question, but not for the
+combo-drink-slot question (PR #61 review, must-fix 1).** An off-menu name can contain both a
+fountain word and a shake/blast word at once — `"Cherry Limeade Shake"` (`"limeade"` + `"shake"`),
+`"Sweet Tea Blast"` (`"tea"` + `"blast"`), `"Dr Pepper Shake"`. `_keyword_fallback_combo_drink` is
+an unconditional `or` across all three regexes, so it is not order-dependent — any one of these
+names fills the combo drink slot regardless of which keyword matches first.
+`_keyword_fallback_happy_hour_discounted`, however, must check the shake/blast/malt regex **first**
+so that a name matching both resolves as a shake/blast for the discount question — obeying
+`_SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED` — rather than falling into the fountain branch (always
+discounted). Checking fountain first was the bug: it silently discounted every one of the four
+names above even with the flag `False`.
+
+Every genuine on-menu item still resolves via `MENU_CATEGORY_MAP`
 directly and never reaches these fallbacks at all — see
 `test_menu_utils.py::MenuCategoryMapDirectResolutionTests`, which patches both fallback functions to
 raise and asserts classification never touches them for any of the 60 `menuItems.json` names.
 
 See `app/backend/tests/test_menu_utils.py::KeywordFallbackWordBoundaryTests`,
-`KeywordOverCorrectionTests`, `MenuCategoryMapDirectResolutionTests`, and
+`KeywordOverCorrectionTests`, `KeywordFallbackPrecedenceTests`, `MenuCategoryMapDirectResolutionTests`, and
 `CustomisedItemMenuLookupTests.cs`'s `ParenGroupNormalisationTests` in this suite for the
 paren-group-stripping edge cases (two groups, mid-string group, nested/unbalanced group) end to end
 against the live backend.

@@ -256,6 +256,35 @@ class TotsAliasNormalisationTests(unittest.TestCase):
             self.assertFalse(is_happy_hour_discounted(name), name)
 
 
+class KeywordFallbackPrecedenceTests(unittest.TestCase):
+    """PR #61 review (must-fix 1): ``_keyword_fallback_happy_hour_discounted`` checked the
+    fountain-drink keywords BEFORE the shake/blast/malt keywords, so an off-menu name that
+    happens to contain both a fountain word and a shake/blast word (e.g. "Cherry Limeade Shake"
+    contains "limeade"; "Sweet Tea Blast" contains "tea") returned the fountain-drink answer
+    (always discounted) instead of obeying ``_SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED`` -- the
+    single flag Brian's decision made the ONE switch for every shake/blast. The fix checks the
+    shake/blast/malt regex FIRST. Combo-drink-slot eligibility (``_keyword_fallback_combo_drink``)
+    is an unconditional OR of all three regexes and was never order-dependent -- these names must
+    still fill the combo drink slot regardless of which keyword "wins" for the discount
+    question."""
+
+    def test_shake_blast_names_containing_a_fountain_word_are_not_discounted(self):
+        for name in ("Cherry Limeade Shake", "Strawberry Lemonade Shake", "Dr Pepper Shake", "Sweet Tea Blast"):
+            self.assertFalse(is_happy_hour_discounted(name), name)
+            self.assertEqual(infer_combo_component(name), "drinks", name)
+
+    def test_shake_blast_names_containing_a_fountain_word_obey_the_flag(self):
+        with patch.object(menu_utils, "_SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED", True):
+            for name in ("Cherry Limeade Shake", "Strawberry Lemonade Shake", "Dr Pepper Shake", "Sweet Tea Blast"):
+                self.assertTrue(is_happy_hour_discounted(name), name)
+
+    def test_pure_fountain_names_are_still_unconditionally_discounted(self):
+        """Sanity check: a name with no shake/blast/malt keyword at all is unaffected by the
+        reordering -- it still hits the fountain branch and is always discounted."""
+        for name in ("Cherry Limeade", "Sweet Tea"):
+            self.assertTrue(is_happy_hour_discounted(name), name)
+
+
 class KeywordFallbackWordBoundaryTests(unittest.TestCase):
     """PR #50 review (round 4, must-fix): the off-menu keyword fallbacks used to be plain
     substring checks (``kw in normalized``), so the keyword "tea" matched inside "steak" -- an

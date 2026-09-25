@@ -374,11 +374,20 @@ def _keyword_fallback_happy_hour_discounted(normalized: str) -> bool:
     """Happy-hour-discount fallback for items that aren't in menuItems.json at all. Fountain
     drinks are always discounted; shakes/blasts/malts obey
     ``_SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED`` so that flag is the single switch for every
-    shake/blast, on-menu or off, plain or customised (PR #50 review)."""
-    if _DR_PEPPER_RE.search(normalized) or _FOUNTAIN_DRINK_KEYWORD_RE.search(normalized):
-        return True
+    shake/blast, on-menu or off, plain or customised (PR #50 review).
+
+    Checks the shake/blast/malt regex FIRST (PR #61 review, must-fix 1): an off-menu name can
+    contain both a shake/blast word AND a fountain word -- e.g. "Cherry Limeade Shake" ("limeade"
+    + "shake"), "Sweet Tea Blast" ("tea" + "blast"), "Dr Pepper Shake" -- and must resolve as a
+    shake/blast for the DISCOUNT question (obeying the flag) even though it would also match the
+    fountain branch. This precedence is deliberately the opposite of
+    ``_keyword_fallback_combo_drink``, which is an unconditional OR across all three regexes and
+    is NOT order-dependent -- these same names must still fill the combo drink slot regardless of
+    which keyword "wins" the discount question."""
     if _SHAKE_BLAST_KEYWORD_RE.search(normalized):
         return _SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED
+    if _DR_PEPPER_RE.search(normalized) or _FOUNTAIN_DRINK_KEYWORD_RE.search(normalized):
+        return True
     return False
 
 

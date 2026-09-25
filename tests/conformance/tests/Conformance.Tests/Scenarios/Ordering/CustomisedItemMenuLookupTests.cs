@@ -238,6 +238,40 @@ public sealed class CustomisedItemMenuLookupTests
                 Assert.Equal(1, OrderScenarioHelpers.GetOrderItemCount(result.ToolResultJson!));
             });
 
+        /// <summary>PR #61 review (must-fix 1): the combo-drink-slot question is unaffected by
+        /// the keyword-precedence fix -- these names contain both a fountain word and a
+        /// shake/blast word, and must still fill the combo drink slot regardless of which keyword
+        /// "wins" the (separate) happy-hour-discount question. See the sibling Theory in
+        /// <see cref="HappyHourDiscountTests"/> for the discount side of the same names.</summary>
+        [Theory]
+        [InlineData("Cherry Limeade Shake")]
+        [InlineData("Strawberry Lemonade Shake")]
+        [InlineData("Dr Pepper Shake")]
+        [InlineData("Sweet Tea Blast")]
+        public Task Off_menu_shake_or_blast_containing_a_fountain_keyword_still_absorbs_into_the_combo_drink_slot(string item) =>
+            fixture.RunAsync(async () =>
+            {
+                var ct = TestContext.Current.CancellationToken;
+                const decimal unitPrice = 4.69m; // placeholder -- see comment on the off-menu drink test above
+
+                var (browser, connection, roundTripIndex) = await OrderScenarioHelpers.ConnectAndGreetAsync(fixture, ct);
+                await using var _ = browser;
+
+                var result = await OrderScenarioHelpers.RunOrderStepsAsync(
+                    connection, browser,
+                    [
+                        ("add", BaseComboName, BaseComboSize, 1, BaseComboPrice),
+                        ("add", item, "medium", 1, unitPrice),
+                    ],
+                    roundTripIndex, ct);
+
+                OrderScenarioHelpers.AssertMoneyEqual(
+                    BaseComboPrice,
+                    OrderScenarioHelpers.GetOrderTotal(result.ToolResultJson!),
+                    $"'{item}' contains a fountain keyword but is a shake/blast and must still absorb into the combo drink slot.");
+                Assert.Equal(1, OrderScenarioHelpers.GetOrderItemCount(result.ToolResultJson!));
+            });
+
         /// <summary>PR #50 review (round 4): pins the word-boundary fix for the fountain-drink
         /// keyword fallback -- a plain substring check let "tea" match inside "steak", so this
         /// genuinely off-menu item (not in menuItems.json at all) was silently absorbed into a
@@ -466,6 +500,40 @@ public sealed class CustomisedItemMenuLookupTests
                     expectedTotal,
                     OrderScenarioHelpers.GetOrderFinalTotal(result.ToolResultJson!),
                     $"'{item}' is an off-menu spoken shake variant and must be full price during happy hour (Brian's decision).");
+            });
+
+        /// <summary>PR #61 review (must-fix 1): pins the keyword-precedence bug directly against
+        /// the live backend, not just the pytest -- these off-menu names contain BOTH a
+        /// fountain-drink word ("limeade"/"lemonade"/Dr Pepper/"tea") and a shake/blast word
+        /// ("shake"/"blast"), and must resolve as a shake/blast for the DISCOUNT question (full
+        /// price, obeying the flag) even though a fountain-drink-first check would have wrongly
+        /// discounted them. Combo-drink-slot eligibility is unaffected either way -- see the
+        /// sibling Theory in <see cref="ComboSlotTests"/>.</summary>
+        [Theory]
+        [InlineData("Cherry Limeade Shake")]
+        [InlineData("Strawberry Lemonade Shake")]
+        [InlineData("Dr Pepper Shake")]
+        [InlineData("Sweet Tea Blast")]
+        public Task Off_menu_shake_or_blast_containing_a_fountain_keyword_is_full_price_during_happy_hour(string item) =>
+            fixture.RunAsync(async () =>
+            {
+                var ct = TestContext.Current.CancellationToken;
+                const decimal unitPrice = 4.69m; // placeholder -- see comment on the off-menu drink test above
+
+                var (browser, connection, roundTripIndex) = await OrderScenarioHelpers.ConnectAndGreetAsync(fixture, ct);
+                await using var _ = browser;
+
+                var result = await OrderScenarioHelpers.RunOrderStepsAsync(
+                    connection, browser,
+                    [("add", item, "medium", 1, unitPrice)],
+                    roundTripIndex, ct);
+
+                var rules = GoldenOrderPricingData.Load(RepoPaths.FindRepoRoot()).BusinessRules;
+                var expectedTotal = unitPrice * (1 + rules.TaxRate); // NOT multiplied by HappyHourDiscount
+                OrderScenarioHelpers.AssertMoneyEqual(
+                    expectedTotal,
+                    OrderScenarioHelpers.GetOrderFinalTotal(result.ToolResultJson!),
+                    $"'{item}' contains a fountain keyword but is a shake/blast and must be full price during happy hour (keyword precedence bug, PR #61).");
             });
     }
 
