@@ -188,6 +188,7 @@ jobs:
         run: |
           set -o pipefail
           dotnet test Conformance.slnx \
+            --filter "Category!=Browser" \
             --logger "trx;LogFileName=conformance.trx" \
             --logger "console;verbosity=detailed" \
             --results-directory TestResults \
@@ -198,6 +199,12 @@ jobs:
           # Python backend wedged and never answering /health) must produce a crash/hang dump and
           # fail the job well before the job-level timeout-minutes kill, instead of silently
           # eating the whole 20-minute budget with no diagnostic artifact at all.
+          #
+          # PR #54 review (blocker B2): without --filter "Category!=Browser", this job ran the
+          # Category=Browser scenarios too (its own dotnet test has no filter), directly
+          # contradicting conformance-browser's rationale below that a real-browser
+          # failure/timeout "can never block or slow down the fast black-box … scenarios" -- the
+          # CI log for run 36107586429 showed all 5 OrderResumeBrowserTests running in both jobs.
 
       - name: Upload conformance test results on failure
         if: failure()
@@ -212,15 +219,17 @@ jobs:
   # Issues #10 / #26: the Category=Browser real-browser subset of the conformance suite
   # (tests/conformance/tests/Conformance.Tests/Scenarios/Browser), kept as its own job -- not
   # folded into the `conformance` matrix above -- so a real-browser failure/timeout can never
-  # block or slow down the fast black-box HTTP/WebSocket-only scenarios, and so its
-  # runner-provided-browser dependency stays isolated. ubuntu-latest ships Google Chrome stable
-  # (see actions/runner-images), which Conformance.Harness.BrowserChannelPolicy auto-detects at
-  # /usr/bin/google-chrome -- Playwright launches it by channel ("chrome"), so this job never
-  # downloads a browser. Microsoft.Playwright's own Node driver ships inside the NuGet package
-  # restored below (over the same corporate-proxy-backed NuGet feed every other job already
-  # uses), so no `playwright install` step is needed either; per this suite's binding rules, if
-  # that ever stopped being true this job must fail loudly rather than silently reach out past
-  # the proxy for a driver download.
+  # block or slow down the fast black-box HTTP/WebSocket-only scenarios (see the main job's own
+  # --filter "Category!=Browser", added in the PR #54 review), and so its runner-provided-browser
+  # dependency stays isolated. ubuntu-latest ships Google Chrome stable (see actions/runner-images),
+  # which Conformance.Harness.BrowserChannelPolicy auto-detects at /usr/bin/google-chrome --
+  # Playwright launches it by channel ("chrome"), so this job never downloads a browser.
+  # Microsoft.Playwright's own Node driver ships inside the NuGet package restored below, from
+  # this runner's default NuGet feed -- the same as every other job in this workflow (there is no
+  # repo-level nuget.config or .npmrc pinning a proxy feed; enforcing one is tracked separately as
+  # part of the #52 infra work). Per this suite's binding rules, if the driver ever stopped
+  # shipping inside the package, this job must fail loudly rather than silently reach out for a
+  # separate download.
   conformance-browser:
     name: Conformance suite (Category=Browser)
     runs-on: ubuntu-latest
