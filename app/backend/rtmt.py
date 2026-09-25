@@ -236,6 +236,16 @@ _CLIENT_TOP_LEVEL_KEYS: dict[str, frozenset[str]] = {
     "response.create": frozenset({"type", "event_id"}),
 }
 
+# Value-shape validation for the top-level keys above (PR #49 review round 5,
+# "S3"): the allow-list only constrains which keys survive, not their shape.
+# `event_id`/`response_id` are short opaque tokens -- useRealtime.tsx never
+# sends anything but a short alphanumeric string for either -- and `audio` is
+# always base64. See `_filter_client_to_server`'s docstring for why an
+# invalid `event_id` only drops the key while an invalid `response_id` drops
+# the whole frame.
+_CLIENT_EVENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_CLIENT_BASE64_RE = re.compile(r"^[A-Za-z0-9+/]*={0,2}$")
+
 # Session keys the browser may legitimately set (PR #49 review round 2,
 # "M3"): exactly what useRealtime.tsx's startSession() sends (see
 # `_BOOTSTRAP_CLIENT_SESSION` below, which mirrors the same two keys).
@@ -266,6 +276,10 @@ _TURN_DETECTION_NUMERIC_BOUNDS = {
     "prefix_padding_ms": (0, 5000),
     "silence_duration_ms": (0, 5000),
 }
+# PR #49 review round 5, "S3": prefix_padding_ms/silence_duration_ms are
+# millisecond COUNTS -- only a plain int is a legitimate value (300.5 is
+# Rick's probe). threshold legitimately is a float (e.g. 0.7) and is exempt.
+_TURN_DETECTION_INT_ONLY_KEYS = frozenset({"prefix_padding_ms", "silence_duration_ms"})
 
 
 def _sanitize_turn_detection(value: Any, session_id: str | None = None) -> dict | None:
@@ -281,12 +295,15 @@ def _sanitize_turn_detection(value: Any, session_id: str | None = None) -> dict 
 
     Each numeric sub-key is bounds-checked independently and dropped (not the
     whole object) if it is out of range or the wrong type: `threshold` must be
-    a number in `[0, 1]`; `prefix_padding_ms`/`silence_duration_ms` must be
-    numbers in `[0, 5000]`. `bool` is deliberately rejected for all three even
-    though Python's `bool` is an `int` subclass, since `true`/`false` is never
-    a legitimate value for any of them. Any other sub-key (`create_response`,
-    `interrupt_response`, `idle_timeout_ms`, ...) is dropped unconditionally --
-    it is simply never in the allow-list, regardless of its value.
+    a number (`int` or `float`) in `[0, 1]`; `prefix_padding_ms`/
+    `silence_duration_ms` must be plain `int`s (not `float` -- PR #49 review
+    round 5 "S3": a millisecond count like `300.5` is never legitimate, and
+    `useRealtime.tsx` never sends one) in `[0, 5000]`. `bool` is deliberately
+    rejected for all three even though Python's `bool` is an `int` subclass,
+    since `true`/`false` is never a legitimate value for any of them. Any
+    other sub-key (`create_response`, `interrupt_response`, `idle_timeout_ms`,
+    ...) is dropped unconditionally -- it is simply never in the allow-list,
+    regardless of its value.
     """
     if not isinstance(value, dict) or value.get("type") != "server_vad":
         return None
@@ -296,7 +313,11 @@ def _sanitize_turn_detection(value: Any, session_id: str | None = None) -> dict 
         if key not in value:
             continue
         candidate = value[key]
-        if isinstance(candidate, (int, float)) and not isinstance(candidate, bool) and lo <= candidate <= hi:
+        numeric_type_ok = (
+            isinstance(candidate, int) if key in _TURN_DETECTION_INT_ONLY_KEYS
+            else isinstance(candidate, (int, float))
+        )
+        if numeric_type_ok and not isinstance(candidate, bool) and lo <= candidate <= hi:
             sanitized[key] = candidate
         else:
             dropped.append(key)
@@ -352,6 +373,19 @@ def _filter_client_to_server(message: dict, session_id: str | None = None) -> di
     "S2" handling of `{"type": ["x"]}`-shaped frames, which would otherwise
     raise `TypeError` on the frozenset membership test below).
 
+    PR #49 review round 5, "S3": the top-level allow-list above only
+    constrains WHICH keys survive, not the SHAPE of their values -- a forged
+    non-string `audio`/`event_id`/`response_id` (an object or array instead
+    of the string `useRealtime.tsx` always sends) used to ride through
+    untouched. `audio` must be a base64-alphabet string (else the whole
+    frame is dropped -- there is no safe partial-audio fallback);
+    `event_id`/`response_id` must be short strings matching
+    `^[A-Za-z0-9_-]{1,64}$`. `event_id` is advisory (the server always mints
+    its own via `_SessionUpdateGuard.stamp`, "S2"), so an invalid one just
+    has the key stripped; `response_id` is load-bearing for `response.cancel`
+    (it says WHICH response to cancel, with no safe fallback), so an invalid
+    one drops the whole frame.
+
     Returns the rebuilt message to forward, or `None` if the whole event
     must be dropped.
     """
@@ -370,7 +404,49 @@ def _filter_client_to_server(message: dict, session_id: str | None = None) -> di
             "Stripped disallowed top-level key(s) %s from client %s (session=%s)",
             dropped_keys, msg_type, session_id)
 
-    return {k: v for k, v in message.items() if k in allowed_keys}
+    filtered = {k: v for k, v in message.items() if k in allowed_keys}
+
+    if "audio" in filtered and not (
+            isinstance(filtered["audio"], str) and _CLIENT_BASE64_RE.fullmatch(filtered["audio"])):
+        logger.warning(
+            "Dropped input_audio_buffer.append with a non-base64-alphabet audio value (session=%s)", session_id)
+        return None
+
+    if "event_id" in filtered and not (
+            isinstance(filtered["event_id"], str) and _CLIENT_EVENT_ID_RE.fullmatch(filtered["event_id"])):
+        logger.warning("Stripped an invalid client event_id (session=%s)", session_id)
+        del filtered["event_id"]
+
+    if "response_id" in filtered and not (
+            isinstance(filtered["response_id"], str) and _CLIENT_EVENT_ID_RE.fullmatch(filtered["response_id"])):
+        logger.warning("Dropped response.cancel with an invalid response_id (session=%s)", session_id)
+        return None
+
+    return filtered
+
+
+def _dump_client_to_server(payload: dict, session_id: str | None = None) -> str | None:
+    """Serialise an already-filtered client→server payload, or return `None`
+    if it can't be serialised safely (PR #49 review round 5, "S3").
+
+    Every value currently allowed through `_filter_client_to_server` /
+    `_sanitize_turn_detection` is already bounds- or shape-checked, so this
+    is a defense-in-depth backstop rather than a live vector today: uses
+    `allow_nan=False` so a `NaN`/`Infinity`/`-Infinity` float that somehow
+    reaches this call (Python's `json.loads` accepts these non-standard
+    literals by default, even though `json.dumps` also emits them by
+    default) raises `ValueError` instead of being silently re-serialised
+    into a frame most JSON parsers -- including a future strict C#
+    backend -- would reject or mishandle. The whole frame is dropped rather
+    than partially fixed, since there is no way to know which value was the
+    bad one without walking the whole structure.
+    """
+    try:
+        return json.dumps(payload, allow_nan=False)
+    except ValueError:
+        logger.warning(
+            "Dropped client→server frame that failed to re-serialise (NaN/Infinity) (session=%s)", session_id)
+        return None
 
 
 # Voices `extension.set_voice` may adopt (PR #49 review round 5, "M1"). The
@@ -1399,7 +1475,9 @@ class RTMiddleTier:
         msg_type = filtered["type"]
         # M2: always rebuilt from the allow-listed dict -- never the browser's
         # original bytes/object -- so no extra top-level key can survive.
-        updated_message = json.dumps(filtered)
+        updated_message = _dump_client_to_server(filtered, session_id)
+        if updated_message is None:
+            return None
         _vlog(verbose, "─── [Client → Server] %s ───", msg_type)
 
         if msg_type == "session.update":
@@ -1435,7 +1513,9 @@ class RTMiddleTier:
             )
             _vlog(verbose, "  Injected %d tools: %s, tool_choice=%s",
                   len(session["tools"]), tool_names, session["tool_choice"])
-            updated_message = json.dumps(filtered)
+            updated_message = _dump_client_to_server(filtered, session_id)
+            if updated_message is None:
+                return None
             # Track system message + tool schemas in context window
             ctx_monitor = self._sessions.get_context_monitor(session_id)
             if ctx_monitor:

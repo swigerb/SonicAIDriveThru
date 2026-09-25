@@ -44,6 +44,7 @@ from rtmt import (
     ToolResult,
     ToolResultDirection,
     _drop_from_client,
+    _dump_client_to_server,
     _filter_client_to_server,
     _origin_matches_host,
     _sanitize_turn_detection,
@@ -1403,6 +1404,68 @@ class ClientToServerAllowListTests(unittest.TestCase):
             with self.subTest(key=key):
                 result = _sanitize_turn_detection({"type": "server_vad", key: True})
                 self.assertNotIn(key, result)
+
+    def test_sanitize_turn_detection_rejects_float_for_ms_fields(self):
+        """PR #49 review round 5, "S3": prefix_padding_ms/silence_duration_ms
+        must be plain int -- a float like 300.5 (Rick's probe) is not a valid
+        millisecond count and useRealtime.tsx never sends one. `threshold`
+        legitimately IS a float (e.g. 0.7) and is unaffected."""
+        for key in ("prefix_padding_ms", "silence_duration_ms"):
+            with self.subTest(key=key):
+                result = _sanitize_turn_detection({"type": "server_vad", key: 300.5})
+                self.assertNotIn(key, result)
+        result = _sanitize_turn_detection({"type": "server_vad", "threshold": 0.7})
+        self.assertEqual(result["threshold"], 0.7)
+
+    # ── PR #49 review round 5 "S3": shape-hardening of audio/event_id/response_id ──
+
+    def test_audio_must_be_a_base64_alphabet_string_else_frame_dropped(self):
+        self.assertIsNone(_filter_client_to_server({"type": "input_audio_buffer.append", "audio": {"a": 1}}))
+        self.assertIsNone(_filter_client_to_server({"type": "input_audio_buffer.append", "audio": "not base64!!"}))
+
+    def test_audio_valid_base64_alphabet_string_survives(self):
+        result = _filter_client_to_server({"type": "input_audio_buffer.append", "audio": "AAAA=="})
+        self.assertEqual(result, {"type": "input_audio_buffer.append", "audio": "AAAA=="})
+
+    def test_event_id_wrong_shape_drops_only_the_key_not_the_frame(self):
+        """Rick's probes: an object, a >64-char string ("100 KB"), and NaN --
+        all invalid event_ids, but event_id is advisory (the server always
+        generates its own on session.update via _SessionUpdateGuard.stamp,
+        S2), so only the bad key is stripped, not the whole frame."""
+        for bad_event_id in ({"a": 1}, "x" * 100_000, float("nan"), ["a"]):
+            with self.subTest(bad_event_id=bad_event_id):
+                result = _filter_client_to_server({"type": "input_audio_buffer.clear", "event_id": bad_event_id})
+                self.assertEqual(result, {"type": "input_audio_buffer.clear"})
+
+    def test_event_id_valid_short_string_survives(self):
+        result = _filter_client_to_server({"type": "input_audio_buffer.clear", "event_id": "evt_123"})
+        self.assertEqual(result, {"type": "input_audio_buffer.clear", "event_id": "evt_123"})
+
+    def test_response_id_wrong_shape_drops_the_whole_frame(self):
+        """Unlike event_id, response.cancel's response_id is load-bearing --
+        it is what tells the upstream WHICH response to cancel, and there is
+        no safe fallback for a malformed one, so the whole frame is dropped."""
+        for bad_response_id in (["a"], {"a": 1}, "x" * 100_000):
+            with self.subTest(bad_response_id=bad_response_id):
+                self.assertIsNone(_filter_client_to_server({"type": "response.cancel", "response_id": bad_response_id}))
+
+    def test_response_id_valid_short_string_survives(self):
+        result = _filter_client_to_server({"type": "response.cancel", "response_id": "resp_123"})
+        self.assertEqual(result, {"type": "response.cancel", "response_id": "resp_123"})
+
+    def test_dump_client_to_server_drops_a_payload_containing_nan(self):
+        """Defense-in-depth backstop ("S3"): plain `json.dumps` happily
+        re-emits a NaN/Infinity float (Python's json module accepts these
+        non-standard literals on both load and dump by default), which a
+        stricter downstream JSON parser could reject or mishandle.
+        `_dump_client_to_server` uses `allow_nan=False` so the whole frame
+        is dropped instead."""
+        self.assertIsNone(_dump_client_to_server({"type": "input_audio_buffer.clear", "leaked": float("nan")}))
+        self.assertIsNone(_dump_client_to_server({"type": "input_audio_buffer.clear", "leaked": float("inf")}))
+
+    def test_dump_client_to_server_serialises_a_normal_payload(self):
+        result = _dump_client_to_server({"type": "input_audio_buffer.clear", "event_id": "evt_1"})
+        self.assertEqual(json.loads(result), {"type": "input_audio_buffer.clear", "event_id": "evt_1"})
 
 
 

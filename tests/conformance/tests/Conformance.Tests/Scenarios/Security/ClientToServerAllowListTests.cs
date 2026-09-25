@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using Conformance.Fakes;
 using Conformance.Harness;
@@ -401,4 +402,136 @@ public sealed class ClientToServerAllowListTests(ConformanceFixture fixture)
             FrameTimeout, ct);
         Assert.True(voiceUpdate is not null, "extension.set_voice must still result in a voice session.update reaching the fake upstream.");
     }, allowedNewBackendErrors: 1);
+
+    // ── PR #49 review round 5 "S3": value-shape hardening of audio/event_id/response_id/ms fields ──
+    // The allow-list above only ever constrained WHICH top-level/sub keys survive filtering, not
+    // the SHAPE of their values -- a forged non-string `audio`/`event_id`/`response_id` (an
+    // object or array instead of the string useRealtime.tsx always sends), or a millisecond
+    // count expressed as a float (300.5), used to ride straight through. `event_id` is advisory
+    // (the server always mints its own via `_SessionUpdateGuard.stamp`, "S2"), so an invalid one
+    // just has the key stripped and the rest of the frame still reaches upstream; `audio` and
+    // `response_id` are load-bearing with no safe partial fallback, so an invalid one drops the
+    // whole frame.
+
+    [Fact]
+    public Task Turn_detection_ms_field_as_float_is_dropped_not_the_whole_object() => fixture.RunAsync(async () =>
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var connectionTask = fixture.Realtime.WaitForNextConnectionAsync(FrameTimeout, ct);
+        await using var browser = await RealtimeBrowserClient.ConnectAsync(fixture.Backend!.BaseUri, cancellationToken: ct);
+        var connection = await connectionTask;
+        Assert.True(connection is not null, "No upstream connection was accepted for the browser socket.");
+
+        var bootstrap = await connection!.ReceivedFrames.WaitForAsync(f => f.Sequence == 0, FrameTimeout, ct);
+        Assert.True(bootstrap is not null, "Bootstrap session.update never arrived.");
+
+        await browser.SendAsync(new JsonObject
+        {
+            ["type"] = "session.update",
+            ["session"] = new JsonObject
+            {
+                ["turn_detection"] = new JsonObject
+                {
+                    ["type"] = "server_vad",
+                    ["threshold"] = 0.6,
+                    ["prefix_padding_ms"] = 300.5,
+                    ["silence_duration_ms"] = 500,
+                },
+            },
+        }, ct);
+
+        var forwarded = await connection.ReceivedFrames.WaitForAsync(
+            f => f.Sequence > bootstrap!.Sequence && f.Type == "session.update", FrameTimeout, ct);
+        Assert.True(forwarded is not null, "The browser's own session.update must still reach the fake upstream.");
+        var forwardedTurnDetection = forwarded!.Json.GetProperty("session").GetProperty("audio").GetProperty("input").GetProperty("turn_detection");
+
+        Assert.Equal("server_vad", forwardedTurnDetection.GetProperty("type").GetString());
+        Assert.Equal(0.6, forwardedTurnDetection.GetProperty("threshold").GetDouble());
+        Assert.Equal(500, forwardedTurnDetection.GetProperty("silence_duration_ms").GetInt32());
+        Assert.False(forwardedTurnDetection.TryGetProperty("prefix_padding_ms", out _),
+            "prefix_padding_ms=300.5 (a float, not a plain int millisecond count) must be dropped -- but the rest of turn_detection must survive.");
+    });
+
+    [Fact]
+    public Task Forged_event_id_shapes_are_stripped_not_the_whole_frame() => fixture.RunAsync(async () =>
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var connectionTask = fixture.Realtime.WaitForNextConnectionAsync(FrameTimeout, ct);
+        await using var browser = await RealtimeBrowserClient.ConnectAsync(fixture.Backend!.BaseUri, cancellationToken: ct);
+        var connection = await connectionTask;
+        Assert.True(connection is not null, "No upstream connection was accepted for the browser socket.");
+
+        var bootstrap = await connection!.ReceivedFrames.WaitForAsync(f => f.Sequence == 0, FrameTimeout, ct);
+        Assert.True(bootstrap is not null, "Bootstrap session.update never arrived.");
+
+        // Rick's probes: an object event_id, and a ~100 KB string event_id (both invalid --
+        // event_id must be a short `^[A-Za-z0-9_-]{1,64}$` string). Neither kills the socket:
+        // the key is stripped and input_audio_buffer.clear still reaches upstream (with no
+        // event_id at all, since none was carried forward for this non-session.update type).
+        await browser.SendAsync(new JsonObject
+        {
+            ["type"] = "input_audio_buffer.clear",
+            ["event_id"] = new JsonObject { ["a"] = 1 },
+        }, ct);
+        var objectEventIdFrame = await connection!.ReceivedFrames.WaitForAsync(
+            f => f.Sequence > bootstrap!.Sequence && f.Type == "input_audio_buffer.clear", FrameTimeout, ct);
+        Assert.True(objectEventIdFrame is not null, "input_audio_buffer.clear must still reach the fake upstream despite the forged event_id.");
+        Assert.False(objectEventIdFrame!.Json.TryGetProperty("event_id", out _), "A forged object event_id must be stripped, not forwarded.");
+
+        await browser.SendAsync(new JsonObject
+        {
+            ["type"] = "input_audio_buffer.clear",
+            ["event_id"] = new string('x', 100_000),
+        }, ct);
+        var oversizedEventIdFrame = await connection.ReceivedFrames.WaitForAsync(
+            f => f.Sequence > objectEventIdFrame!.Sequence && f.Type == "input_audio_buffer.clear", FrameTimeout, ct);
+        Assert.True(oversizedEventIdFrame is not null, "input_audio_buffer.clear must still reach the fake upstream despite the oversized event_id.");
+        Assert.False(oversizedEventIdFrame!.Json.TryGetProperty("event_id", out _), "A forged 100 KB event_id must be stripped, not forwarded.");
+    });
+
+    [Fact]
+    public Task Malformed_response_id_and_audio_shapes_drop_the_whole_frame() => fixture.RunAsync(async () =>
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var connectionTask = fixture.Realtime.WaitForNextConnectionAsync(FrameTimeout, ct);
+        await using var browser = await RealtimeBrowserClient.ConnectAsync(fixture.Backend!.BaseUri, cancellationToken: ct);
+        var connection = await connectionTask;
+        Assert.True(connection is not null, "No upstream connection was accepted for the browser socket.");
+
+        var bootstrap = await connection!.ReceivedFrames.WaitForAsync(f => f.Sequence == 0, FrameTimeout, ct);
+        Assert.True(bootstrap is not null, "Bootstrap session.update never arrived.");
+
+        // response_id is load-bearing (it tells upstream WHICH response to cancel) so an invalid
+        // shape drops the whole frame, unlike the advisory event_id above.
+        await browser.SendAsync(new JsonObject
+        {
+            ["type"] = "response.cancel",
+            ["response_id"] = new JsonArray("a"),
+        }, ct);
+
+        // audio must be a base64-alphabet string; there is no safe partial-audio fallback, so an
+        // object also drops the whole frame.
+        await browser.SendAsync(new JsonObject
+        {
+            ["type"] = "input_audio_buffer.append",
+            ["audio"] = new JsonObject { ["a"] = 1 },
+        }, ct);
+
+        // Liveness proof (see the sibling "never reaches upstream" tests above for why
+        // input_audio_buffer.clear, not another response.cancel/append, is used here): both
+        // malformed frames above are dropped silently, not by closing the socket, so ordinary
+        // traffic sent afterward must still get through.
+        await browser.SendInputAudioClearAsync(ct);
+        var clear = await connection!.ReceivedFrames.WaitForAsync(
+            f => f.Sequence > bootstrap!.Sequence && f.Type == "input_audio_buffer.clear", FrameTimeout, ct);
+        Assert.True(clear is not null, "Expected the subsequent input_audio_buffer.clear to reach the fake upstream -- the socket must stay open.");
+
+        foreach (var frame in connection.ReceivedFrames.Snapshot())
+        {
+            Assert.False(frame.Type == "response.cancel" && frame.Json.TryGetProperty("response_id", out var rid) && rid.ValueKind == JsonValueKind.Array,
+                "A response.cancel with a list response_id must never reach the fake upstream.");
+            Assert.False(frame.Type == "input_audio_buffer.append" && frame.Json.TryGetProperty("audio", out var audio) && audio.ValueKind == JsonValueKind.Object,
+                "An input_audio_buffer.append with a non-string audio value must never reach the fake upstream.");
+        }
+    });
 }
