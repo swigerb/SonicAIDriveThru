@@ -828,18 +828,33 @@ names that resolve to no `MENU_CATEGORY_MAP` entry at all, i.e. genuinely off-me
 **word boundaries**, not bare substrings (PR #50 review round 4): a bare substring check let
 `"tea"` match inside `"steak"`, silently absorbing an off-menu `"Philly Cheesesteak"`/
 `"Steak Sandwich"` into a combo's drink slot for free and happy-hour-discounting it. Both keyword
-lists are compiled regexes with `\b...\b` boundaries and an optional trailing `s` for plurals
-(`r"\b(?:slush|limeade|ocean water|drink|tea|lemonade|coke|sprite|root beer)s?\b"` for fountain
-drinks, `r"\b(?:shake|blast|malt)s?\b"` for shakes/blasts/malts); Dr Pepper keeps its own,
-already-word-boundary regex unchanged. Every genuine on-menu item still resolves via
-`MENU_CATEGORY_MAP` directly and never reaches these fallbacks at all — see
+lists are compiled regexes:
+```
+r"\b(?:slush(?:ie|y)?|limeade|ocean water|drink|tea|lemonade|coke|sprite|root beer)(?:e?s)?\b"
+```
+for fountain drinks, and
+```
+r"(?:\b|milk)(?:shake|blast|malt)(?:e?s)?\b"
+```
+for shakes/blasts/malts; Dr Pepper keeps its own, already-word-boundary regex unchanged. The
+`(?:e?s)?` suffix (not a bare `s?`) matches the plural `-s`/`-es` forms (`"Cokes"`, `"Slushes"`) as
+well as the singular; `slush(?:ie|y)?` additionally matches the spoken `"Slushie"`/`"Slushy"`
+variants. The shake/blast/malt regex's `(?:\b|milk)` prefix is a narrow, deliberate carve-out (PR
+#50 review round 5, "keyword over-correction"): a plain `\bshake\b` never matches `"Milkshake"` at
+all because there is no word boundary between "milk" and "shake" (both are word characters), so a
+guest's spoken `"Chocolate Milkshake"` fell all the way through to unclassified. Matching either a
+normal word boundary OR the literal `"milk"` immediately before the keyword resolves that specific
+compound without loosening the boundary for anything else — a nonsense `"Overshake Deluxe"` still
+correctly does not match. Every genuine on-menu item still resolves via `MENU_CATEGORY_MAP`
+directly and never reaches these fallbacks at all — see
 `test_menu_utils.py::MenuCategoryMapDirectResolutionTests`, which patches both fallback functions to
 raise and asserts classification never touches them for any of the 60 `menuItems.json` names.
 
 See `app/backend/tests/test_menu_utils.py::KeywordFallbackWordBoundaryTests`,
-`MenuCategoryMapDirectResolutionTests`, and `CustomisedItemMenuLookupTests.cs`'s
-`ParenGroupNormalisationTests` in this suite for the paren-group-stripping edge cases (two groups,
-mid-string group, nested/unbalanced group) end to end against the live backend.
+`KeywordOverCorrectionTests`, `MenuCategoryMapDirectResolutionTests`, and
+`CustomisedItemMenuLookupTests.cs`'s `ParenGroupNormalisationTests` in this suite for the
+paren-group-stripping edge cases (two groups, mid-string group, nested/unbalanced group) end to end
+against the live backend.
 
 All four money fields (`items[].price`, `total`, `tax`, `finalTotal`) are numbers on the wire (not
 quoted, unlike the golden file's storage format) and must always be parsed via

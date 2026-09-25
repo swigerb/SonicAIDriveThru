@@ -234,10 +234,37 @@ class KeywordFallbackWordBoundaryTests(unittest.TestCase):
         self.assertEqual(infer_combo_component("Cokes"), "drinks")
         self.assertTrue(is_happy_hour_discounted("Cokes"))
 
-    def test_milkshake_is_not_misclassified_by_a_bare_shake_substring(self):
+    def test_shake_requires_a_word_boundary_or_the_milk_prefix(self):
         """"shake" must not match merely because it's a substring of a longer compound word with
-        no word boundary in between -- guards the shake/blast/malt list the same way."""
-        self.assertEqual(infer_combo_component("Milkshake Mixer Cleaning Kit"), "")
+        no word boundary in between and no "milk" immediately before it -- guards against
+        over-matching a nonsense compound the same way the fountain-drink list guards "steak"."""
+        self.assertEqual(infer_combo_component("Overshake Deluxe"), "")
+
+
+class KeywordOverCorrectionTests(unittest.TestCase):
+    """PR #50 review (round 5, must-fix): the round-4 word-boundary fix over-corrected and broke
+    real spoken off-menu variants that used to match fine at 467494b:
+    - ``\\bshake\\b`` never matches "milkshake" at all (no word boundary between "milk" and
+      "shake") -- "Chocolate Milkshake" fell all the way through to "".
+    - ``slush...s?`` only allows a single trailing "s", missing the "-es"/"-ie"/"-y" spoken
+      variants -- "Cherry Slushes" and "Blue Raspberry Slushie" fell through to "".
+    All three are genuinely off-menu names (the real menuItems.json items are "... Classic Shake"
+    and "... Slush", singular, unmodified), so they must resolve via the keyword fallback, not
+    ``MENU_CATEGORY_MAP``. The steak/tea word-boundary fix from round 4 must still hold (proven by
+    ``KeywordFallbackWordBoundaryTests`` above, which stays green)."""
+
+    def test_milkshake_is_recognised_as_a_shake_and_obeys_the_flag(self):
+        self.assertEqual(infer_combo_component("Chocolate Milkshake"), "drinks")
+        self.assertTrue(is_happy_hour_discounted("Chocolate Milkshake"))
+        with patch.object(menu_utils, "_SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED", False):
+            self.assertFalse(is_happy_hour_discounted("Chocolate Milkshake"))
+            # Combo-drink-slot eligibility is unconditional -- unaffected by the flag.
+            self.assertEqual(infer_combo_component("Chocolate Milkshake"), "drinks")
+
+    def test_slush_spoken_variants_still_match(self):
+        for name in ("Cherry Slushes", "Blue Raspberry Slushie", "Grape Slushy"):
+            self.assertEqual(infer_combo_component(name), "drinks", name)
+            self.assertTrue(is_happy_hour_discounted(name), name)
 
 
 class MenuCategoryMapDirectResolutionTests(unittest.TestCase):

@@ -489,6 +489,23 @@
   tolerance change, and the `menuItems.json` schema redesign referenced in the correction on entry 38
   above.
 
+## PR #50 review, round 5 (Rick: Approve, with should-fix items before merge)
+
+- **Keyword over-correction fixed: the round-4 word-boundary regexes were too strict and broke
+  real spoken off-menu variants that worked at `467494b`.** `\bshake\b` never matches "milkshake"
+  at all (no word boundary between "milk" and "shake"), so "Chocolate Milkshake" fell through to
+  unclassified; the old `s?` suffix only allowed a single trailing "s", so "Cherry Slushes"
+  ("-es") and "Blue Raspberry Slushie" ("-ie") also fell through. Fixed with
+  `r"\b(?:slush(?:ie|y)?|limeade|ocean water|drink|tea|lemonade|coke|sprite|root beer)(?:e?s)?\b"`
+  (fountain) and `r"(?:\b|milk)(?:shake|blast|malt)(?:e?s)?\b"` (shake/blast/malt) — the latter's
+  `(?:\b|milk)` prefix is a narrow, deliberate carve-out for the "milk"+"shake" compound only, not
+  a general loosening (a nonsense "Overshake Deluxe" still correctly doesn't match). Both the
+  original round-4 fix (steak/tea word-boundary) and this correction are pinned together: a new
+  `KeywordOverCorrectionTests` pytest class plus a `Theory` over the three spoken variants in both
+  `ComboSlotTests` and `HappyHourDiscountTests` in `CustomisedItemMenuLookupTests.cs`. Mutation
+  check: reverting either regex to its round-4 form fails exactly the 6 new conformance rows (3
+  combo-slot + 3 happy-hour), the other 16 stay green.
+
 #### 42. Customised Items Must Be Normalised Before Every Menu Lookup (Summer — Backend Dev, PR #50 review round 2)
 - **Root cause: customizations live *inside* `item_name`, and lookups didn't account for that.**
   A modifier like `"Tots (Extra Crispy)"` or `"Chili Cheese Tots (Extra Cheese)"` is a single

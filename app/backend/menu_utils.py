@@ -295,19 +295,34 @@ _DR_PEPPER_RE = re.compile(r"\bdr\.?\s*pepper\b")
 #
 # Word-boundary (PR #50 review round 4): a plain substring check let "tea" match inside "steak",
 # so an off-menu "Philly Cheesesteak"/"Steak Sandwich" was silently absorbed into a combo's drink
-# slot AND happy-hour discounted. ``\b...\b`` requires the keyword to be its own word (optionally
-# pluralised, e.g. "Cokes"), so "steak" no longer contains "tea" as a match. Dr Pepper keeps its
-# own separate, already-word-boundary regex above.
+# slot AND happy-hour discounted. ``\b...\b`` requires the keyword to be its own word. Dr Pepper
+# keeps its own separate, already-word-boundary regex above.
+#
+# PR #50 review (round 5, "keyword over-correction"): the initial word-boundary fix over-corrected
+# -- ``s?`` only allows a single trailing "s", so it missed the "-es"/"-ie"/"-y" spoken variants
+# entirely: "Cherry Slushes" (plural "-es"), "Blue Raspberry Slushie" ("-ie"), and a guest saying
+# "Slushy" ("-y") are all genuinely off-menu names (the real items are "... Slush", singular) that
+# must still hit this fallback. ``slush(?:ie|y)?`` matches the bare word plus either spoken
+# variant, and the outer ``(?:e?s)?`` allows the regular "-s"/"-es" plural on TOP of that (so
+# "Slushies" still matches too) without reopening the "tea"-in-"steak" hole: the boundary is still
+# required immediately before the keyword.
 _FOUNTAIN_DRINK_KEYWORD_RE = re.compile(
-    r"\b(?:slush|limeade|ocean water|drink|tea|lemonade|coke|sprite|root beer)s?\b"
+    r"\b(?:slush(?:ie|y)?|limeade|ocean water|drink|tea|lemonade|coke|sprite|root beer)(?:e?s)?\b"
 )
 
 # Shake/Blast/Malt keywords: same (unconditional) combo-drink-slot eligibility as fountain drinks,
 # but the happy-hour DISCOUNT for this bucket must obey ``_SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED``
 # below -- PR #50 review: flipping that one flag must change *every* shake/blast variant, plain or
-# customised, on-menu or off, not just the ones matched by JSON category. Word-boundary for the
-# same reason as the fountain-drink regex above.
-_SHAKE_BLAST_KEYWORD_RE = re.compile(r"\b(?:shake|blast|malt)s?\b")
+# customised, on-menu or off, not just the ones matched by JSON category.
+#
+# PR #50 review (round 5): a plain ``\bshake\b`` never matches "milkshake" at all -- there is no
+# word boundary between "milk" and "shake" (both are word characters), so "Chocolate Milkshake"
+# (a genuinely off-menu spoken variant; the real item is "... Classic Shake") fell all the way
+# through to "" instead of "drinks". ``(?:\b|milk)`` is a deliberate, narrow carve-out: match
+# either a normal word boundary OR the literal "milk" immediately before "shake"/"blast"/"malt",
+# so "milkshake" resolves as a compound word without loosening the boundary for any other
+# preceding text (a nonsense "overshake"/"bookshake" still correctly does NOT match).
+_SHAKE_BLAST_KEYWORD_RE = re.compile(r"(?:\b|milk)(?:shake|blast|malt)(?:e?s)?\b")
 
 
 def _keyword_fallback_combo_drink(normalized: str) -> bool:

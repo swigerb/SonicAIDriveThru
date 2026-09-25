@@ -164,6 +164,40 @@ public sealed class CustomisedItemMenuLookupTests
                 Assert.Equal(1, OrderScenarioHelpers.GetOrderItemCount(result.ToolResultJson!));
             });
 
+        /// <summary>PR #50 review (round 5, "keyword over-correction"): the round-4 word-boundary
+        /// fix over-corrected and broke these genuinely off-menu spoken variants (the real
+        /// menuItems.json items are "... Classic Shake" and "... Slush", singular): a bare
+        /// `\bshake\b` never matches "milkshake" (no word boundary between "milk" and "shake"),
+        /// and the old `s?` suffix only allowed a single trailing "s", missing "-es"/"-ie". A
+        /// mutation reverting either regex to its round-4 form must fail this Theory.</summary>
+        [Theory]
+        [InlineData("Chocolate Milkshake")]
+        [InlineData("Cherry Slushes")]
+        [InlineData("Blue Raspberry Slushie")]
+        public Task Off_menu_spoken_shake_and_slush_variants_still_absorb_into_the_combo_drink_slot(string item) =>
+            fixture.RunAsync(async () =>
+            {
+                var ct = TestContext.Current.CancellationToken;
+                const decimal unitPrice = 4.69m; // placeholder -- see comment on the off-menu drink test above
+
+                var (browser, connection, roundTripIndex) = await OrderScenarioHelpers.ConnectAndGreetAsync(fixture, ct);
+                await using var _ = browser;
+
+                var result = await OrderScenarioHelpers.RunOrderStepsAsync(
+                    connection, browser,
+                    [
+                        ("add", BaseComboName, BaseComboSize, 1, BaseComboPrice),
+                        ("add", item, "medium", 1, unitPrice),
+                    ],
+                    roundTripIndex, ct);
+
+                OrderScenarioHelpers.AssertMoneyEqual(
+                    BaseComboPrice,
+                    OrderScenarioHelpers.GetOrderTotal(result.ToolResultJson!),
+                    $"'{item}' is an off-menu spoken shake/slush variant and must still absorb into the combo drink slot.");
+                Assert.Equal(1, OrderScenarioHelpers.GetOrderItemCount(result.ToolResultJson!));
+            });
+
         /// <summary>PR #50 review (round 4): pins the word-boundary fix for the fountain-drink
         /// keyword fallback -- a plain substring check let "tea" match inside "steak", so this
         /// genuinely off-menu item (not in menuItems.json at all) was silently absorbed into a
@@ -330,6 +364,38 @@ public sealed class CustomisedItemMenuLookupTests
                 var rules = GoldenOrderPricingData.Load(RepoPaths.FindRepoRoot()).BusinessRules;
                 var expectedTotal = unitPrice * rules.HappyHourDiscount * (1 + rules.TaxRate);
                 OrderScenarioHelpers.AssertMoneyEqual(expectedTotal, OrderScenarioHelpers.GetOrderFinalTotal(result.ToolResultJson!));
+            });
+
+        /// <summary>PR #50 review (round 5, "keyword over-correction"): pins the same three spoken
+        /// off-menu variants as the combo-drink-slot Theory above, at the happy-hour-discount
+        /// question this time -- "Chocolate Milkshake" must obey
+        /// `_SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED` (currently True) exactly like its on-menu
+        /// counterparts, and the two slush spoken variants are always discounted like every other
+        /// fountain drink.</summary>
+        [Theory]
+        [InlineData("Chocolate Milkshake")]
+        [InlineData("Cherry Slushes")]
+        [InlineData("Blue Raspberry Slushie")]
+        public Task Off_menu_spoken_shake_and_slush_variants_are_happy_hour_discounted(string item) =>
+            fixture.RunAsync(async () =>
+            {
+                var ct = TestContext.Current.CancellationToken;
+                const decimal unitPrice = 4.69m; // placeholder -- see comment on the off-menu drink test above
+
+                var (browser, connection, roundTripIndex) = await OrderScenarioHelpers.ConnectAndGreetAsync(fixture, ct);
+                await using var _ = browser;
+
+                var result = await OrderScenarioHelpers.RunOrderStepsAsync(
+                    connection, browser,
+                    [("add", item, "medium", 1, unitPrice)],
+                    roundTripIndex, ct);
+
+                var rules = GoldenOrderPricingData.Load(RepoPaths.FindRepoRoot()).BusinessRules;
+                var expectedTotal = unitPrice * rules.HappyHourDiscount * (1 + rules.TaxRate);
+                OrderScenarioHelpers.AssertMoneyEqual(
+                    expectedTotal,
+                    OrderScenarioHelpers.GetOrderFinalTotal(result.ToolResultJson!),
+                    $"'{item}' is an off-menu spoken shake/slush variant and must still get the happy-hour discount.");
             });
     }
 
