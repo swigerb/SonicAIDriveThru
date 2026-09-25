@@ -7,6 +7,7 @@ error edge cases.
 
 import json
 import sys
+import unittest
 from pathlib import Path
 from unittest.mock import patch
 
@@ -373,6 +374,24 @@ class TestProductionPrompts:
         hint = loader.get_upsell_hint("burger")
         # Should return a non-empty hint string (combo suggestion)
         assert isinstance(hint, str)
+
+
+class HappyHourPromptWordingTests(unittest.TestCase):
+    """PR #61 delta review (should-fix 2): PERSONALIZATION's "happy hour" excitement line and
+    HAPPY_HOUR's every-day mention must say "slushes and fountain drinks", matching both the
+    tool-result banner (tools.py) and HAPPY_HOUR's own trigger-condition line ("+ slush or
+    fountain-drink order") -- not the old, broader "drinks" wording, which reads as covering
+    shakes/Blasts too even though those are full price (Brian's #39 decision)."""
+
+    def test_personalization_happy_hour_excitement_mentions_fountain_drinks(self):
+        loader = PromptLoader(brand="sonic")
+        prompt = loader.get_system_prompt()
+        self.assertIn("half-price slushes and fountain drinks", prompt)
+
+    def test_happy_hour_every_day_mention_names_slushes_and_fountain_drinks(self):
+        loader = PromptLoader(brand="sonic")
+        prompt = loader.get_system_prompt()
+        self.assertIn("Slushes and fountain drinks are HALF-PRICE every day", prompt)
 
 
 if __name__ == "__main__":
