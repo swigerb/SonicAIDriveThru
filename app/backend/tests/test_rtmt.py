@@ -1269,6 +1269,26 @@ class ProcessMessageToServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(result)
         self.assertIsInstance(json.loads(result)["event_id"], str)
 
+    def test_guard_stamp_itself_does_not_crash_on_a_dict_or_list_event_id(self):
+        """PR #49 review round 6: the two tests above only prove the FULL
+        `_process_message_to_server` pipeline survives a forged event_id --
+        and it turns out `_filter_client_to_server`'s own event_id shape
+        check (S3, `^[A-Za-z0-9_-]{1,64}$`) already strips a non-string
+        candidate for `session.update` *before* `guard.stamp` ever sees it,
+        making `stamp`'s own isinstance guard dead code on the only reachable
+        path. Call `stamp` directly, bypassing the filter entirely, so a
+        regression to `stamp`'s own defence (the thing that actually
+        prevents `TypeError: unhashable type` in `self._sent[event_id] = ...`)
+        is caught even though nothing upstream of it currently reaches it in
+        production."""
+        for bad_event_id in ({"a": 1}, ["a"]):
+            with self.subTest(bad_event_id=bad_event_id):
+                guard = _SessionUpdateGuard()
+                message = {"type": "session.update", "event_id": bad_event_id, "session": {}}
+                stamped = guard.stamp(message)
+                self.assertIsInstance(stamped["event_id"], str)
+                self.assertIs(stamped, message, "stamp mutates and returns the same dict")
+
 
 class ClientToServerAllowListTests(unittest.TestCase):
     """Direct unit tests of `_filter_client_to_server` and
