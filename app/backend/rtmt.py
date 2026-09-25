@@ -2322,6 +2322,11 @@ class RTMiddleTier:
                                 if nudge_task is not None:
                                     cancel_nudge("guest-initiated response")
                                 recovery.on_external_response_create("browser")
+                                # PR #58 re-review Nit: the browser's own response.create is
+                                # not the rate-limit ladder's retry of a greeting that produced
+                                # no audio (#48 M1) -- cancel any pending re-arm so this new
+                                # response's audio isn't mistaken for the greeting's own.
+                                echo.on_external_response_create()
                             # The browser's session.update marks the start of a conversation.
                             if not greeting_sent and sent_type == "session.update":
                                 logger.info("Client session.update forwarded — sending greeting")

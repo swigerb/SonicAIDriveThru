@@ -654,6 +654,24 @@ class EchoSuppressorTests(unittest.TestCase):
         echo.on_audio_delta()
         self.assertFalse(echo.greeting_in_progress)
 
+    def test_response_done_awaiting_retry_is_cancelled_by_an_external_response_create(self):
+        """PR #58 re-review Nit: rtmt.py calls RateLimitRecovery.on_external_response_create()
+        whenever someone other than the ladder itself (today: the browser's own
+        response.create) asks for a fresh response. That new response is not the ladder's
+        retry of the greeting -- its own first audio delta must not be mistaken for the
+        greeting's continuation, same as genuine guest speech or an explicit barge-in already
+        cancel the pending re-arm.
+        """
+        echo = EchoSuppressor()
+        echo.start_greeting_suppression()
+        loop = MagicMock()
+        loop.time.return_value = 10.0
+        target_ws = MagicMock()
+        echo.on_response_done(loop, target_ws)
+        echo.on_external_response_create()
+        echo.on_audio_delta()
+        self.assertFalse(echo.greeting_in_progress)
+
     # ─── swigerb/SonicAIDriveThru#59: on_audio_done()'s two flush sends were a
     # bare, unguarded `asyncio.ensure_future(target_ws.send_str(...))` — when the
     # upstream closes right after response.output_audio.done (a routine race, not

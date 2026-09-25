@@ -365,6 +365,20 @@ class EchoSuppressor:
         # is just as much "the guest, not a retry" as genuine speech is.
         self._greeting_awaiting_retry = False
 
+    def on_external_response_create(self) -> None:
+        """Someone other than the rate-limit ladder itself asked for a fresh response
+        (today: rtmt.py calls this alongside `RateLimitRecovery.on_external_response_create()`
+        for the browser's own `response.create`).
+
+        PR #58 re-review Nit: a pending `_greeting_awaiting_retry` (#48 M1) is speculating
+        that the *ladder's own* retry of the greeting is what produces the next audio delta.
+        If a genuinely new, unrelated response gets created first, its audio must not be
+        mistaken for the greeting's continuation -- same reasoning as `on_speech_started()`
+        and `on_barge_in()` above, which already cancel this speculative re-arm for guest
+        speech and an explicit barge-in respectively.
+        """
+        self._greeting_awaiting_retry = False
+
     def start_greeting_suppression(self, verbose: bool = False) -> None:
         """Pre-set suppression before greeting fires."""
         self.ai_speaking = True
