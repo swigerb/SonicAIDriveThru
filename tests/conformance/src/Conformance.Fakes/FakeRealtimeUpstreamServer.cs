@@ -81,15 +81,20 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
 
     /// <summary>
     /// Arms a one-shot switch: the *next* connection accepted (not any connection already open)
-    /// is constructed with its <see cref="FakeRealtimeConnection.Script"/> rules already cleared
-    /// -- i.e. <see cref="RealtimeScript.WithVadDefaults"/>'s two auto-reply rules are removed
-    /// before the socket is even accepted, so it is architecturally impossible for *any*
+    /// is constructed with its <see cref="FakeRealtimeConnection.Script"/>'s VAD speech-default
+    /// rule already removed -- i.e. <see cref="RealtimeScript.WithVadDefaults"/>'s
+    /// `input_audio_buffer.append` -> synthetic speech_started/stopped/committed reply rule is
+    /// gone before the socket is even accepted, so it is architecturally impossible for *any*
     /// `input_audio_buffer.append` this connection ever receives (including the very first one,
     /// racing arbitrarily close behind the handshake) to get a synthetic `speech_started` reply.
+    /// The other default rule -- `conversation.item.create`'s `.added`/`.done` acknowledgement and
+    /// duplicate-item-id rejection -- is left untouched (PR #54 review): a scenario using this
+    /// switch to suppress the nudge-cancelling VAD race still needs to observe whether an item it
+    /// (or the backend, e.g. the resume rehydration item) creates gets acknowledged normally.
     ///
     /// Exists because calling <see cref="FakeRealtimeConnection.Script"/>.<see
-    /// cref="RealtimeScript.ClearRules"/> from a test *after* <c>WaitForNextConnectionAsync</c>
-    /// resolves is still racy: <see cref="FakeRealtimeConnection"/> installs the VAD defaults at
+    /// cref="RealtimeScript.RemoveVadSpeechDefaultRule"/> from a test *after*
+    /// <c>WaitForNextConnectionAsync</c> resolves is still racy: <see cref="FakeRealtimeConnection"/> installs the VAD defaults at
     /// construction time (<see cref="ConnectionRegistry.Create"/>), strictly before the socket is
     /// accepted/attached/published -- so real network audio (a resumed browser's mic
     /// auto-restart) can arrive and be dispatched against the still-armed default rule in the
@@ -437,7 +442,10 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
             // Strictly before AcceptWebSocketAsync/AttachSocket/Publish below -- no frame can
             // possibly have been dispatched against this connection's Script yet, so this closes
             // the race window completely (see ClearVadDefaultsOnNextConnection's doc comment).
-            connection.Script.ClearRules();
+            // Only the VAD speech-default rule is removed -- the conversation.item.create
+            // acknowledgement rule stays armed so callers can still observe items (e.g. the
+            // resume rehydration item) getting acknowledged normally.
+            connection.Script.RemoveVadSpeechDefaultRule();
         }
         using var socket = await context.WebSockets.AcceptWebSocketAsync().ConfigureAwait(false);
         connection.AttachSocket(socket);

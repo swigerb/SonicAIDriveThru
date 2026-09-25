@@ -255,6 +255,20 @@ public sealed class OrderResumeBrowserTests(BrowserConformanceFixture fixture)
         Assert.True(rehydration is not null, "Expected the rehydration conversation.item.create on the resumed upstream connection.");
         Assert.True(rehydration!.Sequence > bootstrap!.Sequence);
 
+        // PR #54 review: ClearVadDefaultsOnNextConnection now removes only the VAD speech-default
+        // rule, leaving the conversation.item.create acknowledgement rule armed (see
+        // RealtimeScript.RemoveVadSpeechDefaultRule's doc comment) -- prove that by checking the
+        // rehydration item actually gets acknowledged like any other item would. The ack rule sets
+        // SessionState.LastConversationItemId to the acknowledged item's id only after sending its
+        // conversation.item.added/.done pair, so this is a real (if indirect) black-box signal that
+        // the ack fired, not just that the rule list still contains it.
+        var rehydrationItemId = rehydration.Json.GetProperty("item").GetProperty("id").GetString();
+        Assert.False(string.IsNullOrEmpty(rehydrationItemId));
+        await UntilAsync(
+            () => Task.FromResult(secondConnection!.SessionState.LastConversationItemId == rehydrationItemId),
+            ok => ok, FrameTimeout,
+            "the rehydration item's conversation.item.create acknowledgement to be processed", ct);
+
         // PR #54 review: a fixed 700ms wall-clock window (leaving only ~1.1s of slack locally
         // against BrowserTimers' nudge_after_seconds) is fragile under load. Wait for the nudge
         // item to actually arrive -- it structurally always follows the rehydration item -- then

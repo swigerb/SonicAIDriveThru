@@ -64,9 +64,14 @@ public sealed class RealtimeScript
 
     public void On(Func<RecordedFrame, bool> predicate, Func<FakeRealtimeConnection, RecordedFrame, CancellationToken, Task> handler)
     {
+        On(predicate, handler, kind: null);
+    }
+
+    private void On(Func<RecordedFrame, bool> predicate, Func<FakeRealtimeConnection, RecordedFrame, CancellationToken, Task> handler, string? kind)
+    {
         lock (_rulesGate)
         {
-            _rules.Add(new RealtimeScriptRule(predicate, handler));
+            _rules.Add(new RealtimeScriptRule(predicate, handler, kind));
         }
     }
 
@@ -79,6 +84,34 @@ public sealed class RealtimeScript
         lock (_rulesGate)
         {
             _rules.Clear();
+        }
+    }
+
+    /// <summary>Tag used to identify <see cref="WithVadDefaults"/>'s speech-simulation rule (the
+    /// one that answers `input_audio_buffer.append` with a synthetic speech_started/stopped/
+    /// committed/transcription-completed sequence), so it can be removed on its own without also
+    /// silencing the unrelated `conversation.item.create` acknowledgement rule.</summary>
+    private const string VadSpeechDefaultRuleKind = "vad-speech-default";
+
+    /// <summary>
+    /// PR #54 review: the previous <c>ClearVadDefaultsOnNextConnection</c>/<see cref="ClearRules"/>
+    /// combination removed BOTH of <see cref="WithVadDefaults"/>'s rules — the VAD-like speech
+    /// simulation AND the `conversation.item.create` acknowledgement (`.added`/`.done`) /
+    /// duplicate-item-id rejection rule — even though only the speech rule was ever the actual
+    /// source of the race the scenario using it needs to suppress (an auto speech_started reply
+    /// permanently cancelling the resume nudge, see FakeRealtimeUpstreamServer's
+    /// ClearVadDefaultsOnNextConnection doc comment for the full history). Silently dropping the
+    /// item-create ack too meant a scenario using this switch could never observe whether a
+    /// middle-tier-authored item (e.g. the rehydration item) got acknowledged, without that being
+    /// the point of the switch at all. Removes only the tagged speech-default rule; any other
+    /// rule (including the item-create ack default, and anything a test added itself via
+    /// <see cref="On"/>) is left in place.
+    /// </summary>
+    public void RemoveVadSpeechDefaultRule()
+    {
+        lock (_rulesGate)
+        {
+            _rules.RemoveAll(r => r.Kind == VadSpeechDefaultRuleKind);
         }
     }
 
@@ -127,7 +160,8 @@ public sealed class RealtimeScript
                     ["item_id"] = itemId,
                     ["transcript"] = "",
                 }, ct).ConfigureAwait(false);
-            });
+            },
+            kind: VadSpeechDefaultRuleKind);
 
         // GA acknowledges every client-created conversation item (e.g. the
         // function_call_output the backend sends after running a tool) with
@@ -197,10 +231,14 @@ public sealed class RealtimeScript
     }
 }
 
-/// <summary>One rule: fires <see cref="Handler"/> for every received frame matching <see cref="Predicate"/>.</summary>
+/// <summary>One rule: fires <see cref="Handler"/> for every received frame matching <see cref="Predicate"/>.
+/// <paramref name="Kind"/> optionally tags a rule so it can be selectively removed later (e.g.
+/// <see cref="RealtimeScript.RemoveVadSpeechDefaultRule"/>) without disturbing other rules --
+/// null for any rule a test adds itself via <see cref="RealtimeScript.On"/>.</summary>
 public sealed record RealtimeScriptRule(
     Func<RecordedFrame, bool> Predicate,
-    Func<FakeRealtimeConnection, RecordedFrame, CancellationToken, Task> Handler);
+    Func<FakeRealtimeConnection, RecordedFrame, CancellationToken, Task> Handler,
+    string? Kind = null);
 
 /// <summary>An ordered set of response.* events the fake should emit for one response.create.</summary>
 public sealed record ResponseScript(IReadOnlyList<ResponseEvent> Events)
