@@ -229,6 +229,123 @@
 - **Fallback Behavior:** null token → no `?token=...` param appended; legacy backends work unchanged
 - **Impact:** Zero demo behavior change until `require_session_token: true` is set
 
+#### 34. Search Fallback: Wrap the Retry, Not Just the First Attempt (Summer — Backend Dev, #37)
+- **Decision:** Moved Azure AI Search result iteration and first-page materialization *inside* the
+  existing `try` block in `tools.py::search()`, and wrapped the minimal-`select` retry call itself in
+  its own `try`/`except` rather than letting it run unguarded after the first exception was caught.
+- **Rationale:** The original code caught the field-name-mismatch 400 on the *first* search call, but
+  then re-issued the retry call and iterated its results **outside** any exception handling — so a
+  second failure (or a failure while paging results) would propagate as an unhandled exception instead
+  of falling through to the tool's existing "no results" guest-facing response. This was dead-code
+  protection: the retry path existed but wasn't actually safe to call.
+- **Investigated (report-only, no change):** Checked whether the McDonald's/Dunkin' search tool
+  implementations have the same pattern. **Confirmed absent** — those backends don't have an
+  equivalent field-name-mismatch retry path at all (no dual-select-list fallback), so this specific
+  dead-code-retry bug is unique to the Sonic backend and required no cross-backend fix.
+- **Verification:** Red confirmed via `SearchToolTests.cs`'s two previously-skipped fallback
+  scenarios (both now un-skipped and green) plus new realistic-mock Python unit tests in
+  `test_tools_search.py`. Mutation-checked.
+
+#### 35. Route 44 Alias Normalization on a Single Canonical Size Key (Summer — Backend Dev, #40)
+- **Decision:** Added `menu_utils.canonical_size_key()` so every order-mutation path (add/merge/
+  remove/update) normalizes `size` through one canonical mapping before comparing or storing —
+  `"44 oz"`, `"route44"`, `"Route 44"`, and case variants all canonicalize to the same key used
+  internally, instead of each caller inventing its own ad-hoc string comparison.
+- **Rationale:** Guests and the model say the Route 44 size differently across turns
+  (`"route 44"`, `"44oz"`, `"Route44"`); without a single canonical key, "add a route 44 tots" then
+  "remove the 44 oz tots" silently failed to merge/remove because the literal strings didn't match.
+- **Verification:** Red confirmed via 2 previously-skipped `UpdateOrderAddRemoveModifyTests.cs`
+  scenarios (now un-skipped, green) plus 2 new Python unit tests. Mutation-checked.
+
+#### 36. Single `_reset_order_state()` Helper Clears All Per-Session State (Summer — Backend Dev, #41)
+- **Decision:** Extracted a single `_reset_order_state()` helper in `order_state.py` that clears
+  every piece of per-session order state (items, combo/absorption display bookkeeping, etc.) in one
+  place, and made `reset_order` call only this helper.
+- **Rationale:** Reset previously cleared the order item list but left stale combo-absorption display
+  state behind, so a reset order could still show phantom combo line items on the next `get_order`
+  readback. A single reset helper removes the possibility of a future new piece of session state being
+  added to one path and forgotten in the other.
+- **Verification:** Red confirmed via previously-skipped `ComboAbsorptionTests.cs` reset-display
+  scenario (now un-skipped, green) plus a new Python unit test. Mutation-checked.
+
+#### 37. Category Inference: `menuItems.json` First, Word-Boundary Keyword Fallback Second; Sundaes Are Full-Price During Happy Hour (Summer — Backend Dev, #39 — decision confirmed by Brian)
+- **Decision:** `infer_combo_component()` now looks up the item's category from `menuItems.json`
+  first; only unknown items fall through to a keyword heuristic, and that heuristic now requires a
+  **word-boundary** match (regex `\b...\b`) so `"Dr Pepper"` no longer spuriously matches on a
+  substring inside an unrelated item name. Per Brian's explicit decision recorded on #39: **sundaes
+  are excluded from the happy-hour drinks/sides discount and remain full price** — they are neither a
+  "drink" nor a "side" for discount purposes even though the naive keyword heuristic would have
+  matched "Sundae" as a dessert-adjacent item.
+- **Rationale:** The prior keyword-only approach was both under- and over-inclusive: it missed items
+  whose category was only knowable from the menu data, and it false-positive-matched substrings
+  (`dr pepper` matching inside longer strings without a word boundary). Brian's sundae ruling needed
+  an explicit, tested exception rather than relying on the keyword fallback accidentally getting it
+  right.
+- **Added:** A golden category table (`tests/conformance/testdata/golden-menu-categories.json`) with
+  every menu item's expected bucket (`sides`/`drinks`/`none`), enforced by a new C# theory
+  (`GoldenMenuCategoryHappyHourTests.cs`) covering all 3 buckets and both exception cases (sundae,
+  hot-dog-entree).
+- **Verification:** Red confirmed via the previously-skipped Ched 'R' Peppers scenario (now
+  un-skipped, green) plus the new golden-category theory and 6 new Python unit tests
+  (`test_menu_utils.py`). Mutation-checked (stashed `menu_utils.py`/`order_state.py`; confirmed both
+  Ched R Peppers and the sundae exception case go genuinely red).
+
+#### 38. Exact Money via `Decimal` + `ROUND_HALF_UP`, One Formatter for Every Spoken-Money Surface (Summer — Backend Dev, #46 — decision confirmed by Brian per #28 N22)
+- **Decision:** All order money math (`_update_summary` in `order_state.py`) now runs entirely in
+  `decimal.Decimal`, built directly from `menuItems.json` prices and config tax rates via
+  `money_utils.to_decimal()` — never through a `float` intermediate — with **no intermediate
+  rounding** anywhere in the subtotal/tax/final-total chain. A single new formatter,
+  `money_utils.format_money()`, renders the final exact `Decimal` as a culture-invariant `"$0.00"`
+  string using `decimal.ROUND_HALF_UP` (a half cent rounds *up*, not toward a ceiling — verified with
+  a dedicated non-half-cent case that must still round down). Per Brian's #28 N22 note, every
+  spoken-money surface in the backend — the `tools.py` prompt/template paths (~5 call sites) and the
+  `get_order` readback in `order_state.py` (which previously omitted the `$` sign entirely) — now
+  routes through this one formatter, and the wire's numeric fields (`total`/`tax`/`finalTotal`/
+  `items[].price`) remain plain, un-rounded JSON numbers, unaffected by the display rule.
+- **Rationale:** The prior implementation rendered spoken totals with Python's `float`-based `:.2f`
+  format specifier, which round-trips through IEEE-754 binary and can disagree with *every*
+  consistent decimal rounding rule depending on a value's specific binary representation — Rick's
+  200k-order simulation found hundreds of half-cent disagreements. `SpokenTotalHalfCentTests` (the
+  `5.265` → `$5.27` case) was `Skip`'d against Python for exactly this reason.
+  Un-skipping it required an actual `Decimal`-based rounding rule, not a smarter `float` format string.
+- **Added:** Two new N21 golden cases per Rick — trailing-zero (`10.80` → `$10.80`, proving a clean
+  value still renders two decimal places) and round-up-non-midpoint (3× Tots medium at `2.79` →
+  `9.0396` → `$9.04`, proving the rule generalizes beyond exact half-cent landings). Confirmed the
+  conformance suite's money tolerance still holds — Python's `Decimal`-derived exact values now match
+  the golden decimals exactly, well within the existing 1e-6 Python slack (which is now unused
+  headroom rather than a load-bearing tolerance).
+- **Verification:** Red confirmed on both sides — Python: `test_money_utils.py` (6 new tests,
+  mutation-checked at both collection level, i.e. missing module, and assertion level, i.e.
+  `ROUND_HALF_UP`→`ROUND_DOWN` swap); C#: `SpokenTotalHalfCentTests` un-skipped plus 2 new `[Fact]`s
+  for the N21 cases, all green.
+
+#### 39. Frontend Ticket Cents: Backend-Computed Display Strings as Source of Truth, Client-Side `formatMoney()` Double-Rounding as Defense-in-Depth (Morty — Frontend Dev, #47)
+- **Decision:** Two-pronged. (1) `OrderSummary` (`app/backend/models.py`) gains three additive string
+  fields — `totalDisplay`/`taxDisplay`/`finalTotalDisplay` — computed server-side via `format_money()`
+  from the pre-float-conversion `Decimal` (the same #46 formatter, same `ROUND_HALF_UP` rule); these
+  are the single source of truth the ticket prefers whenever present, added to the wire schema
+  additively (numeric fields unchanged, existing consumers unaffected; a Pydantic
+  `model_validator` auto-fills them from the numeric fields for any caller that omits them). (2) The
+  frontend (`order-summary.tsx`) gains an exported `formatMoney()` helper using a **double-rounding**
+  trick (`Number(value.toFixed(10)).toFixed(2)`) as a fallback for the dummy-data preview path (which
+  never talks to the backend) and for each line item's `price * quantity` (not covered by the new
+  backend fields, since `OrderItem` itself wasn't touched).
+- **Rationale:** Rick's repro — `88.04499999999999` vs `88.045`, both meant to be the exact decimal
+  `$88.045` — are genuinely distinct IEEE-754 doubles. Plain `.toFixed(2)` renders them
+  inconsistently (`$88.04` vs `$88.05`); the classic "epsilon trick"
+  (`Math.round((v + Number.EPSILON) * 100) / 100`) does not fix this either (still `$88.04` for the
+  first value). Rounding first to a much higher intermediate precision collapses the float noise
+  (which only ever appears past roughly the 10th decimal place at these magnitudes) before the final
+  2-decimal round, so both inputs land on `$88.05`. This mirrors the exact same problem #46 solved on
+  the backend: once float noise is baked into a value, only access to the original exact value (the
+  backend's `Decimal` path) or an intermediate-precision cleanup round can reliably normalize it —
+  hence preferring the backend string whenever it's available, and using the double-rounding trick
+  only where the backend hasn't (yet) computed one.
+- **Verification:** Red confirmed by reverting `formatMoney()` to plain `.toFixed(2)` — 3 of the new
+  frontend tests fail exactly as expected (line-item price, Rick's two repro values, per-item
+  rendering), restored and green. Backend `_fill_display_defaults` validator mutation-checked
+  (`test_models.py`, 3 new tests) by breaking the fill logic — confirmed genuine red, restored.
+
 ## Governance
 
 - All meaningful changes require team consensus
