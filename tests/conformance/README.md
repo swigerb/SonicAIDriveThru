@@ -1418,3 +1418,56 @@ Contrast with `EchoSuppressionBargeInTests`'s Phase A, which deliberately *delay
 completion (via the harness's `DoneEvent.Pace`, added for this purpose) and relies on an explicit
 browser barge-in to isolate `on_barge_in()` specifically — a different, narrower claim than
 `GreetingWithoutAudioUnmutesTests`'s.
+
+## A tool that raises an unhandled exception must not kill the guest's connection (#36)
+
+`rtmt.py`'s `response.output_item.done` dispatch (`_process_message_to_client`) is the seam between
+the model's function-call request and the actual tool execution (`await tool.target(...)`) plus
+result marshaling (building the `function_call_output` sent upstream, and — for `TO_CLIENT`/`TO_BOTH`
+results — the `extension.middle_tier_tool_response` sent to the browser). Before this fix, none of
+that block was guarded: any exception raised anywhere in it (JSON-decoding the model's own
+`arguments`, the tool handler itself, or the result-marshaling code) propagated straight up through
+`_forward_messages`'s connection-wide `except Exception: logger.exception(...)`, which tears the
+*entire* guest WebSocket down — turning one malformed or buggy tool call into a hard disconnect for
+the whole ordering session.
+
+The fix has two layers, deliberately kept as defense-in-depth rather than either one alone:
+
+1. **Generic seam** — the whole tool-execution + result-marshaling block is wrapped in a single
+   `try/except Exception`. On any exception: log server-side only via `logger.exception(...)` with
+   the **tool name and session id only** (never the raw `args`, which may contain guest-entered
+   text); build a short, neutral apology via `self._prompt_loader.render_error("tool_execution_failed")`
+   (new key in `error_messages.yaml`; a hardcoded fallback string is used if `self._prompt_loader`
+   is `None`); send it as a normal `function_call_output` to the **server only** (`server_ws`) so
+   the model can gracefully recover the conversation — **never** to the client/browser (no stray
+   `extension.middle_tier_tool_response` for a failed call). The guest's session, and the socket,
+   survive; the very next tool call on the same connection works normally.
+2. **`update_order`'s own upfront validation** (`tools.py`) — the literal reproduction cited in #36
+   was a scripted `update_order` call missing `item_name`, which raised a bare `KeyError` at
+   `args["item_name"]`. `update_order` now validates its full required-argument list
+   (`action`, `item_name`, `size`, `quantity`) up front and returns the same kind of graceful,
+   `TO_SERVER`-only `ToolResult` apology used by its other application-level rejections (the
+   zero/negative-price guard, extras rules, per-item/-order limits) — instead of ever reaching a
+   raise in the first place.
+
+These two layers are complementary, not redundant: layer 2 gives `update_order`'s specific known
+failure mode a precise, immediate, well-tested response; layer 1 is the safety net for *any* tool
+(present or future) that raises for a reason nobody anticipated. Mutation-testing this confirmed the
+layering is real, not accidental — removing layer 2 alone (`tools.py`'s validation) is still fully
+caught by layer 1 at the black-box level (`ToolErrorSessionSurvivesTests` stays green, because the
+generic seam in `rtmt.py` catches the resulting `KeyError` just the same as any other tool
+exception); removing layer 1 alone (`rtmt.py`'s `try/except`) is *not* caught by
+`ToolErrorSessionSurvivesTests` at all, because layer 2 already prevents that specific scenario from
+ever raising — only a Python-level unit test that bypasses `tools.py` entirely (a directly-raising
+mock tool target) pins layer 1's own behaviour.
+
+`ToolErrorSessionSurvivesTests.Session_survives_an_unhandled_tool_exception` (previously skipped,
+now unskipped) is the black-box regression proof: it scripts an `update_order` `FunctionCallEvent`
+with no `item_name`, then asserts (a) a `function_call_output` for that `call_id` arrives; (b) the
+connection survives and a subsequent tool call still works; (c) **no** stray
+`extension.middle_tier_tool_response` reaches the browser for the failed call; (d) the output text
+does not look like a coincidentally-successful order-summary JSON object. The test allows exactly
+one new backend error log line (`allowedNewBackendErrors: 1`) — the `logger.exception(...)` call
+itself is expected and desired (per the issue's ask to log the failure server-side); it just must no
+longer propagate and tear the socket down.
+

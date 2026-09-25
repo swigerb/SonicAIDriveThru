@@ -362,6 +362,21 @@ async def update_order(args, session_id: str) -> ToolResult:
 
     logger.info("Updating order for session %s with payload %s", session_id, args)
 
+    # ── #36: validate required args up front instead of letting a bare
+    # args["..."] raise an unhandled KeyError deep inside this handler. Before this
+    # check, a malformed/incomplete tool call (e.g. missing "item_name") propagated a
+    # raw KeyError all the way up through rtmt.py's response.output_item.done dispatch,
+    # tearing down the guest's whole WebSocket connection instead of giving the model a
+    # graceful, recoverable error. ──
+    required = ("action", "item_name", "size", "quantity")
+    missing = [k for k in required if k not in args]
+    if missing:
+        logger.warning("update_order called with missing required argument(s) %s (session=%s)", missing, session_id)
+        _err = _prompt_loader.render_error("tool_execution_failed") if _prompt_loader else (
+            "I'm sorry, something went wrong with that. Could you try again?"
+        )
+        return ToolResult(_err, ToolResultDirection.TO_SERVER)
+
     item_name = args["item_name"]
 
     # ── Customization validation (reject nonsensical mods) ──

@@ -2002,6 +2002,45 @@ class ProcessMessageToClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client_payload["type"], "extension.middle_tier_tool_response")
         self.assertEqual(client_payload["tool_result"], '{"items":[]}')
 
+    async def test_tool_exception_returns_graceful_output_and_survives(self):
+        """swigerb/SonicAIDriveThru#36: an unhandled exception raised inside a tool's
+        target must not propagate out of _process_message_to_client (which would tear
+        down the whole guest WebSocket via _forward_messages's connection-wide
+        catch-all). Instead the model must get a neutral function_call_output, and
+        nothing must be sent to the client (no stray extension.middle_tier_tool_response
+        for a failed call)."""
+        rtmt = self._make_rtmt()
+        client_ws = _make_mock_ws()
+        server_ws = _make_mock_ws()
+        order_state_singleton.sessions = {}
+        rtmt._sessions.create_session(client_ws)
+
+        mock_tool_target = AsyncMock(side_effect=KeyError("item_name"))
+        rtmt.tools["exploding_tool"] = Tool(target=mock_tool_target, schema={"name": "exploding_tool"})
+
+        tools_pending = {"call-3": RTToolCall("call-3", "prev-3")}
+        msg = MagicMock()
+        msg.data = json.dumps({
+            "type": "response.output_item.done",
+            "item": {
+                "type": "function_call",
+                "name": "exploding_tool",
+                "call_id": "call-3",
+                "arguments": '{}'
+            }
+        })
+        with self.assertLogs("sonic-drive-in", level="ERROR"):
+            result = await rtmt._process_message_to_client(msg, client_ws, server_ws, tools_pending)
+        self.assertIsNone(result)
+        mock_tool_target.assert_called_once()
+        server_ws.send_json.assert_called_once()
+        client_ws.send_json.assert_not_called()
+        server_payload = server_ws.send_json.call_args[0][0]
+        self.assertEqual(server_payload["type"], "conversation.item.create")
+        self.assertEqual(server_payload["item"]["type"], "function_call_output")
+        self.assertEqual(server_payload["item"]["call_id"], "call-3")
+        self.assertTrue(len(server_payload["item"]["output"]) > 0)
+
     async def test_error_message_logged_not_crashed(self):
         """OpenAI error messages should be logged, not crash the handler."""
         rtmt = self._make_rtmt()

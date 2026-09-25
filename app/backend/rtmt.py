@@ -1312,36 +1312,58 @@ class RTMiddleTier:
                                 logger.error("Unknown tool requested: %s", item["name"])
                                 updated_message = None
                             else:
-                                args = json.loads(item["arguments"])
-                                logger.info("Executing tool '%s' with args %s (session=%s)", item["name"], args, session_id)
-                                t0 = time.monotonic()
-                                if item["name"] in ("update_order", "get_order", "reset_order"):
-                                    result = await tool.target(args, session_id)
-                                else:
-                                    result = await tool.target(args)
-                                elapsed_ms = (time.monotonic() - t0) * 1000
-                                logger.info("Tool '%s' result direction=%s", item["name"], result.destination)
+                                try:
+                                    args = json.loads(item["arguments"])
+                                    logger.info("Executing tool '%s' with args %s (session=%s)", item["name"], args, session_id)
+                                    t0 = time.monotonic()
+                                    if item["name"] in ("update_order", "get_order", "reset_order"):
+                                        result = await tool.target(args, session_id)
+                                    else:
+                                        result = await tool.target(args)
+                                    elapsed_ms = (time.monotonic() - t0) * 1000
+                                    logger.info("Tool '%s' result direction=%s", item["name"], result.destination)
 
-                                # ── Verbose: full tool call lifecycle ──
-                                result_text = result.to_text()[:_VERBOSE_RESULT_TRUNCATE]
-                                _vlog(verbose,
-                                      "\n═══ [TOOL CALL] %s ═══\n"
-                                      "Args: %s\n"
-                                      "Result: %s\n"
-                                      "Direction: %s\n"
-                                      "Time: %.1fms\n"
-                                      "═══════════════════════════",
-                                      item["name"],
-                                      json.dumps(args, indent=2),
-                                      result_text,
-                                      result.destination.name,
-                                      elapsed_ms)
+                                    # ── Verbose: full tool call lifecycle ──
+                                    result_text = result.to_text()[:_VERBOSE_RESULT_TRUNCATE]
+                                    _vlog(verbose,
+                                          "\n═══ [TOOL CALL] %s ═══\n"
+                                          "Args: %s\n"
+                                          "Result: %s\n"
+                                          "Direction: %s\n"
+                                          "Time: %.1fms\n"
+                                          "═══════════════════════════",
+                                          item["name"],
+                                          json.dumps(args, indent=2),
+                                          result_text,
+                                          result.destination.name,
+                                          elapsed_ms)
 
-                                # Track tool call args + result in context window
-                                ctx_monitor = self._sessions.get_context_monitor(session_id)
-                                if ctx_monitor:
-                                    ctx_monitor.add_content(item.get("arguments", ""))
-                                    ctx_monitor.add_content(result.to_text())
+                                    # Track tool call args + result in context window
+                                    ctx_monitor = self._sessions.get_context_monitor(session_id)
+                                    if ctx_monitor:
+                                        ctx_monitor.add_content(item.get("arguments", ""))
+                                        ctx_monitor.add_content(result.to_text())
+
+                                    output_text = result.to_text() if result.destination in (ToolResultDirection.TO_SERVER, ToolResultDirection.TO_BOTH) else ""
+                                    send_to_client = result.destination in (ToolResultDirection.TO_CLIENT, ToolResultDirection.TO_BOTH)
+                                    client_text = result.to_client_text() if send_to_client else None
+                                except Exception:
+                                    # #36: a genuinely unhandled exception inside a tool handler
+                                    # (e.g. a malformed call missing a required argument) used to
+                                    # propagate all the way up through _forward_messages's
+                                    # connection-wide catch-all, tearing down the guest's whole
+                                    # WebSocket instead of giving the model a graceful, recoverable
+                                    # error. Log server-side only -- tool name + session id, never
+                                    # the raw args (which may contain guest-entered text) -- and
+                                    # hand the model a neutral function_call_output so the
+                                    # conversation, and the guest's session, survive.
+                                    logger.exception("Tool '%s' raised an unhandled exception (session=%s)",
+                                                      item["name"], session_id)
+                                    output_text = self._prompt_loader.render_error("tool_execution_failed") if self._prompt_loader else (
+                                        "I'm sorry, something went wrong with that. Could you try again?"
+                                    )
+                                    send_to_client = False
+                                    client_text = None
 
                                 await server_ws.send_json({
                                     "type": "conversation.item.create",
@@ -1349,17 +1371,18 @@ class RTMiddleTier:
                                         "id": new_middle_tier_item_id(),
                                         "type": "function_call_output",
                                         "call_id": item["call_id"],
-                                        "output": result.to_text() if result.destination in (ToolResultDirection.TO_SERVER, ToolResultDirection.TO_BOTH) else ""
+                                        "output": output_text
                                     }
                                 })
-                                if result.destination in (ToolResultDirection.TO_CLIENT, ToolResultDirection.TO_BOTH):
+                                if send_to_client:
                                     await client_ws.send_json({
                                         "type": "extension.middle_tier_tool_response",
                                         "previous_item_id": tool_call.previous_id,
                                         "tool_name": item["name"],
-                                        "tool_result": result.to_client_text()
+                                        "tool_result": client_text
                                     })
                                 updated_message = None
+
 
                 case "response.done":
                     if recovery is not None and await recovery.on_response_done(message):

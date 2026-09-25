@@ -39,3 +39,8 @@ messages:
 
   # Order reset
   order_cleared: "Order cleared."
+
+  # Tool execution failures (swigerb/SonicAIDriveThru#36): a malformed/incomplete tool
+  # call (missing required arguments) or a genuine unhandled exception inside a tool
+  # handler. Deliberately short and neutral -- no internal detail is ever guest-visible.
+  tool_execution_failed: "I'm sorry, something went wrong with that. Could you try again?"
