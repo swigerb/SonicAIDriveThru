@@ -24,6 +24,24 @@ public sealed class ResumeRehydrationAndNudgeTests(ResumeTimersConformanceFixtur
 {
     private static readonly TimeSpan FrameTimeout = TimeSpan.FromSeconds(30);
 
+    /// <summary>
+    /// PR #54 review ("black-box couplings"): the rehydration item and the nudge item are both
+    /// a plain system-role conversation.item.create -- rather than matching either on its
+    /// hard-coded English prose (session_manager.py's own text, which a conformant C# backend
+    /// has no obligation to reproduce word-for-word), identify them structurally by
+    /// type=="message" + role=="system". Both this suite's own send_greeting_once call site and
+    /// a future browser turn use role=="user" (see session_manager.py's own comment on
+    /// MIDDLE_TIER_ITEM_ID_PREFIX: "as the greeting, role='user', already did"), so role=="system"
+    /// unambiguously means "rehydration or nudge" in this resumed-connection flow, and their
+    /// relative order (rehydration always first, the nudge -- if any -- always second) tells
+    /// them apart from each other.
+    /// </summary>
+    private static bool IsSystemMessageItem(RecordedFrame f) =>
+        f.Type == "conversation.item.create" &&
+        f.Json.TryGetProperty("item", out var item) &&
+        item.TryGetProperty("type", out var itemType) && itemType.GetString() == "message" &&
+        item.TryGetProperty("role", out var role) && role.GetString() == "system";
+
     private async Task<(RealtimeBrowserClient Browser, FakeRealtimeConnection Connection, string ResumeId)>
         ConnectPastGreetingWithResumeIdAsync(CancellationToken ct)
     {
@@ -105,24 +123,33 @@ public sealed class ResumeRehydrationAndNudgeTests(ResumeTimersConformanceFixtur
         Assert.True(bootstrap is not null, "Expected a bootstrap session.update on the new upstream connection.");
 
         var rehydration = await newConnection.ReceivedFrames.WaitForAsync(
-            f => f.Type == "conversation.item.create" &&
-                 f.Json.TryGetProperty("item", out var item) &&
-                 item.TryGetProperty("role", out var role) && role.GetString() == "system" &&
-                 item.TryGetProperty("content", out var content) &&
-                 content.EnumerateArray().Any(part =>
-                     part.TryGetProperty("text", out var text) &&
-                     (text.GetString() ?? "").Contains("Connection restored")),
+            f => IsSystemMessageItem(f) && f.Sequence > bootstrap!.Sequence,
             FrameTimeout, ct);
         Assert.True(rehydration is not null,
-            "Expected the rehydration conversation.item.create (\"Connection restored\") on the new upstream connection.");
+            "Expected the rehydration conversation.item.create (system-role message) on the new upstream connection.");
         Assert.True(rehydration!.Sequence > bootstrap!.Sequence,
             "The rehydration item must follow the bootstrap session.update.");
 
-        var prematureResponse = await newConnection.ReceivedFrames.WaitForAsync(
-            f => f.Type == "response.create" && f.Sequence > rehydration.Sequence,
-            TimeSpan.FromMilliseconds(700), ct); // well under ResumeTimers' nudge_after_seconds=1s
+        // PR #54 review: a fixed "nothing arrives within 700ms" wall-clock window is fragile
+        // under load -- measured, the check started about 1ms after rehydration, leaving only
+        // about 300ms of slack, and WaitForAsync's own timer can fire late enough under
+        // concurrent load to stretch the window into the (correct) 1s-later nudge, producing a
+        // spurious pass or, worse, an unreliable kill. Instead, wait for the nudge item to
+        // actually arrive (it structurally always follows the rehydration item -- see
+        // IsSystemMessageItem's doc comment), then assert nothing between the two is a
+        // response.create. This is deterministic regardless of how long the wait itself took,
+        // and still kills the greeting-on-resume mutation (a reintroduced greeting sends a
+        // response.create in exactly this window).
+        var nudge = await newConnection.ReceivedFrames.WaitForAsync(
+            f => IsSystemMessageItem(f) && f.Sequence > rehydration!.Sequence,
+            TimeSpan.FromSeconds(6), ct); // ResumeTimers' nudge_after_seconds=1s, generous headroom
+        Assert.True(nudge is not null, "Expected the nudge to eventually fire so the window has a deterministic end.");
+
+        var prematureResponse = newConnection.ReceivedFrames.Snapshot()
+            .FirstOrDefault(f => f.Type == "response.create" &&
+                                  f.Sequence > rehydration!.Sequence && f.Sequence < nudge!.Sequence);
         Assert.True(prematureResponse is null,
-            "No response.create (greeting or otherwise) should fire immediately after a mid-conversation resume.");
+            "No response.create (greeting or otherwise) should fire between the rehydration item and the nudge.");
     });
 
     [Fact]
@@ -137,16 +164,17 @@ public sealed class ResumeRehydrationAndNudgeTests(ResumeTimersConformanceFixtur
             f => f.Type == "extension.session_resumed", FrameTimeout, ct);
         Assert.True(resumed is not null);
 
+        // The rehydration item (see IsSystemMessageItem's doc comment) is always sent first, on
+        // every resume -- the nudge, if any, is structurally the *next* system-message item
+        // after it, not simply "the first one seen" (that would be the rehydration item itself).
+        var rehydration = await newConnection.ReceivedFrames.WaitForAsync(
+            f => IsSystemMessageItem(f), FrameTimeout, ct);
+        Assert.True(rehydration is not null, "Expected the rehydration item before the nudge can be observed.");
+
         // ResumeTimers' nudge_after_seconds=1 -- allow generous headroom over that before
         // concluding the nudge never fired.
         var nudge = await newConnection.ReceivedFrames.WaitForAsync(
-            f => f.Type == "conversation.item.create" &&
-                 f.Json.TryGetProperty("item", out var item) &&
-                 item.TryGetProperty("content", out var content) &&
-                 content.EnumerateArray().Any(part =>
-                     part.TryGetProperty("text", out var text) &&
-                     (text.GetString() ?? "").Contains("quiet since their connection")),
-            TimeSpan.FromSeconds(6), ct);
+            f => IsSystemMessageItem(f) && f.Sequence > rehydration!.Sequence, TimeSpan.FromSeconds(6), ct);
         Assert.True(nudge is not null, "Expected exactly one nudge conversation.item.create after nudge_after_seconds of silence.");
 
         var nudgeResponseCreate = await newConnection.ReceivedFrames.WaitForAsync(
@@ -156,13 +184,7 @@ public sealed class ResumeRehydrationAndNudgeTests(ResumeTimersConformanceFixtur
         // Exactly once: no second nudge item ever follows, even after waiting well past another
         // full nudge_after_seconds interval.
         var secondNudge = await newConnection.ReceivedFrames.WaitForAsync(
-            f => f.Type == "conversation.item.create" &&
-                 f.Sequence > nudge!.Sequence &&
-                 f.Json.TryGetProperty("item", out var item) &&
-                 item.TryGetProperty("content", out var content) &&
-                 content.EnumerateArray().Any(part =>
-                     part.TryGetProperty("text", out var text) &&
-                     (text.GetString() ?? "").Contains("quiet since their connection")),
+            f => IsSystemMessageItem(f) && f.Sequence > nudge!.Sequence,
             TimeSpan.FromSeconds(2), ct);
         Assert.True(secondNudge is null, "The nudge must fire at most once per resume.");
     });
@@ -183,16 +205,15 @@ public sealed class ResumeRehydrationAndNudgeTests(ResumeTimersConformanceFixtur
         // fake's VAD-default script replies to input_audio_buffer.append with speech_started,
         // which rtmt.py's from_client_to_server relays down to this same connection and uses to
         // cancel any pending nudge (cancel_nudge("guest speech")).
+        var rehydration = await newConnection.ReceivedFrames.WaitForAsync(
+            f => IsSystemMessageItem(f), FrameTimeout, ct);
+        Assert.True(rehydration is not null, "Expected the rehydration item before a nudge could be observed.");
+
         await Task.Delay(TimeSpan.FromMilliseconds(200), ct);
         await newBrowser.SendInputAudioAppendAsync("dGVzdA==", ct);
 
         var nudge = await newConnection.ReceivedFrames.WaitForAsync(
-            f => f.Type == "conversation.item.create" &&
-                 f.Json.TryGetProperty("item", out var item) &&
-                 item.TryGetProperty("content", out var content) &&
-                 content.EnumerateArray().Any(part =>
-                     part.TryGetProperty("text", out var text) &&
-                     (text.GetString() ?? "").Contains("quiet since their connection")),
+            f => IsSystemMessageItem(f) && f.Sequence > rehydration!.Sequence,
             TimeSpan.FromSeconds(3), ct); // comfortably past the 1s nudge_after_seconds it would have fired at
         Assert.True(nudge is null, "Guest speech before the nudge deadline must cancel it.");
     });
