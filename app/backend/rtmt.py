@@ -714,8 +714,17 @@ class _SessionUpdateGuard:
         self._fallback_sent_for: set[str] = set()
 
     def stamp(self, message: dict, fallback_of: str | None = None) -> dict:
-        """Ensure `message` carries an event_id and start tracking it."""
-        event_id = message.get("event_id") or _new_event_id("sonic_fallback" if fallback_of else "sonic_su")
+        """Ensure `message` carries an event_id and start tracking it.
+
+        The candidate event_id must be a non-empty string -- it's used as a dict
+        key below, so anything else (a browser-forged {"event_id": {...}} or
+        [...]) would raise an unhashable-type TypeError and kill the socket
+        instead of being handled. Any non-string/empty candidate is discarded
+        and a fresh, server-generated id is used instead.
+        """
+        candidate = message.get("event_id")
+        event_id = candidate if isinstance(candidate, str) and candidate else \
+            _new_event_id("sonic_fallback" if fallback_of else "sonic_su")
         message["event_id"] = event_id
         self._sent[event_id] = fallback_of
         self._payloads[event_id] = message.get("session") or {}

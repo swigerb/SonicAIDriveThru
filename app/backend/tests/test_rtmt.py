@@ -48,6 +48,7 @@ from rtmt import (
     _origin_matches_host,
     _sanitize_turn_detection,
     _sanitize_voice,
+    _SessionUpdateGuard,
     _to_ga_session,
     create_hmac_token,
     validate_hmac_token,
@@ -1201,6 +1202,31 @@ class ProcessMessageToServerTests(unittest.IsolatedAsyncioTestCase):
         msg.data = json.dumps({"type": "session.update"})
         result = await rtmt._process_message_to_server(msg, ws)
         self.assertIsNone(result)
+
+    # ── PR #49 review round 5 "S2": guard.stamp() unhashable-event_id repros ──
+    # A browser-forged non-string event_id on session.update used to reach
+    # guard.stamp() unchecked, where it's used as a dict key -- raising a raw
+    # TypeError that killed the socket instead of being handled.
+
+    async def test_session_update_with_dict_event_id_does_not_crash_the_guard(self):
+        rtmt = self._make_rtmt()
+        ws = _make_mock_ws()
+        guard = _SessionUpdateGuard()
+        msg = MagicMock()
+        msg.data = json.dumps({"type": "session.update", "event_id": {"a": 1}, "session": {}})
+        result = await rtmt._process_message_to_server(msg, ws, guard=guard)
+        self.assertIsNotNone(result)
+        self.assertIsInstance(json.loads(result)["event_id"], str)
+
+    async def test_session_update_with_list_event_id_does_not_crash_the_guard(self):
+        rtmt = self._make_rtmt()
+        ws = _make_mock_ws()
+        guard = _SessionUpdateGuard()
+        msg = MagicMock()
+        msg.data = json.dumps({"type": "session.update", "event_id": ["a"], "session": {}})
+        result = await rtmt._process_message_to_server(msg, ws, guard=guard)
+        self.assertIsNotNone(result)
+        self.assertIsInstance(json.loads(result)["event_id"], str)
 
 
 class ClientToServerAllowListTests(unittest.TestCase):
