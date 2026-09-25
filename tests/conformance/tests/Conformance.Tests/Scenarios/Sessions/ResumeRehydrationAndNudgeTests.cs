@@ -219,6 +219,56 @@ public sealed class ResumeRehydrationAndNudgeTests(ResumeTimersConformanceFixtur
     });
 
     [Fact]
+    public Task The_nudge_never_fires_without_session_updated_confirming_the_resumed_connection() => fixture.RunAsync(async () =>
+    {
+        // PR #54 review: a mutation removing rtmt.py's nudge_after_silence() `await
+        // session_configured.wait()` line previously survived, because nothing in this suite
+        // ever withheld session.updated on the resumed connection to actually exercise that gate
+        // -- every other scenario's fake upstream acknowledges session.update immediately, so the
+        // gate was always a no-op wait. Arm SuppressSessionUpdatedOnNextConnection() (the same
+        // one-shot switch the greeting-timeout-fallback path uses) for the *resumed* connection:
+        // the fake still validates/merges the bootstrap session.update as normal but never sends
+        // back session.updated, so session_configured is never set for this connection's
+        // lifetime. Unlike the greeting (which has its own _SESSION_CONFIGURED_TIMEOUT_SEC
+        // fallback and fires anyway with a warning), the nudge has no such fallback: it must wait
+        // forever. The rehydration item itself is NOT gated on session.updated (rtmt.py sends it
+        // synchronously right after the resume decision, before nudge_after_silence() is even
+        // scheduled), so we still expect exactly one system-message item -- just never a second.
+        var ct = TestContext.Current.CancellationToken;
+        var (oldBrowser, _, resumeId) = await ConnectPastGreetingWithResumeIdAsync(ct);
+
+        fixture.Realtime.SuppressSessionUpdatedOnNextConnection();
+        var (newBrowser, newConnection) = await DropAndResumeAsync(oldBrowser, resumeId, ct);
+        await using var _ = newBrowser;
+
+        var resumed = await newBrowser.ReceivedFrames.WaitForAsync(
+            f => f.Type == "extension.session_resumed", FrameTimeout, ct);
+        Assert.True(resumed is not null);
+
+        var rehydration = await newConnection.ReceivedFrames.WaitForAsync(
+            f => IsSystemMessageItem(f), FrameTimeout, ct);
+        Assert.True(rehydration is not null,
+            "The rehydration item is sent unconditionally on resume, regardless of session.updated.");
+
+        // Confirm the suppression actually took effect -- without this, a harness regression in
+        // SuppressSessionUpdatedOnNextConnection itself could silently turn this into a
+        // no-op test that passes for the wrong reason (session.updated arrives normally, the
+        // gate is satisfied quickly, and "no second item" would look identical to "gate held").
+        var sessionUpdated = await newConnection.ReceivedFrames.WaitForAsync(
+            f => f.Type == "session.updated", TimeSpan.FromSeconds(2), ct);
+        Assert.True(sessionUpdated is null,
+            "Test setup error: session.updated was NOT suppressed on the resumed connection.");
+
+        // Well past ResumeTimers' nudge_after_seconds=1s -- if the session.updated gate were
+        // bypassed, the nudge would already have fired by now.
+        var nudge = await newConnection.ReceivedFrames.WaitForAsync(
+            f => IsSystemMessageItem(f) && f.Sequence > rehydration!.Sequence,
+            TimeSpan.FromSeconds(5), ct);
+        Assert.True(nudge is null,
+            "The nudge must not fire while session.updated has never confirmed the resumed connection is configured.");
+    });
+
+    [Fact]
     public Task Ending_the_session_closes_with_1000_and_the_order_and_credential_are_gone() => fixture.RunAsync(async () =>
     {
         var ct = TestContext.Current.CancellationToken;
