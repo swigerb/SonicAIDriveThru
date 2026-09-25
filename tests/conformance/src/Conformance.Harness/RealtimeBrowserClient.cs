@@ -188,6 +188,20 @@ public sealed class RealtimeBrowserClient : IAsyncDisposable
     /// connection simply vanishing before this send lands -- is treated the same way: the socket
     /// is (or is about to be) closed either way, which is exactly what this method was trying to
     /// bring about.
+    ///
+    /// PR #52 CI follow-up round 2 (full-suite run pushed after commit 3c03ab4): under full-suite
+    /// load, the <c>Explicit_close_does_not_throw_when_the_peer_aborts_first</c> self-test in
+    /// <c>Conformance.Tests</c> showed <c>WebSocketException</c> alone is not enough. <c>ManagedWebSocket</c> surfaces a
+    /// peer TCP reset encountered *during* <c>CloseOutputAsync</c>'s send as an
+    /// <see cref="OperationCanceledException"/> wrapping an <see cref="IOException"/>/
+    /// <see cref="System.Net.Sockets.SocketException"/> -- not a <c>WebSocketException</c> --
+    /// whenever the fault happens while the receive side has already completed (i.e. exactly the
+    /// same "reader loop wins the race" condition documented above, just surfacing as a different
+    /// .NET exception type than the check-then-await TOCTOU on <c>_socket.State</c> alone would
+    /// suggest). Since this is the caller's own <paramref name="cancellationToken"/> that was
+    /// passed to <c>CloseOutputAsync</c>, the <c>when</c> guard below only swallows this when that
+    /// token was *not* the thing requesting cancellation -- a genuine caller-requested cancel
+    /// still propagates as before.
     /// </summary>
     public async Task CloseAsync(
         WebSocketCloseStatus status = WebSocketCloseStatus.NormalClosure,
@@ -205,7 +219,15 @@ public sealed class RealtimeBrowserClient : IAsyncDisposable
         {
             // Best-effort close -- see the doc comment above.
         }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            // Best-effort close -- see the doc comment above (round 2): the peer reset the
+            // connection out from under the send, surfaced as OperationCanceledException rather
+            // than WebSocketException. Not a caller-requested cancel (the guard above already
+            // ruled that out), so treat it the same as the WebSocketException case.
+        }
     }
+
 
     /// <summary>
     /// #28 N10: simulates a client disappearing with no WebSocket-level close handshake at all —
@@ -358,6 +380,12 @@ public sealed class RealtimeBrowserClient : IAsyncDisposable
     /// the grace period, not on every disposal. A scenario whose own subject matter genuinely is
     /// the abrupt-drop behaviour should call <see cref="AbortAsync"/> instead of relying on plain
     /// disposal to produce it as a side effect.
+    ///
+    /// PR #52 CI follow-up round 2: same peer-reset-surfaces-as-OperationCanceledException hole
+    /// as <see cref="CloseAsync"/> -- see that method's doc comment for the full explanation. The
+    /// <c>CloseOutputAsync</c> call here always passes <see cref="CancellationToken.None"/>,
+    /// which can never itself request cancellation, so catching <see cref="OperationCanceledException"/>
+    /// unconditionally is safe: it can only mean the underlying send faulted, never a caller cancel.
     /// </summary>
     public async ValueTask DisposeAsync()
     {
@@ -372,6 +400,12 @@ public sealed class RealtimeBrowserClient : IAsyncDisposable
         catch (WebSocketException)
         {
             // Best-effort close.
+        }
+        catch (OperationCanceledException)
+        {
+            // Best-effort close (round 2) -- see the doc comment above: CancellationToken.None
+            // above can never be the source of this, so it can only be the peer resetting the
+            // connection out from under the send.
         }
 
         if (_readerTask is not null)
