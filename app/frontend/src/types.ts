@@ -100,6 +100,15 @@ export type OrderSummaryWire = {
     total: number;
     tax: number;
     finalTotal: number;
+    // #47/PR #50 follow-up: additive, backend-rounded display strings (money_utils.format_money,
+    // ROUND_HALF_UP) mirroring OrderSummaryProps' *Display fields in order-summary.tsx. Optional
+    // because they're additive on the wire -- older payloads/tests that only set the four numeric
+    // fields above remain valid -- but present on every real backend response (including
+    // extension.session_resumed's order_summary) so the resumed ticket keeps reading the same
+    // single source of truth as a fresh order instead of falling back to a client-side re-round.
+    totalDisplay?: string;
+    taxDisplay?: string;
+    finalTotalDisplay?: string;
 };
 
 // Reply to extension.resume: the dropped session (and its order) is back.

@@ -39,4 +39,14 @@ describe("calculateOrderSummary", () => {
         expect(result.total).toBe(0);
         expect(result.finalTotal).toBe(0);
     });
+
+    it("populates the #47 display-string fields alongside the numeric fields", () => {
+        const items: OrderItem[] = [
+            { item: "Large Tots", size: "standard", quantity: 1, price: 3.29, display: "Large Tots" }
+        ];
+        const result = calculateOrderSummary(items);
+        expect(result.totalDisplay).toBe("$3.29");
+        expect(result.taxDisplay).toBe("$0.26"); // 3.29 * 0.08 = 0.2632 -> rounds to $0.26
+        expect(result.finalTotalDisplay).toBe("$3.55"); // 3.29 * 1.08 = 3.5532 -> rounds to $3.55
+    });
 });
