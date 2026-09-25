@@ -835,8 +835,12 @@ Keyword fallbacks (`_keyword_fallback_combo_drink`, `_keyword_fallback_happy_hou
 names that resolve to no `MENU_CATEGORY_MAP` entry at all, i.e. genuinely off-menu) match on
 **word boundaries**, not bare substrings (PR #50 review round 4): a bare substring check let
 `"tea"` match inside `"steak"`, silently absorbing an off-menu `"Philly Cheesesteak"`/
-`"Steak Sandwich"` into a combo's drink slot for free and happy-hour-discounting it. Both keyword
-lists are compiled regexes:
+`"Steak Sandwich"` into a combo's drink slot for free and happy-hour-discounting it. A hyphen is a
+non-word character in both engines (Python `\b`/`re` and C#'s `\b`/`Regex`, whose word-character
+definition matches .NET's), so it is a word boundary in either regex, on either side, with no
+special-casing (PR #50 review round 5, no behaviour change) — a keyword adjacent to a hyphen, e.g.
+a hyphenated customization like `"(Extra-Crispy)"` or the `"All-American"` prefix on the Smasher
+family, still gets a correct boundary. Both keyword lists are compiled regexes:
 ```
 r"\b(?:slush(?:ie|y)?|limeade|ocean water|drink|tea|lemonade|coke|sprite|root beer)(?:e?s)?\b"
 ```

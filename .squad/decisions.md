@@ -537,6 +537,13 @@
   "Add Bacon" extra through instead of being wrongly rejected. Mutation check: reverting `_menu_key`
   to the round-4 (®-only) form fails exactly that one new conformance test (23 → 22 passing), the
   other 22 stay green; restored, re-confirmed 23/23.
+- **Hyphens are word boundaries in both regex engines by design (should-fix 5, no behaviour
+  change).** Documented as a note only in the README's keyword-fallback section — Python's `\b`
+  and C#'s `\b` (via `Regex`, whose word-character definition matches .NET's) both treat `-` as a
+  non-word character, so a keyword adjacent to a hyphen (e.g. a hyphenated customization like
+  `"(Extra-Crispy)"`, or the `"All-American"` prefix on the Smasher family) still gets a correct
+  boundary on either side without any special-casing — a future C# port of these keyword regexes
+  needs no adjustment for hyphens.
 
 #### 42. Customised Items Must Be Normalised Before Every Menu Lookup (Summer — Backend Dev, PR #50 review round 2)
 - **Root cause: customizations live *inside* `item_name`, and lookups didn't account for that.**
