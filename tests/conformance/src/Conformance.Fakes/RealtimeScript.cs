@@ -140,13 +140,57 @@ public sealed class RealtimeScript
                 {
                     return;
                 }
+                var itemId = item.TryGetProperty("id", out var idProp) && idProp.ValueKind == System.Text.Json.JsonValueKind.String
+                    ? idProp.GetString()
+                    : null;
+
+                // GA rejects a repeated item id within the same conversation with this exact
+                // error shape (live-verified against gpt-realtime-2.1 / gpt-realtime-2.1-dz for
+                // PR #30 review "G1") instead of the usual .added/.done acknowledgement below.
+                if (itemId is not null && !connection.SessionState.SeenConversationItemIds.Add(itemId))
+                {
+                    await connection.SendAsync(new System.Text.Json.Nodes.JsonObject
+                    {
+                        ["type"] = "invalid_request_error",
+                        ["code"] = "item_create_duplicate_item_id",
+                        ["message"] = $"Error adding item: an item with id '{itemId}' already exists.",
+                        ["param"] = null,
+                        ["event_id"] = null,
+                    }, ct).ConfigureAwait(false);
+                    return;
+                }
+
+                // Both acknowledgement frames describe the same item's position in the
+                // conversation, so both must carry the *same* previous_item_id -- captured once,
+                // before LastConversationItemId advances to this item below (PR #30 review "G1"
+                // part 2: previously LastConversationItemId was never updated for a client-created
+                // item at all, so a subsequent server-generated item's own previous_item_id could
+                // point at a stale predecessor instead of the client item that actually came last).
+                var previousItemId = connection.SessionState.LastConversationItemId;
+                var itemNode = System.Text.Json.Nodes.JsonNode.Parse(item.GetRawText());
                 await connection.SendAsync(new System.Text.Json.Nodes.JsonObject
                 {
                     ["type"] = "conversation.item.added",
                     ["event_id"] = FakeRealtimeConnection.NewEventId(),
-                    ["previous_item_id"] = connection.SessionState.LastConversationItemId,
-                    ["item"] = System.Text.Json.Nodes.JsonNode.Parse(item.GetRawText()),
+                    ["previous_item_id"] = previousItemId,
+                    ["item"] = itemNode?.DeepClone(),
                 }, ct).ConfigureAwait(false);
+                // GA also emits conversation.item.done "when the item is finalized" -- a second,
+                // separate event carrying the full item again. Rick's PR #30 review ("M1"/"M2")
+                // found the backend had no filtering for this event at all, and that the fake's
+                // silence on it was exactly why the existing conformance suite never caught the
+                // leak: nothing exercised the wire behaviour .created/.added alone can't prove.
+                await connection.SendAsync(new System.Text.Json.Nodes.JsonObject
+                {
+                    ["type"] = "conversation.item.done",
+                    ["event_id"] = FakeRealtimeConnection.NewEventId(),
+                    ["previous_item_id"] = previousItemId,
+                    ["item"] = itemNode?.DeepClone(),
+                }, ct).ConfigureAwait(false);
+                if (itemId is not null)
+                {
+                    connection.SessionState.LastConversationItemId = itemId;
+                }
             });
 
         return script;

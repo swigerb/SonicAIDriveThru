@@ -10,33 +10,19 @@ namespace Conformance.Tests;
 /// for that in isolation). This file additionally asks "does the *browser* ever see
 /// `instructions`/`tools` in a forwarded `session.updated`?" against the real Python backend.
 ///
-/// It does not. `app/backend/rtmt.py`'s `_process_message_to_client` explicitly scrubs
-/// `instructions`/`tools` from the `session.created` frame it forwards to the browser (search
-/// for "Hide the instructions, tools and max tokens from clients" in rtmt.py), but has no
+/// It used to leak both: `app/backend/rtmt.py`'s `_process_message_to_client` scrubbed
+/// `instructions`/`tools` from the `session.created` frame it forwards to the browser, but had no
 /// equivalent case for `session.updated` -- and `session.updated` is not in
-/// `_PASSTHROUGH_SERVER_TYPES` either, so it falls through unmodified. The upstream (real GA or
-/// this fake)'s `session.updated` therefore reaches the browser carrying the system prompt and
-/// the full tool schema verbatim.
-///
-/// Per the coordinator's explicit instruction ("if Python fails it, that's a real finding: don't
-/// fix Python here"), this is NOT fixed in app/backend -- the test below is marked
-/// [Fact(Skip=...)] referencing a new issue the coordinator will file, and the finding is
-/// reported prominently instead.
+/// `_PASSTHROUGH_SERVER_TYPES` either, so it fell through unmodified. Fixed in issue #27 by
+/// factoring the scrub into `RTMiddleTier._scrub_session_for_client` and routing both
+/// `session.created` and `session.updated` through it.
 /// </summary>
 [Collection(ConformanceCollection.Name)]
 public sealed class SessionUpdatedClientVisibilityTests(ConformanceFixture fixture)
 {
     private static readonly TimeSpan FrameTimeout = TimeSpan.FromSeconds(30);
 
-    [Fact(Skip = "Known finding from PR #22 review item 10, tracked in issue #27: " +
-        "app/backend/rtmt.py forwards session.updated to the browser unscrubbed -- instructions " +
-        "and the full tool schema leak to the client. rtmt.py's _process_message_to_client only " +
-        "scrubs session.created (see 'Hide the instructions, tools and max tokens from clients'), " +
-        "not session.updated, which is also not in _PASSTHROUGH_SERVER_TYPES so it falls through " +
-        "unmodified. Empirically confirmed by temporarily un-skipping this test: it fails with " +
-        "'The browser must never receive the system prompt via session.updated.' Not fixed here " +
-        "per the coordinator's instruction not to change Python in this harness PR -- tracked for " +
-        "a follow-up issue the coordinator will file. Un-skip once fixed.")]
+    [Fact]
     public Task Browser_never_receives_instructions_or_tools_in_session_updated() => fixture.RunAsync(async () =>
     {
         var ct = TestContext.Current.CancellationToken;

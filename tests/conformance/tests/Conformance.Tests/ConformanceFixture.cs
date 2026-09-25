@@ -19,6 +19,18 @@ public class ConformanceFixture : IAsyncLifetime
     /// </summary>
     protected virtual BackendProfile Profile => BackendProfiles.Default;
 
+    /// <summary>
+    /// The AZURE_OPENAI_REALTIME_DEPLOYMENT name the Python backend is launched with. Null uses
+    /// BackendLauncherFactory/BackendContract's own default (<see cref="BackendContract.DefaultDeployment"/>,
+    /// "gpt-realtime-2.1-conformance" — a reasoning-capable name by rtmt.py's deployment-name
+    /// classification). Derived fixtures override this to exercise reasoning-by-deployment-name
+    /// behaviour (issue #8) on their own dedicated collection — like <see cref="Profile"/>, the
+    /// deployment name is read once at Python module-import time and can't change for an
+    /// already-running process, so each distinct value needs its own collection/backend process.
+    /// See tests/conformance/tests/Conformance.Tests/Scenarios/Sessions/ReasoningDeploymentFixtures.cs.
+    /// </summary>
+    protected virtual string? Deployment => null;
+
     public FakeRealtimeUpstreamServer Realtime { get; } = new();
     public FakeSearchServer Search { get; private set; } = null!;
 
@@ -42,7 +54,8 @@ public class ConformanceFixture : IAsyncLifetime
         SkipReason = ExternalModeProfilePolicy.ShouldSkip(
             Environment.GetEnvironmentVariable("CONFORMANCE_BACKEND_URL"),
             Profile.Name,
-            BackendProfiles.Default.Name);
+            BackendProfiles.Default.Name,
+            Deployment);
         if (SkipReason is not null)
         {
             return;
@@ -73,7 +86,7 @@ public class ConformanceFixture : IAsyncLifetime
         try
         {
             Backend = await BackendLauncherFactory.StartAsync(
-                Realtime.BaseUri, Search.BaseUri, port, extraEnvironment: Profile.ExtraEnvironment)
+                Realtime.BaseUri, Search.BaseUri, port, extraEnvironment: Profile.ExtraEnvironment, deployment: Deployment)
                 .ConfigureAwait(false);
         }
         catch (ConformanceBackendNotImplementedException ex)
@@ -105,7 +118,25 @@ public class ConformanceFixture : IAsyncLifetime
     /// exception message — xUnit displays inner-exception text on failure without needing
     /// ITestOutputHelper plumbing through every scenario.
     /// </summary>
-    public async Task RunAsync(Func<Task> body)
+    public Task RunAsync(Func<Task> body) => RunAsync(body, allowedNewBackendErrors: 0);
+
+    /// <summary>
+    /// Same as <see cref="RunAsync(Func{Task})"/>, but for scenarios whose entire subject matter
+    /// is a deterministic, application-level error path (e.g. a rejected session.update, or an
+    /// unrelated upstream error) that the backend legitimately logs at ERROR level as part of
+    /// proving recovery actually happened. <paramref name="allowedNewBackendErrors"/> is an
+    /// UPPER BOUND on the number of new backend ERROR-level log lines (per
+    /// <see cref="Conformance.Harness.CapturedProcessOutput.CountUnhandledErrors"/>) this
+    /// scenario's own body may deliberately, deterministically cause — asserted as
+    /// <c>actual &lt;= baseline + allowed</c>, never exact equality. How many ERROR-level lines a
+    /// backend chooses to log for a given recovered condition (one line, two lines, or logged at
+    /// WARNING instead of ERROR and therefore zero) is a logging/observability choice, not a wire
+    /// contract — a correct backend in another language must not be forced to reproduce this
+    /// backend's own log-line count to pass. The zero-arg overload's baseline-delta invariant (PR
+    /// #22 review item N5) still applies on top of the bound, so any *unexpected* excess backend
+    /// error still fails the scenario.
+    /// </summary>
+    public async Task RunAsync(Func<Task> body, int allowedNewBackendErrors)
     {
         if (SkipReason is not null)
         {
@@ -176,10 +207,16 @@ public class ConformanceFixture : IAsyncLifetime
 
             // Language-neutral, fixture-wide equivalent of "backend logged no traceback" (item
             // N5): a future C# backend under test reports the same zero-new-errors contract
-            // without ever producing a Python-shaped traceback string.
+            // without ever producing a Python-shaped traceback string. Bounded from ABOVE only —
+            // backend logging verbosity/level is not a wire contract (Rick's PR #42 review, item
+            // 1): a correct backend that logs fewer lines, or logs at a level this harness
+            // doesn't count as an "unhandled error" at all, must still pass.
             if (Backend is not null)
             {
-                Assert.Equal(baselineUnhandledErrors, Backend.UnhandledErrorCount());
+                var actual = Backend.UnhandledErrorCount();
+                Assert.True(actual <= baselineUnhandledErrors + allowedNewBackendErrors,
+                    $"Expected at most {allowedNewBackendErrors} new backend error(s) above the " +
+                    $"baseline of {baselineUnhandledErrors}, but observed {actual}.");
             }
         }
         catch (Exception ex) when (Backend is not null)

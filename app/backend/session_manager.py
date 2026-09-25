@@ -92,6 +92,40 @@ _RESUME_ID_MIN_LEN = 32
 _RESUME_ID_MAX_LEN = 128
 
 
+# swigerb/SonicAIDriveThru#29 (Rick's PR #30 review, "S1"): every conversation
+# item the middle tier itself authors -- the greeting, resume rehydration, the
+# silence nudge, and a tool's function_call_output -- gets a client-supplied
+# `item.id` under this prefix. rtmt.py drops any conversation.item.* frame
+# whose item.id starts with it before relaying to the browser, by authorship
+# rather than by role, so a future middle-tier item can't leak just because it
+# happens to use a role the drop logic doesn't special-case (as the greeting,
+# role="user", already did). GA's item id may be client-supplied and just
+# needs to be a short string, so a short hex suffix keeps well under any
+# reasonable length limit while staying unique per item.
+MIDDLE_TIER_ITEM_ID_PREFIX = "sonic_mt_"
+
+
+def new_middle_tier_item_id() -> str:
+    """A fresh conversation item id carrying the middle-tier authorship prefix."""
+    return f"{MIDDLE_TIER_ITEM_ID_PREFIX}{secrets.token_hex(6)}"
+
+
+def _with_middle_tier_item_id(raw_json: str) -> str:
+    """Inject a middle-tier item id into a pre-serialized `conversation.item.create`
+    payload's `item`, if it has one. Anything that doesn't parse, or has no
+    `item` object (e.g. a test double's placeholder payload), is returned
+    completely untouched."""
+    try:
+        payload = json.loads(raw_json)
+    except (ValueError, TypeError):
+        return raw_json
+    item = payload.get("item")
+    if not isinstance(item, dict):
+        return raw_json
+    item["id"] = new_middle_tier_item_id()
+    return json.dumps(payload)
+
+
 def _resume_digest(resume_id: str) -> str:
     return hashlib.sha256(resume_id.encode("utf-8", "replace")).hexdigest()
 
@@ -232,13 +266,24 @@ class SessionManager:
         self.sweep_interval_seconds = _RESUME_SWEEP_INTERVAL_SECONDS
 
         if prompt_loader is not None:
-            self._greeting_msg = prompt_loader.get_greeting_json_str()
+            self._greeting_template = prompt_loader.get_greeting_json_str()
         else:
-            self._greeting_msg = _DEFAULT_GREETING_MSG
+            self._greeting_template = _DEFAULT_GREETING_MSG
 
-    @property
-    def greeting_msg(self) -> str:
-        return self._greeting_msg
+    def build_greeting_msg(self) -> str:
+        """A fresh `conversation.item.create` for the greeting, with a brand-new
+        middle-tier item id stamped on *this* call (swigerb/SonicAIDriveThru#29
+        follow-up, PR #30 review "G1" / item 1).
+
+        GA rejects a repeated item id within the same conversation
+        (`item_create_duplicate_item_id`), so an id baked in once at
+        `SessionManager` construction and reused for every greeting would
+        break any second greeting on the same upstream conversation history
+        (e.g. a resume that happens before the conversation ever started, which
+        re-greets rather than rehydrating). Mirrors `build_rehydration_item`
+        and `build_nudge_item`, which already build a fresh item -- id
+        included -- on every call rather than caching one at init."""
+        return _with_middle_tier_item_id(self._greeting_template)
 
     @property
     def idle_timeout_seconds(self) -> float:
@@ -392,14 +437,20 @@ class SessionManager:
                 f"Recent conversation (oldest first):\n{history or '(none recorded)'}")
         return json.dumps({
             "type": "conversation.item.create",
-            "item": {"type": "message", "role": "system", "content": [{"type": "input_text", "text": text}]},
+            "item": {
+                "id": new_middle_tier_item_id(),
+                "type": "message", "role": "system", "content": [{"type": "input_text", "text": text}],
+            },
         })
 
     @staticmethod
     def build_nudge_item() -> str:
         return json.dumps({
             "type": "conversation.item.create",
-            "item": {"type": "message", "role": "system", "content": [{"type": "input_text", "text": _NUDGE_TEXT}]},
+            "item": {
+                "id": new_middle_tier_item_id(),
+                "type": "message", "role": "system", "content": [{"type": "input_text", "text": _NUDGE_TEXT}],
+            },
         })
 
     # ── Resume credential ──

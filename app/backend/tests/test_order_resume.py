@@ -91,6 +91,30 @@ class FakeGAPerConnection(FakeGARealtime):
                 await self._respond(ws)
             elif kind == "response.create":
                 await self._respond(ws)
+            elif kind == "conversation.item.create":
+                # Real GA acknowledges every conversation.item.create with a
+                # conversation.item.created echo carrying the same item back
+                # down the same socket -- including our own rehydration/nudge
+                # system items (see RehydrationAndNudgeTests). Mirror that so
+                # tests can prove the middle tier suppresses it before the
+                # browser side (swigerb/SonicAIDriveThru#29).
+                await ws.send_json({
+                    "type": "conversation.item.created",
+                    "previous_item_id": event.get("previous_item_id"),
+                    "item": event["item"],
+                })
+                # GA also emits conversation.item.done "when the item is
+                # finalized", carrying the full item a second time on a
+                # separate event type (swigerb/SonicAIDriveThru#29 follow-up,
+                # PR #30 review "M1") -- Rick's review proved the existing
+                # suppression missed this event entirely. Mirror it too so
+                # the Python suite can catch a regression the same way the
+                # conformance harness does (see M2).
+                await ws.send_json({
+                    "type": "conversation.item.done",
+                    "previous_item_id": event.get("previous_item_id"),
+                    "item": event["item"],
+                })
         return ws
 
     async def release_session_updated(self) -> None:
@@ -673,6 +697,18 @@ class RehydrationAndNudgeTests(_ResumeHarness):
     def _nudges(self, upstream):
         return [t for t in self._system_texts(upstream) if NUDGE_MARKER in t]
 
+    def _greeting_present(self, upstream):
+        """Whether a greeting item (role="user", the exact configured greeting
+        text) was sent upstream. Compares text, not the whole dict/exact id:
+        build_greeting_msg (PR #30 review "G1"/item 1) stamps a brand-new
+        middle-tier item id on every call, so two greetings (or a greeting
+        compared against a fresh self.sm.build_greeting_msg() read) never
+        compare equal by id even when they are, in every way that matters,
+        "the same greeting" repeated."""
+        greeting_text = json.loads(self.sm.build_greeting_msg())["item"]["content"][0]["text"]
+        return any(e.get("type") == "conversation.item.create" and e["item"].get("role") == "user"
+                   and e["item"]["content"][0]["text"] == greeting_text for e in upstream)
+
     async def test_upstream_gets_bootstrap_then_rehydration_and_no_greeting(self):
         meta, sid = await self._converse_then_drop()
         order_json = order_state_singleton.get_order_summary_json(sid)
@@ -693,8 +729,36 @@ class RehydrationAndNudgeTests(_ResumeHarness):
         self.assertIn("Carhop: hi", text)
         self.assertEqual(len(self._system_texts(upstream)), 1, "exactly one rehydration item")
         self.assertNotIn("response.create", types, "the carhop spoke unprompted after a resume")
-        self.assertNotIn(json.loads(self.sm.greeting_msg), upstream, "greeting repeated on resume")
+        self.assertFalse(self._greeting_present(upstream), "greeting repeated on resume")
         self.assertLess(types.index("conversation.item.create"), types.index("input_audio_buffer.append"))
+        await browser.close()
+
+    async def test_browser_never_receives_the_rehydration_system_item(self):
+        """swigerb/SonicAIDriveThru#29: upstream (per FakeGAPerConnection, which
+        now mirrors real GA's ack behaviour) echoes the rehydration item back
+        via conversation.item.created *and* conversation.item.done (GA emits
+        both -- swigerb/SonicAIDriveThru#29 follow-up, PR #30 review "M1"/"M2")
+        on the same socket -- the middle tier must swallow both frames
+        rather than relay them, since they carry the recent transcript and
+        order JSON, not something the guest should see on their own screen.
+
+        Rick's PR #30 review proved that without the .done handling, this
+        test passed anyway (the leak was on the .done event this test didn't
+        check for) -- .done is asserted here specifically so a regression on
+        either event type fails it."""
+        meta, sid = await self._converse_then_drop()
+        browser, upstream = await self._resume_ok(meta["resumeId"])
+        # Drain everything the browser receives while the rehydration item
+        # round-trips through the (now echoing) fake upstream.
+        seen = await self._browser_events(browser, duration=0.5)
+        self.assertTrue(
+            any(e.get("type") == "conversation.item.create" and e["item"].get("role") == "system" for e in upstream),
+            "precondition: the fake upstream must have echoed the rehydration item for this test to mean anything",
+        )
+        leaked = [e for e in seen
+                  if e.get("type") in ("conversation.item.created", "conversation.item.added", "conversation.item.done")
+                  and e.get("item", {}).get("role") == "system"]
+        self.assertEqual(leaked, [], "the browser must never see a server-authored system conversation item")
         await browser.close()
 
     async def test_resume_before_the_conversation_started_keeps_the_normal_greeting(self):
@@ -705,7 +769,7 @@ class RehydrationAndNudgeTests(_ResumeHarness):
         again, upstream = await self._resume_ok(meta["resumeId"])
         await again.send_json(BROWSER_SESSION_UPDATE)
         await self._response_done(again)
-        self.assertIn(json.loads(self.sm.greeting_msg), upstream)
+        self.assertTrue(self._greeting_present(upstream))
         self.assertEqual(self._system_texts(upstream), [])
         await again.close()
 
