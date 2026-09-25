@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
+import aiohttp
 from aiohttp import web
 from azure.core.credentials import AzureKeyCredential
 
@@ -29,6 +30,7 @@ from audio_pipeline import (
     RESPONSE_CREATE_MSG,
     TYPE_RE,
     EchoSuppressor,
+    _best_effort_send,
 )
 from order_state import order_state_singleton
 from rtmt import (
@@ -549,6 +551,129 @@ class EchoSuppressorTests(unittest.TestCase):
             echo.on_response_done(loop, target_ws)
             self.assertEqual(echo.cooldown_end, cooldown_after_audio_done)
             self.assertFalse(echo.greeting_in_progress)
+        asyncio.run(_run())
+
+    # ─── swigerb/SonicAIDriveThru#59: on_audio_done()'s two flush sends were a
+    # bare, unguarded `asyncio.ensure_future(target_ws.send_str(...))` — when the
+    # upstream closes right after response.output_audio.done (a routine race, not
+    # an edge case), the resulting ClientConnectionResetError was never retrieved
+    # by anything, producing an `ERROR:asyncio:Task exception was never
+    # retrieved` log on every such disconnect, in production too (reproducible on
+    # dev, not caused by A2). ───
+
+    def test_audio_done_flush_failure_is_not_an_unretrieved_exception(self):
+        """A send failing with ConnectionResetError because the upstream is
+        already closing must be swallowed, not merely delayed until asyncio's
+        default exception handler discovers it via garbage collection (#59).
+        """
+        async def _run():
+            echo = EchoSuppressor()
+            loop = asyncio.get_running_loop()
+            target_ws = MagicMock()
+            target_ws.closed = False
+            target_ws.send_str = AsyncMock(
+                side_effect=aiohttp.ClientConnectionResetError("Cannot write to closing transport")
+            )
+            captured_contexts = []
+            loop.set_exception_handler(lambda loop, context: captured_contexts.append(context))
+            try:
+                echo.on_audio_done(loop, target_ws)
+                # Let the fire-and-forget flush task run to completion.
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+                # A task's "exception was never retrieved" warning fires when
+                # the task is garbage-collected with an unretrieved exception
+                # still attached -- force that GC deterministically rather
+                # than relying on timing.
+                import gc
+                gc.collect()
+            finally:
+                loop.set_exception_handler(None)
+            self.assertEqual(captured_contexts, [])
+        asyncio.run(_run())
+
+    def test_audio_done_uses_provided_spawn(self):
+        """on_audio_done() must route the immediate flush through the caller's
+        own spawn/tracking (e.g. rtmt.py's `_spawn`) when one is supplied,
+        instead of always using a bare asyncio.ensure_future (#59).
+        """
+        echo = EchoSuppressor()
+        loop = MagicMock()
+        loop.time.return_value = 100.0
+        target_ws = MagicMock()
+        spawned = []
+
+        def fake_spawn(coro):
+            spawned.append(coro)
+            coro.close()  # avoid "coroutine was never awaited"
+            return MagicMock()
+
+        echo.on_audio_done(loop, target_ws, spawn=fake_spawn)
+        self.assertEqual(len(spawned), 1)  # the immediate flush, spawned synchronously
+
+    def test_close_cancels_pending_delayed_flush_timer(self):
+        """close() must cancel a still-pending delayed flush timer so it can
+        never fire (and attempt a send) after the connection has already torn
+        down (#59).
+        """
+        echo = EchoSuppressor()
+        loop = MagicMock()
+        loop.time.return_value = 100.0
+        fake_handle = MagicMock()
+        loop.call_later.return_value = fake_handle
+        target_ws = MagicMock()
+
+        def closing_spawn(coro):
+            coro.close()
+            return MagicMock()
+
+        echo.on_audio_done(loop, target_ws, spawn=closing_spawn)
+        fake_handle.cancel.assert_not_called()
+        echo.close()
+        fake_handle.cancel.assert_called_once()
+        self.assertIsNone(echo._flush_handle)
+
+
+class BestEffortSendTests(unittest.TestCase):
+    """swigerb/SonicAIDriveThru#59: `_best_effort_send()` is the shared helper
+    behind every advisory, fire-and-forget send to a possibly-closing socket.
+    It must never raise and never leave a task with an unretrieved exception.
+    """
+
+    def test_noop_when_already_closed(self):
+        async def _run():
+            ws = MagicMock()
+            ws.closed = True
+            ws.send_str = AsyncMock()
+            await _best_effort_send(ws, "msg")
+            ws.send_str.assert_not_called()
+        asyncio.run(_run())
+
+    def test_swallows_connection_reset_error(self):
+        async def _run():
+            ws = MagicMock()
+            ws.closed = False
+            ws.send_str = AsyncMock(
+                side_effect=aiohttp.ClientConnectionResetError("Cannot write to closing transport")
+            )
+            await _best_effort_send(ws, "msg")  # must not raise
+        asyncio.run(_run())
+
+    def test_swallows_plain_connection_reset_error(self):
+        async def _run():
+            ws = MagicMock()
+            ws.closed = False
+            ws.send_str = AsyncMock(side_effect=ConnectionResetError("reset"))
+            await _best_effort_send(ws, "msg")  # must not raise
+        asyncio.run(_run())
+
+    def test_sends_when_open(self):
+        async def _run():
+            ws = MagicMock()
+            ws.closed = False
+            ws.send_str = AsyncMock()
+            await _best_effort_send(ws, "msg")
+            ws.send_str.assert_called_once_with("msg")
         asyncio.run(_run())
 
 

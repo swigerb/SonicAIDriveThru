@@ -10,8 +10,11 @@ import logging
 import os
 import pathlib
 import re
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
+
+import aiohttp
 
 from config_loader import get_config
 
@@ -157,6 +160,32 @@ def vlog(verbose: bool, msg: str, *args: Any) -> None:
         vlogger.debug(msg, *args)
 
 
+async def _best_effort_send(ws: Any, msg: str) -> None:
+    """Send `msg` on `ws`, tolerating a socket that's already closing/closed.
+
+    swigerb/SonicAIDriveThru#59: the echo-flush sends below are advisory --
+    nothing downstream depends on them succeeding -- but firing them via a
+    bare `asyncio.ensure_future(ws.send_str(...))` let a `ClientConnectionResetError`
+    ("Cannot write to closing transport"), raised when the upstream closes right
+    after `response.output_audio.done`, surface as an "unretrieved" task
+    exception: noisy `ERROR:asyncio:...` logs on every such disconnect, in
+    production too (not A2-specific -- reproducible on `dev`).
+
+    The pre-send `ws.closed` check is still a check-then-act race (the socket
+    can flip to closing between the check and the write), so the exception
+    handling here -- not the check alone -- is what actually closes the gap.
+    Any task built from this coroutine can never complete with an unhandled
+    exception, so wrapping it (via `_spawn` or plain `ensure_future`) is safe
+    without also awaiting or inspecting the resulting task.
+    """
+    if ws.closed:
+        return
+    try:
+        await ws.send_str(msg)
+    except (ConnectionResetError, aiohttp.ClientError) as e:
+        logger.debug("Best-effort send skipped on a closing socket: %s", e)
+
+
 class EchoSuppressor:
     """Per-connection echo suppression state machine.
 
@@ -164,12 +193,17 @@ class EchoSuppressor:
     and handles greeting-specific echo blocking. Safe without locks in
     single-threaded asyncio.
     """
-    __slots__ = ("ai_speaking", "cooldown_end", "greeting_in_progress")
+    __slots__ = ("ai_speaking", "cooldown_end", "greeting_in_progress", "_flush_handle")
 
     def __init__(self):
         self.ai_speaking = False
         self.cooldown_end = 0.0
         self.greeting_in_progress = False
+        # swigerb/SonicAIDriveThru#59: handle for the delayed post-cooldown
+        # flush's `loop.call_later`, so `close()` can cancel it on teardown
+        # instead of letting it fire (and attempt a send) after the
+        # connection has already gone away.
+        self._flush_handle: asyncio.TimerHandle | None = None
 
     def should_suppress_audio(self, loop_time: float) -> bool:
         """Return True if user audio should be dropped (AI speaking or cooldown active)."""
@@ -182,8 +216,25 @@ class EchoSuppressor:
             vlog(verbose, "─── [Echo] ai_speaking=True — suppressing user audio ───")
         self.ai_speaking = True
 
-    def on_audio_done(self, loop: asyncio.AbstractEventLoop, target_ws: Any, verbose: bool = False) -> None:
-        """AI finished sending audio — start cooldown and flush echo."""
+    def on_audio_done(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        target_ws: Any,
+        verbose: bool = False,
+        spawn: Callable[[Any], asyncio.Task] | None = None,
+    ) -> None:
+        """AI finished sending audio — start cooldown and flush echo.
+
+        `spawn` lets the caller (rtmt.py's `_forward_messages`) route the two
+        fire-and-forget flush sends through its own `_spawn`/`_BACKGROUND_TASKS`
+        tracking (swigerb/SonicAIDriveThru#59) so they get the same
+        held-until-done reference as every other background task on the
+        connection, without `audio_pipeline.py` importing from `rtmt.py`
+        (which imports from here, so that would be circular). It defaults to
+        `asyncio.ensure_future` -- today's behaviour -- when the caller (e.g.
+        the existing unit tests) doesn't pass one.
+        """
+        spawn = spawn or asyncio.ensure_future
         self.ai_speaking = False
         if self.greeting_in_progress:
             actual_cooldown = ECHO_COOLDOWN_SEC * 2
@@ -195,12 +246,32 @@ class EchoSuppressor:
         logger.debug("Echo suppression: AI audio done — cooldown %.1fs", actual_cooldown)
         vlog(verbose, "─── [Echo] ai_speaking=False — cooldown %.1fs ───", actual_cooldown)
         # Flush any echoed audio that leaked into OpenAI's buffer
-        asyncio.ensure_future(target_ws.send_str(INPUT_AUDIO_CLEAR_MSG))
-        # Schedule a second flush after cooldown expires
+        spawn(_best_effort_send(target_ws, INPUT_AUDIO_CLEAR_MSG))
+        # Schedule a second flush after cooldown expires. Cancel any flush
+        # still pending from a previous on_audio_done() call first -- two
+        # audio.done events closer together than a cooldown would otherwise
+        # leave an earlier timer alive alongside this new one.
+        if self._flush_handle is not None:
+            self._flush_handle.cancel()
         def _make_delayed_flush(tws=target_ws):
-            if not tws.closed:
-                asyncio.ensure_future(tws.send_str(INPUT_AUDIO_CLEAR_MSG))
-        loop.call_later(actual_cooldown, _make_delayed_flush)
+            self._flush_handle = None
+            spawn(_best_effort_send(tws, INPUT_AUDIO_CLEAR_MSG))
+        self._flush_handle = loop.call_later(actual_cooldown, _make_delayed_flush)
+
+    def close(self) -> None:
+        """Cancel any delayed echo flush still pending.
+
+        swigerb/SonicAIDriveThru#59: called from the connection's teardown
+        (rtmt.py `_forward_messages`'s `finally`) so a timer scheduled by
+        `on_audio_done()` can't fire -- and attempt a send -- after the
+        connection has already gone away. `_best_effort_send()` would still
+        no-op/catch cleanly if this were skipped, but cancelling the timer
+        closes the race window outright instead of relying on that as the
+        only backstop.
+        """
+        if self._flush_handle is not None:
+            self._flush_handle.cancel()
+            self._flush_handle = None
 
     def on_speech_started(self, verbose: bool = False) -> bool:
         """Server VAD detected speech. Returns True if it should be ignored (greeting echo)."""

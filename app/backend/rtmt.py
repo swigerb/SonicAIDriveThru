@@ -2046,7 +2046,12 @@ class RTMiddleTier:
                                 assistant_audio_seen = True
                                 echo.on_audio_delta(verbose)
                             elif _MARKER_AUDIO_DONE in data or _MARKER_AUDIO_DONE_LEGACY in data:
-                                echo.on_audio_done(loop, target_ws, verbose)
+                                # swigerb/SonicAIDriveThru#59: route the echo
+                                # flush's fire-and-forget sends through this
+                                # module's own background-task tracking so
+                                # they're held alive until done, same as
+                                # every other spawned task on the connection.
+                                echo.on_audio_done(loop, target_ws, verbose, spawn=_spawn)
                             elif _MARKER_SPEECH_STARTED in data:
                                 echo.on_speech_started(verbose)
                                 if session_id:
@@ -2116,6 +2121,10 @@ class RTMiddleTier:
                     deadline_task.cancel()
                     cancel_nudge("socket closed")
                     recovery.cancel("socket closed")
+                    # swigerb/SonicAIDriveThru#59: cancel any delayed echo
+                    # flush timer so it can't fire (and attempt a send)
+                    # after this connection has already gone away.
+                    echo.close()
                     _vlog(verbose, "\n═══ [SESSION] Disconnected ═══\n"
                                    "Session ID: %s\n"
                                    "══════════════════════════════", session_id or "?")
