@@ -1,3 +1,4 @@
+using System.Net.WebSockets;
 using System.Text.Json;
 using Conformance.Fakes;
 using Conformance.Harness;
@@ -13,7 +14,7 @@ namespace Conformance.Tests.Scenarios.Security;
 /// items) is `role: "user"`, not `"system"`, so it is invisible to any test that only checks the
 /// `role == "system"` backstop. This scenario drives one full, realistic session lifecycle --
 /// bootstrap, browser handshake, a voice change, a tool round trip, a disconnect + resume, and a
-/// silence nudge (<see cref="BackendProfiles.ShortTimers"/>) -- while dynamically capturing the
+/// silence nudge (<see cref="BackendProfiles.ResumeMargin"/>) -- while dynamically capturing the
 /// four pieces of text the middle tier authors and sends only to the *upstream* socket
 /// (`session.instructions` from the bootstrap `session.update`, the greeting item's text
 /// (`session_manager.py`'s `greeting_msg` / prompt_loader's real greeting -- `role: "user"`), the
@@ -50,11 +51,16 @@ namespace Conformance.Tests.Scenarios.Security;
 /// item that is `role: "user"` and therefore not caught by the backstop alone -- the one proof no
 /// other test in this suite can provide.
 ///
-/// Runs under <see cref="BackendProfiles.ShortTimers"/> so the resume grace hold and nudge timer
-/// fit in a fast test.
+/// Runs under <see cref="BackendProfiles.ResumeMargin"/> (PR #52 CI follow-up) so the nudge timer
+/// stays a fast ~1s (vs the 30s production default) while idle timeout and grace get real margin
+/// (5s vs the 300s / 120s production defaults) above what this scenario's own pre-detach setup
+/// (bootstrap, voice change, and a full tool round trip, on top of the shared handshake/greeting)
+/// should ever take, even on a loaded CI runner — see that profile's doc comment for why the
+/// original, equal 1s/1s <see cref="BackendProfiles.ShortTimers"/> raced CI run 36085091969's
+/// "holding order for 0s" detach.
 /// </summary>
-[Collection(ShortTimersConformanceCollection.Name)]
-public sealed class WholeSessionLeakTests(ShortTimersConformanceFixture fixture)
+[Collection(ResumeMarginConformanceCollection.Name)]
+public sealed class WholeSessionLeakTests(ResumeMarginConformanceFixture fixture)
 {
     private static readonly TimeSpan FrameTimeout = TimeSpan.FromSeconds(30);
 
@@ -233,9 +239,10 @@ public sealed class WholeSessionLeakTests(ShortTimersConformanceFixture fixture)
         AddSecretWindowsExcludingLegitimateOverlap(
             GreetingText(rehydrationItem!.Json.GetProperty("item")), legitimateBrowserFrames, secretWindows);
 
-        // ── Wait for the silence nudge (ShortTimers' ~1s timer) with a keepalive so the idle
-        // sweep (pinned to the same ~1s under ShortTimers) doesn't close the session first --
-        // same race and same fix as ResumeRehydrationClientVisibilityTests (PR #30 review "S3"). ──
+        // ── Wait for the silence nudge (ResumeMargin's ~1s nudge timer) with a keepalive so the
+        // idle sweep (which now has real margin, but the keepalive still resets it defensively)
+        // doesn't close the session first -- same race and same fix as
+        // ResumeRehydrationClientVisibilityTests (PR #30 review "S3"). ──
         using var keepAliveCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         var keepAliveTask = Task.Run(async () =>
         {
@@ -250,6 +257,15 @@ public sealed class WholeSessionLeakTests(ShortTimersConformanceFixture fixture)
             catch (OperationCanceledException)
             {
                 // Expected once the wait below cancels the keepalive loop.
+            }
+            catch (WebSocketException)
+            {
+                // PR #52 CI follow-up (swigerb/SonicAIDriveThru#28 N10 aftermath): same race and
+                // same fix as ResumeRehydrationClientVisibilityTests -- this loop's only job is
+                // best-effort activity to stop the idle sweep beating the nudge, so a socket
+                // that's already gone (the backend closed/aborted it) has nothing left to keep
+                // alive. Swallowing it here lets the real assertions below report what actually
+                // happened instead of this unrelated send exception pre-empting them.
             }
         }, CancellationToken.None);
 

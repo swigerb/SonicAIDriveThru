@@ -24,6 +24,22 @@ public sealed class ShortTimersConformanceCollection : ICollectionFixture<ShortT
 }
 
 /// <summary>
+/// PR #52 CI follow-up: dedicated collection/process for <see cref="BackendProfiles.ResumeMargin"/>
+/// — see that profile's doc comment for why the resume scenarios need their own idle/grace timing
+/// separate from <see cref="ShortTimersConformanceFixture"/>'s.
+/// </summary>
+public sealed class ResumeMarginConformanceFixture : ConformanceFixture
+{
+    protected override BackendProfile Profile => BackendProfiles.ResumeMargin;
+}
+
+[CollectionDefinition(Name)]
+public sealed class ResumeMarginConformanceCollection : ICollectionFixture<ResumeMarginConformanceFixture>
+{
+    public const string Name = "ConformanceResumeMargin";
+}
+
+/// <summary>
 /// Frozen at 2026-07-04T15:00:00-05:00 (America/Chicago, CDT) — inside the 14:00-16:00 happy-hour
 /// window app/backend/config.yaml's business_rules configure, so scenarios needing deterministic
 /// happy-hour pricing don't depend on what day or hour the suite happens to run.
