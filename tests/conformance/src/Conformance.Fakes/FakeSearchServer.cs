@@ -24,6 +24,56 @@ public sealed class FakeSearchServer : IAsyncDisposable
 
     public string? LastApiKeyHeader { get; private set; }
 
+    /// <summary>
+    /// Issue #9 / harness follow-up #23: opt-in, one-shot field-name-mismatch simulation. When
+    /// set to a field name (e.g. "sizes"), the *next* request whose `select` list contains that
+    /// field is answered with HTTP 400 and an Azure-AI-Search-shaped error body whose message
+    /// contains "Could not find a property named '&lt;field&gt;'" — the exact substring
+    /// app/backend/tools.py's `search()` matches on to trigger its fallback retry with a minimal
+    /// `select`. The flag clears itself immediately after firing once, so the retry (which asks
+    /// for a different, always-present field set) and every other unrelated request/scenario
+    /// succeed normally. Defaults to null (inert) — no existing scenario's behavior changes.
+    ///
+    /// Backed by <see cref="_rejectSelectFieldOnce"/> and consumed via
+    /// <see cref="Interlocked.CompareExchange{T}"/> in <see cref="HandleSearchAsync"/> rather than
+    /// a plain read-then-clear (PR #38 review item 8): Kestrel can process two requests
+    /// concurrently, and a read-then-clear would let both see the flag armed and both claim to
+    /// have triggered the one-shot 400, or (worse) let the second request silently swallow a flag
+    /// meant for a different, later scenario's request. The compare-exchange guarantees only the
+    /// one request that actually observes the still-armed value can clear it.
+    /// </summary>
+    public string? RejectSelectFieldOnce
+    {
+        get => Volatile.Read(ref _rejectSelectFieldOnce);
+        set => Volatile.Write(ref _rejectSelectFieldOnce, value);
+    }
+    private string? _rejectSelectFieldOnce;
+
+    /// <summary>
+    /// Asserts <see cref="RejectSelectFieldOnce"/> is not still armed (PR #38 review item 8,
+    /// mirrors <see cref="FakeRealtimeUpstreamServer.AssertNoPendingOneShotSwitches"/>). A
+    /// scenario that sets this flag and then never actually sends a matching search request
+    /// (an assertion failing early, a copy-paste mistake) would otherwise leave it armed to
+    /// silently reject an unrelated later scenario's search request instead — called from
+    /// <see cref="Conformance.Tests.ConformanceFixture.RunAsync"/> before every scenario body
+    /// runs, exactly like the realtime server's equivalent check.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">A previous scenario armed
+    /// <see cref="RejectSelectFieldOnce"/> but it was never consumed by a matching request.</exception>
+    public void AssertNoPendingOneShotSwitches()
+    {
+        var pending = Volatile.Read(ref _rejectSelectFieldOnce);
+        if (pending is not null)
+        {
+            throw new InvalidOperationException(
+                $"RejectSelectFieldOnce(\"{pending}\") was armed but never consumed by a matching " +
+                "search request in the scenario that set it -- a previous scenario likely set this " +
+                "but never actually sent a request whose select list contained that field " +
+                "afterwards, leaving it armed to silently reject an unrelated later scenario's " +
+                "search request instead.");
+        }
+    }
+
     public FakeSearchServer(string menuItemsJsonPath)
     {
         _menuItemsJsonPath = menuItemsJsonPath;
@@ -73,6 +123,28 @@ public sealed class FakeSearchServer : IAsyncDisposable
         var selectFields = root.TryGetProperty("select", out var sel) && sel.ValueKind == JsonValueKind.String
             ? sel.GetString()!.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
             : null;
+
+        var rejectField = Volatile.Read(ref _rejectSelectFieldOnce);
+        if (rejectField is not null && selectFields is not null &&
+            selectFields.Contains(rejectField, StringComparer.OrdinalIgnoreCase) &&
+            Interlocked.CompareExchange(ref _rejectSelectFieldOnce, null, rejectField) == rejectField)
+        {
+            // Won the race to consume the one-shot flag: only this request is rejected. A
+            // concurrent request that lost the compare-exchange falls through to a normal
+            // response instead of double-rejecting.
+            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+            context.Response.ContentType = "application/json;odata.metadata=none";
+            var errorBody = new JsonObject
+            {
+                ["error"] = new JsonObject
+                {
+                    ["code"] = "InvalidRequestParameter",
+                    ["message"] = $"Could not find a property named '{rejectField}' on type 'search.document'.",
+                },
+            };
+            await context.Response.WriteAsync(errorBody.ToJsonString(), context.RequestAborted).ConfigureAwait(false);
+            return;
+        }
 
         var matches = Filter(searchText).Take(top);
 

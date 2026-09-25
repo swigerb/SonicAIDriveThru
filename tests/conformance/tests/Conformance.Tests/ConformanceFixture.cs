@@ -116,7 +116,8 @@ public class ConformanceFixture : IAsyncLifetime
     /// <summary>
     /// Wraps a scenario body so any failure carries the backend's captured stdout/stderr in the
     /// exception message — xUnit displays inner-exception text on failure without needing
-    /// ITestOutputHelper plumbing through every scenario.
+    /// ITestOutputHelper plumbing through every scenario. Equivalent to
+    /// <c>RunAsync(body, allowedNewBackendErrors: 0)</c>.
     /// </summary>
     public Task RunAsync(Func<Task> body) => RunAsync(body, allowedNewBackendErrors: 0);
 
@@ -134,7 +135,12 @@ public class ConformanceFixture : IAsyncLifetime
     /// contract — a correct backend in another language must not be forced to reproduce this
     /// backend's own log-line count to pass. The zero-arg overload's baseline-delta invariant (PR
     /// #22 review item N5) still applies on top of the bound, so any *unexpected* excess backend
-    /// error still fails the scenario.
+    /// error still fails the scenario. A caught-and-reported application-level tool exception (see
+    /// ToolErrorSessionSurvivesTests's README-documented "one ERROR" contract) is one such
+    /// deliberate case (PR #38 review item 2) — without this overload, the zero-new-errors
+    /// invariant below would itself block an otherwise-passing scenario from ever passing, which
+    /// is exactly what PR #38's Rick review flagged: "the body passes and only the error count
+    /// blocked it."
     /// </summary>
     public async Task RunAsync(Func<Task> body, int allowedNewBackendErrors)
     {
@@ -150,6 +156,11 @@ public class ConformanceFixture : IAsyncLifetime
         // would point at this scenario's assertions instead of the real, earlier cause (PR #22
         // review item N9). See FakeRealtimeUpstreamServer.AssertNoPendingOneShotSwitches.
         Realtime.AssertNoPendingOneShotSwitches();
+
+        // Same reasoning as above, for FakeSearchServer.RejectSelectFieldOnce (PR #38 review
+        // item 8) — a leaked one-shot search-rejection flag from a previous scenario must not be
+        // allowed to silently misfire against this scenario's own search request instead.
+        Search.AssertNoPendingOneShotSwitches();
 
         // Captured BEFORE the scenario runs, not after: only a handler fault recorded on a
         // connection accepted at or after this point belongs to *this* scenario. A connection an
@@ -205,12 +216,15 @@ public class ConformanceFixture : IAsyncLifetime
             // fail this one either.
             Realtime.AssertNoHandlerFaults(since: connectionWatermark);
 
-            // Language-neutral, fixture-wide equivalent of "backend logged no traceback" (item
-            // N5): a future C# backend under test reports the same zero-new-errors contract
-            // without ever producing a Python-shaped traceback string. Bounded from ABOVE only —
-            // backend logging verbosity/level is not a wire contract (Rick's PR #42 review, item
-            // 1): a correct backend that logs fewer lines, or logs at a level this harness
-            // doesn't count as an "unhandled error" at all, must still pass.
+            // Language-neutral, fixture-wide equivalent of "backend logged no (unexpected)
+            // traceback" (item N5): a future C# backend under test reports the same
+            // baseline-plus-bound contract without ever producing a Python-shaped traceback
+            // string. Bounded from ABOVE only — backend logging verbosity/level is not a wire
+            // contract (Rick's PR #42 review, item 1): a correct backend that logs fewer lines,
+            // or logs at a level this harness doesn't count as an "unhandled error" at all, must
+            // still pass. Most scenarios pass allowedNewBackendErrors: 0 (via the single-arg
+            // RunAsync overload); a scenario that deliberately provokes one caught-and-reported
+            // tool exception passes 1 instead (PR #38 review item 2).
             if (Backend is not null)
             {
                 var actual = Backend.UnhandledErrorCount();
