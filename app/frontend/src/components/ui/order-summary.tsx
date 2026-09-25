@@ -26,13 +26,24 @@ export interface OrderSummaryProps {
 }
 
 /**
- * Formats a money value as an exact "$0.00" string, robust to the floating-point noise that
- * `.toFixed(2)` alone cannot correct (#47). `.toFixed(2)` rounds directly off the noisy double,
- * so two numbers that both represent the same intended decimal (e.g. `88.04499999999999` and
- * `88.045`, both meant to be $88.045) can render two different cents. Rounding first to a much
- * higher, but still safely-representable, number of decimal places collapses that noise (which
- * only ever appears past the 10th-or-so decimal place for these magnitudes) back to the clean
- * decimal before the final two-place rounding — so both inputs land on the same "$88.05".
+ * Formats a money value as an exact "$0.00" string, rounding half-cents *up* (away from zero),
+ * matching the backend's ROUND_HALF_UP contract (README "Rendering money for display";
+ * app/backend/money_utils.py::format_money) -- and robust to the floating-point noise that plain
+ * `.toFixed(2)` alone cannot correct (#47/PR #50 review).
+ *
+ * Two problems, one fix:
+ *   1. `.toFixed(2)` rounds directly off the noisy IEEE-754 double, so a value that is
+ *      mathematically exactly on a half cent (e.g. `5.265`) can render one cent short (`$5.26`)
+ *      because its true double value is `5.264999999999999...`, not `5.265` (Rick's repro).
+ *   2. Two doubles that both represent the same intended decimal (e.g. `88.04499999999999` and
+ *      `88.045`, both meant to be $88.045) can render two different cents if rounded to cents
+ *      directly off the raw double.
+ *
+ * Rounding to whole cents via `(value * 100).toFixed(6)` first collapses the double's noise (which
+ * only ever appears well past the 6th decimal place for these magnitudes) back to a clean number
+ * of cents, then `Math.round` performs the half-up rounding itself (`Math.round` always rounds
+ * .5 up, including for negative-adjacent-to-zero inputs at these magnitudes) before dividing back
+ * down to dollars.
  *
  * This is a client-side safety net for values that never went through the backend's exact-Decimal
  * pipeline (the dummy-data preview and each line item's `price * quantity`). Whenever the backend
@@ -41,8 +52,8 @@ export interface OrderSummaryProps {
  * reliable than any client-side float correction can be.
  */
 export function formatMoney(value: number): string {
-    const cleaned = Number(value.toFixed(10));
-    return `$${cleaned.toFixed(2)}`;
+    const cents = Math.round(Number((value * 100).toFixed(6)));
+    return `$${(cents / 100).toFixed(2)}`;
 }
 
 export function calculateOrderSummary(items: OrderItem[]): OrderSummaryProps {

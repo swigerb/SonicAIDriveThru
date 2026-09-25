@@ -45,6 +45,16 @@ describe("OrderSummary", () => {
         }
     });
 
+    // PR #50 review (should-fix 2, Rick): formatMoney must round half-cents *up*, matching the
+    // backend's ROUND_HALF_UP contract. Plain `.toFixed(2)` on the noisy double under-rounds
+    // 5.265 to $5.26 (its true double value is 5.264999999999999...) and 1.005 to $1.00.
+    it.each([
+        ["5.265", 5.265, "$5.27"],
+        ["1.005", 1.005, "$1.01"]
+    ])("renders %s as %s via formatMoney (round half-cent up, not down)", (_label, value, expected) => {
+        expect(formatMoney(value)).toBe(expected);
+    });
+
     it("prefers the backend-supplied *Display strings over recomputing from the numeric fields", () => {
         // Even if the numeric `finalTotal` would format differently on its own, the backend's
         // exact-Decimal-derived display string is the single source of truth and must win.
