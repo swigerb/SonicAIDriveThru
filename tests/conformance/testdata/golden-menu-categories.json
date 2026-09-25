@@ -1,0 +1,305 @@
+{
+  "description": "Golden category table (issue #39): every menuItems.json entry mapped to its combo-slot/happy-hour bucket (sides, drinks, or none). Source of truth: app/backend/menu_utils.py::infer_combo_component. Sundaes (Hot Fudge Sundae, Caramel Sundae) are none per Brian decision on #39 (full price during happy hour -- happy hour is drinks only). The four hot-dog entrees (All-American Dog, Chili Cheese Coney, Footlong Quarter Pound Coney, Corn Dog) are none -- real food items, not a fillable combo side/drink slot, despite living in the Hot Dogs & Tots JSON category alongside real sides. Everything else follows its raw menuItems.json category.",
+  "items": [
+    {
+      "item": "SuperSONIC® Double Cheeseburger",
+      "category": "Burgers & Sandwiches",
+      "bucket": "none"
+    },
+    {
+      "item": "SuperSONIC® Bacon Double Cheeseburger",
+      "category": "Burgers & Sandwiches",
+      "bucket": "none"
+    },
+    {
+      "item": "SONIC® Cheeseburger",
+      "category": "Burgers & Sandwiches",
+      "bucket": "none"
+    },
+    {
+      "item": "All-American SONIC Smasher™",
+      "category": "Burgers & Sandwiches",
+      "bucket": "none"
+    },
+    {
+      "item": "All-American Bacon SONIC Smasher™",
+      "category": "Burgers & Sandwiches",
+      "bucket": "none"
+    },
+    {
+      "item": "Jr Double Cheeseburger",
+      "category": "Burgers & Sandwiches",
+      "bucket": "none"
+    },
+    {
+      "item": "Double SONIC Smasher™",
+      "category": "Burgers & Sandwiches",
+      "bucket": "none"
+    },
+    {
+      "item": "Crispy Chicken Sandwich",
+      "category": "Burgers & Sandwiches",
+      "bucket": "none"
+    },
+    {
+      "item": "Triple SONIC Smasher™",
+      "category": "Burgers & Sandwiches",
+      "bucket": "none"
+    },
+    {
+      "item": "Fish Sandwich",
+      "category": "Burgers & Sandwiches",
+      "bucket": "none"
+    },
+    {
+      "item": "All-American Dog",
+      "category": "Hot Dogs & Tots",
+      "bucket": "none"
+    },
+    {
+      "item": "Chili Cheese Coney",
+      "category": "Hot Dogs & Tots",
+      "bucket": "none"
+    },
+    {
+      "item": "Footlong Quarter Pound Coney",
+      "category": "Hot Dogs & Tots",
+      "bucket": "none"
+    },
+    {
+      "item": "Tots",
+      "category": "Hot Dogs & Tots",
+      "bucket": "sides"
+    },
+    {
+      "item": "Groovy Fries",
+      "category": "Hot Dogs & Tots",
+      "bucket": "sides"
+    },
+    {
+      "item": "Corn Dog",
+      "category": "Hot Dogs & Tots",
+      "bucket": "none"
+    },
+    {
+      "item": "Chili Cheese Tots",
+      "category": "Hot Dogs & Tots",
+      "bucket": "sides"
+    },
+    {
+      "item": "Mozzarella Sticks",
+      "category": "Hot Dogs & Tots",
+      "bucket": "sides"
+    },
+    {
+      "item": "Onion Rings",
+      "category": "Hot Dogs & Tots",
+      "bucket": "sides"
+    },
+    {
+      "item": "Ched 'R' Peppers",
+      "category": "Hot Dogs & Tots",
+      "bucket": "sides"
+    },
+    {
+      "item": "Cherry Limeade",
+      "category": "Slushes & Drinks",
+      "bucket": "drinks"
+    },
+    {
+      "item": "Ocean Water®",
+      "category": "Slushes & Drinks",
+      "bucket": "drinks"
+    },
+    {
+      "item": "Blue Raspberry Slush",
+      "category": "Slushes & Drinks",
+      "bucket": "drinks"
+    },
+    {
+      "item": "Strawberry Slush",
+      "category": "Slushes & Drinks",
+      "bucket": "drinks"
+    },
+    {
+      "item": "Cherry Slush",
+      "category": "Slushes & Drinks",
+      "bucket": "drinks"
+    },
+    {
+      "item": "All Natural Lemonade",
+      "category": "Slushes & Drinks",
+      "bucket": "drinks"
+    },
+    {
+      "item": "Grape Slush",
+      "category": "Slushes & Drinks",
+      "bucket": "drinks"
+    },
+    {
+      "item": "Cranberry Limeade",
+      "category": "Slushes & Drinks",
+      "bucket": "drinks"
+    },
+    {
+      "item": "Sweet Iced Tea",
+      "category": "Slushes & Drinks",
+      "bucket": "drinks"
+    },
+    {
+      "item": "Strawberry Limeade",
+      "category": "Slushes & Drinks",
+      "bucket": "drinks"
+    },
+    {
+      "item": "Vanilla Classic Shake",
+      "category": "Shakes & Ice Cream",
+      "bucket": "drinks"
+    },
+    {
+      "item": "Chocolate Classic Shake",
+      "category": "Shakes & Ice Cream",
+      "bucket": "drinks"
+    },
+    {
+      "item": "Strawberry Classic Shake",
+      "category": "Shakes & Ice Cream",
+      "bucket": "drinks"
+    },
+    {
+      "item": "Peanut Butter Classic Shake",
+      "category": "Shakes & Ice Cream",
+      "bucket": "drinks"
+    },
+    {
+      "item": "SONIC Blast® made with REESE’S",
+      "category": "Shakes & Ice Cream",
+      "bucket": "drinks"
+    },
+    {
+      "item": "SONIC Blast® made with OREO® Cookie Pieces",
+      "category": "Shakes & Ice Cream",
+      "bucket": "drinks"
+    },
+    {
+      "item": "OREO® Cheesecake Master Shake®",
+      "category": "Shakes & Ice Cream",
+      "bucket": "drinks"
+    },
+    {
+      "item": "Hot Fudge Sundae",
+      "category": "Shakes & Ice Cream",
+      "bucket": "none"
+    },
+    {
+      "item": "Banana Classic Shake",
+      "category": "Shakes & Ice Cream",
+      "bucket": "drinks"
+    },
+    {
+      "item": "Caramel Sundae",
+      "category": "Shakes & Ice Cream",
+      "bucket": "none"
+    },
+    {
+      "item": "SONIC® Cheeseburger Combo",
+      "category": "Combos",
+      "bucket": "none"
+    },
+    {
+      "item": "SuperSONIC® Double Cheeseburger Combo",
+      "category": "Combos",
+      "bucket": "none"
+    },
+    {
+      "item": "SuperSONIC® Bacon Double Cheeseburger Combo",
+      "category": "Combos",
+      "bucket": "none"
+    },
+    {
+      "item": "All-American SONIC Smasher™ Combo",
+      "category": "Combos",
+      "bucket": "none"
+    },
+    {
+      "item": "All-American Bacon SONIC Smasher™ Combo",
+      "category": "Combos",
+      "bucket": "none"
+    },
+    {
+      "item": "Crispy Chicken Sandwich Combo",
+      "category": "Combos",
+      "bucket": "none"
+    },
+    {
+      "item": "Double SONIC Smasher™ Combo",
+      "category": "Combos",
+      "bucket": "none"
+    },
+    {
+      "item": "Fish Sandwich Combo",
+      "category": "Combos",
+      "bucket": "none"
+    },
+    {
+      "item": "Jr Double Cheeseburger Combo",
+      "category": "Combos",
+      "bucket": "none"
+    },
+    {
+      "item": "Triple SONIC Smasher™ Combo",
+      "category": "Combos",
+      "bucket": "none"
+    },
+    {
+      "item": "Cheese Tots",
+      "category": "Extras & Sides",
+      "bucket": "sides"
+    },
+    {
+      "item": "Cheese Groovy Fries",
+      "category": "Extras & Sides",
+      "bucket": "sides"
+    },
+    {
+      "item": "Chili Cheese Groovy Fries",
+      "category": "Extras & Sides",
+      "bucket": "sides"
+    },
+    {
+      "item": "Premium Chicken Bites",
+      "category": "Extras & Sides",
+      "bucket": "sides"
+    },
+    {
+      "item": "FRITOS® Chili Cheese Wrap",
+      "category": "Extras & Sides",
+      "bucket": "sides"
+    },
+    {
+      "item": "Soft Pretzel Twist",
+      "category": "Extras & Sides",
+      "bucket": "sides"
+    },
+    {
+      "item": "Fritos Chili Cheese Pie",
+      "category": "Extras & Sides",
+      "bucket": "sides"
+    },
+    {
+      "item": "Crispy Tenders - 3 Piece",
+      "category": "Extras & Sides",
+      "bucket": "sides"
+    },
+    {
+      "item": "Crispy Tenders - 5 Piece",
+      "category": "Extras & Sides",
+      "bucket": "sides"
+    },
+    {
+      "item": "FRITOS® Chili Cheese Jr. Wrap",
+      "category": "Extras & Sides",
+      "bucket": "sides"
+    }
+  ]
+}

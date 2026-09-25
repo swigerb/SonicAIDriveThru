@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 
 import conformance_hooks
 from config_loader import get_config
-from menu_utils import canonical_size_key, infer_category, normalize_size
+from menu_utils import canonical_size_key, infer_combo_component, normalize_size
 from models import OrderItem, OrderSummary
 
 __all__ = ["OrderState", "SessionIdentifiers", "order_state_singleton", "is_happy_hour"]
@@ -30,22 +30,11 @@ def is_happy_hour() -> bool:
 
 
 def _infer_combo_component(item_name: str) -> str:
-    """Lightweight category check for combo component validation (sides vs drinks).
+    """Combo-slot/happy-hour bucket check (sides vs drinks vs "" for neither).
 
-    Delegates to the shared ``infer_category`` in menu_utils to avoid drift.
+    Delegates to the shared ``infer_combo_component`` in menu_utils to avoid drift (#39).
     """
-    cat = infer_category(item_name)
-    if cat in ("sides",):
-        return "sides"
-    if cat in ("drinks", "slushes", "shakes", "shakes & ice cream", "slushes & drinks"):
-        return "drinks"
-    # Fallback: keyword scan for items that don't hit the JSON map
-    n = item_name.lower()
-    if "tot" in n or "fries" in n or "onion rings" in n:
-        return "sides"
-    if any(kw in n for kw in ("slush", "limeade", "ocean water", "drink", "tea", "lemonade", "shake", "blast", "malt", "coke", "sprite", "pepper", "root beer")):
-        return "drinks"
-    return ""
+    return infer_combo_component(item_name)
 
 
 @dataclass

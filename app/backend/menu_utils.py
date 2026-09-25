@@ -154,3 +154,69 @@ def infer_category(item_name: str) -> str:
     if "drink" in normalized or "tea" in normalized or "lemonade" in normalized:
         return "drinks"
     return ""
+
+
+# ---------------------------------------------------------------------------
+# Combo-component bucket classification (#39)
+#
+# Used for BOTH combo-slot-filling (which standalone items a combo can absorb into its side/
+# drink slots) and happy-hour discount eligibility ("happy hour = drinks only"). Deliberately
+# kept separate from ``infer_category`` above, whose raw category strings are relied on
+# elsewhere (extras validation, upsell hints, search categorisation) and must not change.
+# ---------------------------------------------------------------------------
+
+# Items whose true bucket contradicts their raw JSON category, checked first: the four hot-dog
+# entrees live in the "Hot Dogs & Tots" category alongside real sides (Tots, Onion Rings, Ched 'R'
+# Peppers, ...), and the two sundaes live in "Shakes & Ice Cream" alongside real shakes/blasts.
+# Per Brian's #39 decision, sundaes are full price during happy hour -- a sundae isn't a drink,
+# so it must not be discounted or fill a combo's drink slot.
+_BUCKET_EXCEPTIONS: dict[str, str] = {
+    "all-american dog": "",
+    "chili cheese coney": "",
+    "footlong quarter pound coney": "",
+    "corn dog": "",
+    "hot fudge sundae": "",
+    "caramel sundae": "",
+}
+
+# Raw JSON category string (already lower-cased by MENU_CATEGORY_MAP) -> combo-slot/happy-hour
+# bucket. Anything not listed here (Burgers & Sandwiches, Combos, or an unmapped category)
+# defaults to "" -- not a fillable side/drink slot and not happy-hour-discountable.
+_CATEGORY_BUCKET: dict[str, str] = {
+    "hot dogs & tots": "sides",
+    "extras & sides": "sides",
+    "slushes & drinks": "drinks",
+    "shakes & ice cream": "drinks",
+}
+
+# Word-boundary so a side item merely *containing* the substring "pepper" (e.g. "Ched 'R'
+# Peppers") isn't misclassified as the drink "Dr Pepper" (#39 / #28 N19 root cause).
+_DR_PEPPER_RE = re.compile(r"\bdr\.?\s*pepper\b")
+
+
+def infer_combo_component(item_name: str) -> str:
+    """Classify *item_name* into its combo-slot/happy-hour bucket.
+
+    Returns ``"sides"``, ``"drinks"``, or ``""`` (not fillable as a combo side/drink slot and not
+    happy-hour-discountable -- this covers combos, burgers/sandwiches, hot-dog entrees, and
+    sundaes). Category comes from ``menuItems.json`` first; keyword fallback only applies to
+    items that aren't in the menu at all (#39).
+    """
+    normalized = item_name.lower()
+    if normalized in _BUCKET_EXCEPTIONS:
+        return _BUCKET_EXCEPTIONS[normalized]
+
+    category = MENU_CATEGORY_MAP.get(normalized)
+    if category is not None:
+        return _CATEGORY_BUCKET.get(category, "")
+
+    # Not in the menu at all (e.g. a spoken item never added to menuItems.json) -- fall back to
+    # keyword scanning, using a word-boundary match for "dr pepper" specifically.
+    if "tot" in normalized or "fries" in normalized or "onion rings" in normalized:
+        return "sides"
+    if _DR_PEPPER_RE.search(normalized) or any(
+        kw in normalized
+        for kw in ("slush", "limeade", "ocean water", "drink", "tea", "lemonade", "shake", "blast", "malt", "coke", "sprite", "root beer")
+    ):
+        return "drinks"
+    return ""
