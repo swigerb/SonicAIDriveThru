@@ -163,6 +163,44 @@ public sealed class ClientToServerAllowListTests(ConformanceFixture fixture)
     });
 
     [Fact]
+    public Task Turn_detection_with_invalid_type_falls_back_to_the_servers_own_default() => fixture.RunAsync(async () =>
+    {
+        // A `turn_detection` whose `type` isn't the literal "server_vad" the frontend always
+        // sends is not partially filtered -- the WHOLE forged object is rejected and the
+        // server's own known-good default (`_BOOTSTRAP_CLIENT_SESSION["turn_detection"]`) is
+        // sent instead, so the upstream session is never left with an attacker-chosen shape.
+        var ct = TestContext.Current.CancellationToken;
+        var connectionTask = fixture.Realtime.WaitForNextConnectionAsync(FrameTimeout, ct);
+        await using var browser = await RealtimeBrowserClient.ConnectAsync(fixture.Backend!.BaseUri, cancellationToken: ct);
+        var connection = await connectionTask;
+        Assert.True(connection is not null, "No upstream connection was accepted for the browser socket.");
+
+        var bootstrap = await connection!.ReceivedFrames.WaitForAsync(f => f.Sequence == 0, FrameTimeout, ct);
+        Assert.True(bootstrap is not null, "Bootstrap session.update never arrived.");
+        var serverTurnDetection = bootstrap!.Json.GetProperty("session").GetProperty("audio").GetProperty("input").GetProperty("turn_detection");
+        var serverType = serverTurnDetection.GetProperty("type").GetString();
+        var serverThreshold = serverTurnDetection.GetProperty("threshold").GetDouble();
+
+        await browser.SendAsync(new JsonObject
+        {
+            ["type"] = "session.update",
+            ["session"] = new JsonObject
+            {
+                ["turn_detection"] = new JsonObject { ["type"] = "none", ["threshold"] = 0.01 },
+            },
+        }, ct);
+
+        var forwarded = await connection.ReceivedFrames.WaitForAsync(
+            f => f.Sequence > bootstrap.Sequence && f.Type == "session.update", FrameTimeout, ct);
+        Assert.True(forwarded is not null, "The browser's own session.update must still reach the fake upstream.");
+        var forwardedTurnDetection = forwarded!.Json.GetProperty("session").GetProperty("audio").GetProperty("input").GetProperty("turn_detection");
+
+        Assert.Equal(serverType, forwardedTurnDetection.GetProperty("type").GetString());
+        Assert.Equal(serverThreshold, forwardedTurnDetection.GetProperty("threshold").GetDouble());
+        Assert.NotEqual(0.01, forwardedTurnDetection.GetProperty("threshold").GetDouble());
+    });
+
+    [Fact]
     public Task Conversation_item_create_with_system_role_never_reaches_upstream() => fixture.RunAsync(async () =>
     {
         var ct = TestContext.Current.CancellationToken;

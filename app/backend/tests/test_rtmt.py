@@ -32,6 +32,7 @@ from audio_pipeline import (
 )
 from order_state import order_state_singleton
 from rtmt import (
+    _BOOTSTRAP_CLIENT_SESSION,
     _CLIENT_ALLOWED_TYPES,
     _CLIENT_APPEND_FAST_PATH_RE,
     _CLIENT_SESSION_KEYS,
@@ -45,6 +46,7 @@ from rtmt import (
     _drop_from_client,
     _filter_client_to_server,
     _origin_matches_host,
+    _sanitize_turn_detection,
     _to_ga_session,
     create_hmac_token,
     validate_hmac_token,
@@ -774,6 +776,86 @@ class ProcessMessageToServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session["instructions"], "You are a carhop.")  # server's own, never the browser's
         self.assertEqual(session["audio"]["input"]["turn_detection"]["type"], "server_vad")  # legitimate key still works
 
+    async def test_turn_detection_sub_keys_allow_listed_and_bounds_checked(self):
+        """PR #49 review round 3 sub-key hardening: `turn_detection` is a key
+        the browser may legitimately set (M3), but real GA `server_vad` also
+        accepts `create_response`/`interrupt_response`/`idle_timeout_ms` --
+        none of which the frontend ever sends, and none of which are safe to
+        take from the browser (e.g. `create_response: false` silences the
+        assistant). Numeric sub-keys out of the sane bounds the frontend's
+        own hardcoded values live within must be dropped individually, not
+        take the whole object down with them."""
+        rtmt = self._make_rtmt()
+        ws = _make_mock_ws()
+        order_state_singleton.sessions = {}
+        rtmt._sessions.create_session(ws)
+        msg = MagicMock()
+        msg.data = json.dumps({
+            "type": "session.update",
+            "session": {
+                "turn_detection": {
+                    "type": "server_vad",
+                    "threshold": 0.7,
+                    "prefix_padding_ms": 9999,       # out of [0, 5000] -- dropped alone
+                    "silence_duration_ms": -1,        # out of [0, 5000] -- dropped alone
+                    "create_response": False,         # never allowed at all
+                    "interrupt_response": False,       # never allowed at all
+                    "idle_timeout_ms": 60000,         # never allowed at all
+                },
+            },
+        })
+        result = await rtmt._process_message_to_server(msg, ws)
+        turn_detection = json.loads(result)["session"]["audio"]["input"]["turn_detection"]
+
+        self.assertEqual(turn_detection, {"type": "server_vad", "threshold": 0.7})
+        self.assertNotIn("create_response", turn_detection)
+        self.assertNotIn("interrupt_response", turn_detection)
+        self.assertNotIn("idle_timeout_ms", turn_detection)
+        self.assertNotIn("prefix_padding_ms", turn_detection)
+        self.assertNotIn("silence_duration_ms", turn_detection)
+
+    async def test_turn_detection_bool_rejected_for_numeric_fields(self):
+        """`bool` is an `int` subclass in Python -- `True`/`False` must not
+        sneak past the numeric bounds check for threshold/prefix_padding_ms/
+        silence_duration_ms."""
+        rtmt = self._make_rtmt()
+        ws = _make_mock_ws()
+        order_state_singleton.sessions = {}
+        rtmt._sessions.create_session(ws)
+        msg = MagicMock()
+        msg.data = json.dumps({
+            "type": "session.update",
+            "session": {"turn_detection": {"type": "server_vad", "threshold": True}},
+        })
+        result = await rtmt._process_message_to_server(msg, ws)
+        turn_detection = json.loads(result)["session"]["audio"]["input"]["turn_detection"]
+        self.assertNotIn("threshold", turn_detection)
+
+    async def test_turn_detection_wrong_type_falls_back_to_servers_own_default(self):
+        """A `turn_detection` whose `type` isn't the literal `"server_vad"`
+        (or a non-dict `turn_detection`) is not partially filtered -- the
+        WHOLE forged object is rejected and the server's own known-good
+        default (`_BOOTSTRAP_CLIENT_SESSION["turn_detection"]`) is sent
+        instead, so the upstream session is never left without any
+        turn_detection at all."""
+        rtmt = self._make_rtmt()
+        ws = _make_mock_ws()
+        order_state_singleton.sessions = {}
+        rtmt._sessions.create_session(ws)
+        for forged in (
+            {"type": "none"},
+            {"type": "semantic_vad"},
+            {"threshold": 0.7},          # type missing entirely
+            "not-a-dict",
+            123,
+        ):
+            with self.subTest(forged=forged):
+                msg = MagicMock()
+                msg.data = json.dumps({"type": "session.update", "session": {"turn_detection": forged}})
+                result = await rtmt._process_message_to_server(msg, ws)
+                turn_detection = json.loads(result)["session"]["audio"]["input"]["turn_detection"]
+                self.assertEqual(turn_detection, _BOOTSTRAP_CLIENT_SESSION["turn_detection"])
+
     async def test_exact_append_frame_fast_path_returns_input_unparsed(self):
         """M1: the anchored fast path must return `msg.data` completely
         unparsed for the EXACT frame shape `useRealtime.tsx`'s
@@ -1214,6 +1296,46 @@ class ClientToServerAllowListTests(unittest.TestCase):
         ever sets these two session keys -- see `_BOOTSTRAP_CLIENT_SESSION`,
         which mirrors the same set."""
         self.assertEqual(_CLIENT_SESSION_KEYS, {"turn_detection", "input_audio_transcription"})
+
+    def test_sanitize_turn_detection_keeps_exactly_the_frontend_shape(self):
+        """PR #49 review round 3 sub-key hardening: the legitimate frontend
+        shape (`useRealtime.tsx`) survives unchanged."""
+        result = _sanitize_turn_detection({
+            "type": "server_vad", "threshold": 0.7, "prefix_padding_ms": 300, "silence_duration_ms": 500,
+        })
+        self.assertEqual(result, {
+            "type": "server_vad", "threshold": 0.7, "prefix_padding_ms": 300, "silence_duration_ms": 500,
+        })
+
+    def test_sanitize_turn_detection_drops_disallowed_sub_keys(self):
+        result = _sanitize_turn_detection({
+            "type": "server_vad", "create_response": False, "interrupt_response": True, "idle_timeout_ms": 1,
+        })
+        self.assertEqual(result, {"type": "server_vad"})
+
+    def test_sanitize_turn_detection_rejects_non_dict_or_wrong_type(self):
+        for forged in ({"type": "none"}, {"type": "semantic_vad"}, {}, "server_vad", None, 1, []):
+            with self.subTest(forged=forged):
+                self.assertIsNone(_sanitize_turn_detection(forged))
+
+    def test_sanitize_turn_detection_numeric_bounds(self):
+        cases = [
+            ("threshold", -0.01, False), ("threshold", 0, True), ("threshold", 1, True), ("threshold", 1.01, False),
+            ("prefix_padding_ms", -1, False), ("prefix_padding_ms", 0, True),
+            ("prefix_padding_ms", 5000, True), ("prefix_padding_ms", 5001, False),
+            ("silence_duration_ms", -1, False), ("silence_duration_ms", 0, True),
+            ("silence_duration_ms", 5000, True), ("silence_duration_ms", 5001, False),
+        ]
+        for key, value, kept in cases:
+            with self.subTest(key=key, value=value):
+                result = _sanitize_turn_detection({"type": "server_vad", key: value})
+                self.assertEqual(key in result, kept)
+
+    def test_sanitize_turn_detection_rejects_bool_for_numeric_fields(self):
+        for key in ("threshold", "prefix_padding_ms", "silence_duration_ms"):
+            with self.subTest(key=key):
+                result = _sanitize_turn_detection({"type": "server_vad", key: True})
+                self.assertNotIn(key, result)
 
 
 

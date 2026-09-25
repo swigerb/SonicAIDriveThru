@@ -250,6 +250,63 @@ _CLIENT_TOP_LEVEL_KEYS: dict[str, frozenset[str]] = {
 # present in the filtered input for `_build_session` to fail to overwrite.
 _CLIENT_SESSION_KEYS = frozenset({"turn_detection", "input_audio_transcription"})
 
+# Sub-key allow-list for the browser's `turn_detection` object (PR #49 review
+# round 3, sub-key hardening). Being in `_CLIENT_SESSION_KEYS` only means the
+# *key* survives the top-level session filter above -- real GA `server_vad`
+# also accepts `create_response`, `interrupt_response` and `idle_timeout_ms`,
+# none of which `useRealtime.tsx` ever sends, and none of which are safe to
+# take from the browser: `create_response: false` can silence the assistant
+# entirely, `interrupt_response`/`idle_timeout_ms` can change barge-in/idle
+# behaviour server operators rely on. `_sanitize_turn_detection` below closes
+# that off structurally, the same way `_CLIENT_TOP_LEVEL_KEYS` closes off
+# forged extra top-level keys on an event.
+_TURN_DETECTION_ALLOWED_KEYS = frozenset({"type", "threshold", "prefix_padding_ms", "silence_duration_ms"})
+_TURN_DETECTION_NUMERIC_BOUNDS = {
+    "threshold": (0, 1),
+    "prefix_padding_ms": (0, 5000),
+    "silence_duration_ms": (0, 5000),
+}
+
+
+def _sanitize_turn_detection(value: Any, session_id: str | None = None) -> dict | None:
+    """Allow-list a browser-sent `turn_detection` object down to exactly the
+    four sub-keys `useRealtime.tsx`'s `startSession()` ever sends
+    (`type`, `threshold`, `prefix_padding_ms`, `silence_duration_ms`).
+
+    `type` must be the literal `"server_vad"` -- anything else (including a
+    non-dict `value`, or a missing `type`) is not a partial-filter case: the
+    WHOLE object is rejected (returns `None`) so the caller falls back to the
+    server's own known-good default (`_BOOTSTRAP_CLIENT_SESSION`) rather than
+    forwarding a half-sanitized, possibly GA-invalid `turn_detection`.
+
+    Each numeric sub-key is bounds-checked independently and dropped (not the
+    whole object) if it is out of range or the wrong type: `threshold` must be
+    a number in `[0, 1]`; `prefix_padding_ms`/`silence_duration_ms` must be
+    numbers in `[0, 5000]`. `bool` is deliberately rejected for all three even
+    though Python's `bool` is an `int` subclass, since `true`/`false` is never
+    a legitimate value for any of them. Any other sub-key (`create_response`,
+    `interrupt_response`, `idle_timeout_ms`, ...) is dropped unconditionally --
+    it is simply never in the allow-list, regardless of its value.
+    """
+    if not isinstance(value, dict) or value.get("type") != "server_vad":
+        return None
+    sanitized: dict = {"type": "server_vad"}
+    dropped = []
+    for key, (lo, hi) in _TURN_DETECTION_NUMERIC_BOUNDS.items():
+        if key not in value:
+            continue
+        candidate = value[key]
+        if isinstance(candidate, (int, float)) and not isinstance(candidate, bool) and lo <= candidate <= hi:
+            sanitized[key] = candidate
+        else:
+            dropped.append(key)
+    extra = sorted(k for k in value if k not in _TURN_DETECTION_ALLOWED_KEYS)
+    if dropped or extra:
+        logger.warning(
+            "Sanitized client turn_detection: dropped out-of-bounds/invalid sub-key(s) %s and "
+            "disallowed sub-key(s) %s (session=%s)", dropped, extra, session_id)
+    return sanitized
+
 
 def _filter_client_to_server(message: dict, session_id: str | None = None) -> dict | None:
     """Allow-list and rebuild a browser→upstream event before
@@ -1280,6 +1337,14 @@ class RTMiddleTier:
             # M3: keep only the session keys the frontend actually sends;
             # everything server-owned is applied fresh by _build_session below.
             session_in = {k: v for k, v in client_session.items() if k in _CLIENT_SESSION_KEYS}
+            if "turn_detection" in client_session:
+                sanitized_td = _sanitize_turn_detection(client_session["turn_detection"], session_id=session_id)
+                if sanitized_td is None:
+                    logger.warning(
+                        "Rejected browser turn_detection (missing/invalid type=server_vad) — falling back "
+                        "to the server's own default (session=%s)", session_id)
+                    sanitized_td = copy.deepcopy(_BOOTSTRAP_CLIENT_SESSION["turn_detection"])
+                session_in["turn_detection"] = sanitized_td
             session = self._build_session(session_in, voice_locked=voice_locked)
             tool_names = [t.get("name", "?") for t in session["tools"]]
             filtered["session"] = session
