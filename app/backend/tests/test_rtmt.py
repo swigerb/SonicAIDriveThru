@@ -469,6 +469,87 @@ class EchoSuppressorTests(unittest.TestCase):
             target_ws.send_str.assert_called()
         asyncio.run(_run())
 
+    # ─── swigerb/SonicAIDriveThru#48: response.done is the fallback for a greeting that
+    # produced no audio at all (text-only fallback, cancelled/failed before any audio, a
+    # no-output rate-limited retry) — on_audio_done() is never reached for it otherwise, so
+    # the mic would stay muted until the guest physically interrupts. ───
+
+    def test_response_done_ends_pending_greeting_with_no_audio(self):
+        """A greeting's response.done with zero audio must clear ai_speaking (#48).
+
+        Nothing was ever rendered to the guest (no audio.done completed), so there is no
+        residual/echo risk — the mic must be released immediately, with no extra cooldown
+        and no flush sent to the upstream (nothing to flush): a bare, silent unmute, same
+        as an explicit browser barge-in.
+        """
+        async def _run():
+            echo = EchoSuppressor()
+            echo.start_greeting_suppression()
+            loop = asyncio.get_running_loop()
+            target_ws = MagicMock()
+            target_ws.closed = False
+            target_ws.send_str = AsyncMock()
+            echo.on_response_done(loop, target_ws)
+            self.assertFalse(echo.ai_speaking)
+            self.assertFalse(echo.greeting_in_progress)
+            self.assertEqual(echo.cooldown_end, 0.0)
+            target_ws.send_str.assert_not_called()
+        asyncio.run(_run())
+
+    def test_response_done_is_noop_without_a_pending_greeting(self):
+        """A non-greeting response.done must not touch suppression state at all.
+
+        `ai_speaking=True` here models a real, currently-speaking response completely
+        unrelated to any greeting (e.g. a late/duplicate response.done racing a genuinely
+        active later response) -- `on_response_done()` is scoped to the greeting fallback
+        only, so it must leave `ai_speaking` alone when `greeting_in_progress` is False,
+        never treating an unrelated in-flight response as its own to unmute.
+        """
+        echo = EchoSuppressor()
+        echo.on_audio_delta()  # ai_speaking=True, unrelated to any greeting
+        loop = MagicMock()
+        loop.time.return_value = 123.0
+        target_ws = MagicMock()
+        echo.on_response_done(loop, target_ws)
+        self.assertTrue(echo.ai_speaking)
+        self.assertFalse(echo.greeting_in_progress)
+        self.assertEqual(echo.cooldown_end, 0.0)
+        target_ws.send_str.assert_not_called()
+
+    def test_response_done_after_barge_in_only_clears_bookkeeping(self):
+        """If on_barge_in() already cleared ai_speaking, response.done must not re-arm cooldown."""
+        echo = EchoSuppressor()
+        echo.start_greeting_suppression()
+        echo.on_barge_in()
+        self.assertFalse(echo.ai_speaking)
+        self.assertTrue(echo.greeting_in_progress)  # on_barge_in() doesn't touch this flag
+        loop = MagicMock()
+        loop.time.return_value = 555.0
+        target_ws = MagicMock()
+        echo.on_response_done(loop, target_ws)
+        self.assertFalse(echo.ai_speaking)
+        self.assertFalse(echo.greeting_in_progress)
+        # No cooldown re-armed retroactively — on_barge_in() already reset it to 0.0.
+        self.assertEqual(echo.cooldown_end, 0.0)
+        target_ws.send_str.assert_not_called()
+
+    def test_response_done_is_noop_after_audio_done_already_ended_greeting(self):
+        """If a normal audio response already ended greeting suppression, response.done is inert."""
+        async def _run():
+            echo = EchoSuppressor()
+            echo.start_greeting_suppression()
+            loop = asyncio.get_running_loop()
+            target_ws = MagicMock()
+            target_ws.closed = False
+            target_ws.send_str = AsyncMock()
+            echo.on_audio_delta()
+            echo.on_audio_done(loop, target_ws)
+            cooldown_after_audio_done = echo.cooldown_end
+            echo.on_response_done(loop, target_ws)
+            self.assertEqual(echo.cooldown_end, cooldown_after_audio_done)
+            self.assertFalse(echo.greeting_in_progress)
+        asyncio.run(_run())
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # AUDIO PIPELINE UTILITY TESTS

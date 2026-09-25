@@ -1370,3 +1370,51 @@ only `cooldown_end` to drive suppression by that point — which the mutation's 
 audio-free `ResponseScript` (`[new DoneEvent()]`, no `AudioDeltaEvent`) for the greeting in that test
 before triggering it, restoring genuine isolation; the mutation now fails Phase A as intended. See
 the updated docstring on `EchoSuppressionBargeInTests` for the full account.
+
+### `response.done` is the greeting's own echo-suppression safety net (#48)
+
+`audio_pipeline.EchoSuppressor.start_greeting_suppression()` pre-sets `ai_speaking = True` before
+the greeting's `response.create` is even sent, on the assumption real audio is about to stream. Two
+events normally clear it: `response.output_audio.done` (`on_audio_done()`, a real audio delta/done
+pair actually played) and the browser's own `response.cancel` (`on_barge_in()`, an explicit
+barge-in). A greeting that produces **no audio at all** — a text-only fallback, a response
+cancelled/failed by the model before any audio, a rate-limited retry with empty output — triggers
+neither. Before this fix, `should_suppress_audio()` then dropped every `input_audio_buffer.append`
+**forever**: the guest's mic stayed muted until they physically interrupted, which they have no
+reason to do since the AI never said anything to interrupt.
+
+The fix: `response.done` is the one event GA guarantees for *every* response regardless of status
+(see "`response.cancel` still emits the normal `.done`-shaped events" above), so
+`audio_pipeline.EchoSuppressor.on_response_done()` uses it as the fallback — but **only** for the
+pending greeting, and **only** if nothing else already ended it:
+
+- If `greeting_in_progress` is already `False` (no greeting pending, or `on_audio_done()` already
+  ran normally for it), `on_response_done()` is a pure no-op — it must never touch a genuinely
+  unrelated in-flight response's `ai_speaking` (e.g. a late/duplicate `response.done` racing a
+  different, still-active response).
+- If `ai_speaking` is still `True` (the no-audio case — `on_audio_done()` never ran), clear it
+  **immediately, with no cooldown**: nothing was ever actually rendered to the guest, so there is no
+  residual/echo risk that would warrant `on_audio_done()`'s extended post-greeting cooldown
+  (`ECHO_COOLDOWN_SEC * 2`). This is deliberately the same "instant, no cooldown" behaviour as
+  `on_barge_in()`, not a delegation to `on_audio_done()` — an earlier draft of this fix *did*
+  delegate to `on_audio_done()`, which reintroduced an artificial multi-second mute after a greeting
+  the guest never actually heard (caught by `GreetingWithoutAudioUnmutesTests`, whose single
+  post-greeting mic append landed inside that unwarranted cooldown window and was dropped forever,
+  since a dropped mic frame is never retried/requeued by the browser at that point in the flow).
+- If `ai_speaking` is already `False` (a real barge-in, `on_barge_in()`, already cleared it before
+  this `response.done` arrived), only the `greeting_in_progress` bookkeeping flag is cleared — no
+  cooldown is re-armed retroactively.
+
+Wired in `rtmt.py`'s `from_server_to_client` dispatch on a new `MARKER_RESPONSE_DONE` (`'"response.done"'`)
+raw-substring check, alongside the existing audio/speech markers (same substring-based dispatch
+style as the rest of that loop; the fragility of substring dispatch itself is tracked separately as
+#53's follow-up "F2", not addressed here).
+
+`GreetingWithoutAudioUnmutesTests` is the direct, unassisted regression proof: it scripts the
+greeting with a bare `DoneEvent()` (no `AudioDeltaEvent` at all, immediate completion, no `Pace`),
+then sends exactly one guest mic `input_audio_buffer.append` with **no `response.cancel` anywhere in
+the test** — proving `response.done` alone, with no browser interrupt, is what unmutes the mic.
+Contrast with `EchoSuppressionBargeInTests`'s Phase A, which deliberately *delays* the greeting's
+completion (via the harness's `DoneEvent.Pace`, added for this purpose) and relies on an explicit
+browser barge-in to isolate `on_barge_in()` specifically — a different, narrower claim than
+`GreetingWithoutAudioUnmutesTests`'s.

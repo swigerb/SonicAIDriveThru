@@ -28,17 +28,18 @@ namespace Conformance.Tests;
 /// moments after any cancellation. That means "cancel an active response, then wait (however
 /// patiently) for mic audio to resume" can pass even with `on_barge_in()` gutted to a no-op,
 /// because the *other* path still clears suppression a little later regardless. Phase A below
-/// sidesteps the confound entirely instead of racing it: right after the greeting round trip,
+/// sidesteps the confound entirely instead of racing it: right after the greeting fires,
 /// `echo.ai_speaking` is still `True` from `echo.start_greeting_suppression()` (armed before the
 /// greeting's own `response.create`, per rtmt.py), and -- because the greeting's own fake
 /// response is explicitly scripted (see the `connection.Script.Enqueue` call before
-/// `SendStartSessionAsync` below) with no audio output at all -- `echo.on_audio_done()` is never
-/// called for it, so nothing *but* `on_barge_in()` can ever clear that particular
-/// `ai_speaking=True`. Sending `response.cancel` with no active upstream response at all
-/// (harmless; the fake just errors it back) and then observing mic audio start flowing is
-/// therefore proof of `on_barge_in()` specifically, with no race against a competing completion
-/// event. Phase B then separately exercises the full, realistic "AI is genuinely speaking real
-/// audio" sequence end-to-end for M3 and M7.
+/// `SendStartSessionAsync` below) with no audio output *and* a deliberately delayed completion
+/// (`DoneEvent.Pace`, swigerb/SonicAIDriveThru#48 follow-up) -- neither `echo.on_audio_done()`
+/// nor (post-#48) `echo.on_response_done()`'s own fallback ever get a chance to run before Phase
+/// A's own `response.cancel`, so nothing *but* `on_barge_in()` can ever clear that particular
+/// `ai_speaking=True`. Cancelling the still-open greeting response and then observing mic audio
+/// start flowing is therefore proof of `on_barge_in()` specifically, with no race against any
+/// competing completion event. Phase B then separately exercises the full, realistic "AI is
+/// genuinely speaking real audio" sequence end-to-end for M3 and M7.
 ///
 /// **Bug found and fixed (#8, PR #42 follow-up):** the "no audio output at all" premise above was
 /// only true in the *docstring*, not in the code -- nothing was actually enqueued into
@@ -51,9 +52,28 @@ namespace Conformance.Tests;
 /// -- which `on_barge_in()`'s surviving `cooldown_end = 0.0` line was sufficient to clear on its
 /// own. A live mutation of `on_barge_in()` (removing only its `self.ai_speaking = False` line,
 /// keeping `self.cooldown_end = 0.0`) survived this test as a result. Explicitly enqueuing an
-/// audio-free `ResponseScript` for the greeting (see below) restores the isolation this docstring
-/// always claimed, and the mutation now fails (see the squad's report to the coordinator for the
-/// re-run confirming this).
+/// audio-free `ResponseScript` for the greeting restored the isolation this docstring always
+/// claimed.
+///
+/// **Reworked again (#48 follow-up):** fixing #48 (`echo.on_response_done()`: `response.done`
+/// alone, with no audio, now also ends greeting suppression -- see
+/// <see cref="GreetingWithoutAudioUnmutesTests"/> for that fix's own direct regression proof) put
+/// the *same* confound back into this test, one level up: an audio-free greeting that completes
+/// immediately (the old, un-paced `new DoneEvent()`) now has its `ai_speaking` cleared by
+/// `on_response_done()`'s fallback before Phase A's `response.cancel` ever runs, exactly the way
+/// the cancelled-response completion used to confound `on_barge_in()`'s isolation pre-#8. The
+/// greeting's `DoneEvent` is now scripted with a long `Pace` (comfortably longer than this
+/// phase's own work, always interrupted almost instantly by Phase A's own `response.cancel` --
+/// see `DoneEvent.Pace`'s own doc comment) so the response is still genuinely open (no
+/// `response.done` at all yet, from either path) when Phase A cancels it. Because the greeting's
+/// own round trip token can no longer be waited on *before* Phase A (it doesn't arrive until the
+/// greeting response itself completes, i.e. once Phase A's cancel interrupts it), the
+/// synchronization point moved: this test now waits for the greeting's `response.create` to
+/// reach the fake upstream instead (still a valid barrier -- `echo.start_greeting_suppression()`
+/// always runs before that send, per rtmt.py's `send_greeting_once`), and waits for the
+/// (now genuinely real, not "nothing to cancel") cancelled greeting's own round trip token right
+/// after Phase A, to bound Phase B's own `firstDelta` wait the same way the old `greetingRoundTrip`
+/// did.
 /// </summary>
 [Collection(ConformanceCollection.Name)]
 public sealed class EchoSuppressionBargeInTests(ConformanceFixture fixture)
@@ -77,50 +97,59 @@ public sealed class EchoSuppressionBargeInTests(ConformanceFixture fixture)
         var connection = await connectionTask;
         Assert.True(connection is not null, $"No upstream connection was accepted within {FrameTimeout}.");
 
-        // Phase A's isolation (below) depends on the greeting producing NO audio at all, so that
-        // echo.on_audio_done() is never invoked for it and the only thing that can ever clear
-        // echo.ai_speaking is echo.on_barge_in() itself. `ResponseScript.Default` (what the fake
-        // falls back to when nothing has been enqueued, which is what this line was relying on
-        // before this fix) actually contains one `AudioDeltaEvent` + a completing `DoneEvent` --
-        // real audio -- so the greeting's own NORMAL completion was already calling
-        // echo.on_audio_done() (clearing ai_speaking and arming a real, greeting-doubled cooldown)
-        // well before Phase A's response.cancel ever ran. That masked exactly the mutation this
-        // test exists to catch: with on_barge_in()'s `self.ai_speaking = False` line removed
-        // (keeping only `self.cooldown_end = 0.0`), the test still passed, because ai_speaking was
-        // already False from the greeting's own completion, and on_barge_in()'s surviving
-        // `cooldown_end = 0.0` line was sufficient on its own to lift the (cooldown-driven, not
-        // ai_speaking-driven) suppression. Enqueuing an audio-free script here restores the
-        // isolation this test's own docstring already claimed: cooldown_end is never touched by
-        // anything before Phase A's cancel, so suppression here is driven purely by ai_speaking,
-        // and only on_barge_in() can lift it.
-        connection!.Script.Enqueue(new ResponseScript([new DoneEvent()]));
+        // Phase A's isolation depends on the greeting's response.done never arriving (from
+        // either the normal audio path or, post-#48, echo.on_response_done()'s own fallback)
+        // until *after* Phase A's own response.cancel has run -- otherwise on_barge_in() is no
+        // longer the only thing that could have cleared ai_speaking. No audio at all (so
+        // on_audio_done() is never called) plus a long Pace on the completion (so
+        // on_response_done()'s fallback doesn't fire early either) keeps the response genuinely
+        // open for this phase's whole duration. The Pace is always interrupted almost instantly
+        // by this phase's own response.cancel below (DoneEvent.Pace uses the same
+        // responseCts.Token-linked cancellation AudioDeltaEvent.Pace does), so this never actually
+        // waits anywhere close to the scripted duration in a healthy run.
+        connection!.Script.Enqueue(new ResponseScript([new DoneEvent(Pace: TimeSpan.FromSeconds(20))]));
 
         await browser.SendStartSessionAsync(cancellationToken: ct);
-        var greetingRoundTrip = await browser.ReceivedFrames.WaitForAsync(
-            f => f.Type == "extension.round_trip_token", FrameTimeout, ct);
-        Assert.True(greetingRoundTrip is not null, "Greeting round trip never completed.");
+
+        // Can no longer wait for the greeting's own extension.round_trip_token here (post-#48
+        // rework) -- it doesn't arrive until the greeting response actually completes, which this
+        // phase deliberately delays. echo.start_greeting_suppression() always runs before the
+        // greeting's response.create is sent (rtmt.py's send_greeting_once), so waiting for that
+        // response.create to reach the fake upstream is an equally valid barrier: suppression is
+        // guaranteed armed by the time it arrives.
+        var greetingResponseCreate = await connection.ReceivedFrames.WaitForAsync(
+            f => f.Type == "response.create", FrameTimeout, ct);
+        Assert.True(greetingResponseCreate is not null, "Expected the greeting's own response.create to reach the fake upstream.");
 
         // ── Phase A: isolate echo.on_barge_in() itself (M4), with no competing completion event ──
-        // The greeting's own fake response produces no audio (the audio-free script enqueued
-        // above), so echo.on_audio_done() is never called for it and echo.ai_speaking stays True
-        // (armed by echo.start_greeting_suppression() before the greeting fired) until something
-        // explicitly clears it. Confirm that stuck suppression is genuinely active first.
+        // The greeting's own fake response produces no audio and its completion is paced well out
+        // (the audio-free, delayed script enqueued above), so neither echo.on_audio_done() nor
+        // echo.on_response_done()'s fallback ever run for it before this phase's cancel, and
+        // echo.ai_speaking stays True (armed by echo.start_greeting_suppression() before the
+        // greeting fired) until something explicitly clears it. Confirm that stuck suppression is
+        // genuinely active first.
         await browser.SendInputAudioAppendAsync(MicWhileGreetingStuckSuppressed, ct);
 
-        // There is no active upstream response at this point (the greeting's own already
-        // completed, and nothing else has been created), so this is sent purely to exercise
-        // echo.on_barge_in() itself; the fake errors it back harmlessly.
+        // The greeting's response is still genuinely open at this point (its DoneEvent is
+        // deliberately paced out above), so this response.cancel actually cancels it -- unlike
+        // before the #48 rework, this is no longer "nothing to cancel". echo.on_barge_in() runs
+        // synchronously as this response.cancel is relayed upstream (rtmt.py's
+        // from_client_to_server), before the fake's own (fast, since the cancellation interrupts
+        // its Pace immediately) cancelled-response completion can arrive back.
         await browser.SendResponseCancelAsync(ct);
-        var isolatedCancelFrame = await connection!.ReceivedFrames.WaitForAsync(
-            f => f.Type == "response.cancel", FrameTimeout, ct);
-        Assert.True(isolatedCancelFrame is not null, "Expected the browser's response.cancel to be relayed upstream even with nothing active to cancel.");
+        var isolatedCancelFrame = await connection.ReceivedFrames.WaitForAsync(
+            f => f.Sequence > greetingResponseCreate!.Sequence && f.Type == "response.cancel", FrameTimeout, ct);
+        Assert.True(isolatedCancelFrame is not null, "Expected the browser's response.cancel to be relayed upstream.");
 
         Assert.DoesNotContain(connection.ReceivedFrames.Snapshot(), f =>
             f.Type == "input_audio_buffer.append" && f.Json.GetProperty("audio").GetString() == MicWhileGreetingStuckSuppressed);
 
         // The only thing that could possibly have changed echo.ai_speaking between the drop above
-        // and this send is echo.on_barge_in() -- there is no active response, so no
-        // echo.on_audio_done() completion can be racing this. M4 ("mic audio stays suppressed
+        // and this send is echo.on_barge_in() -- the greeting response was still open, and its
+        // own Pace-delayed completion cannot be racing this (the Pace is interrupted by the
+        // cancel itself, but on_response_done()'s "already cleared, just bookkeeping" branch is a
+        // pure no-op for ai_speaking once on_barge_in() has already run -- see
+        // EchoSuppressor.on_response_done's own doc comment). M4 ("mic audio stays suppressed
         // after response.cancel") must fail here: with on_barge_in() gutted to a no-op, nothing
         // else would ever clear this and this send would time out.
         await browser.SendInputAudioAppendAsync(MicAfterIsolatedBargeIn, ct);
@@ -132,6 +161,14 @@ public sealed class EchoSuppressionBargeInTests(ConformanceFixture fixture)
             "Expected mic audio to be forwarded upstream immediately after response.cancel with no " +
             "active response to cancel -- the only mechanism that could have lifted suppression " +
             "here is echo.on_barge_in() itself.");
+
+        // The greeting's own response is now cancelled (Phase A's response.cancel above
+        // interrupted its Pace) -- wait for its round trip token so Phase B's firstDelta wait
+        // below has a browser.ReceivedFrames sequence bound to start from, same role the old
+        // pre-Phase-A greetingRoundTrip wait used to serve.
+        var greetingRoundTrip = await browser.ReceivedFrames.WaitForAsync(
+            f => f.Type == "extension.round_trip_token", FrameTimeout, ct);
+        Assert.True(greetingRoundTrip is not null, "Greeting round trip never completed.");
 
         // ── Phase B: the full, realistic "AI is genuinely speaking real audio" sequence ──
         // Give the AI a still-active response to speak over -- the second delta is paced well out
@@ -203,13 +240,5 @@ public sealed class EchoSuppressionBargeInTests(ConformanceFixture fixture)
         // WaitForAsync predicate's Sequence bound above, restated explicitly here).
         Assert.True(cancelFrame.Sequence < secondAppend!.Sequence,
             "Expected response.cancel to precede the resumed mic audio on the wire.");
-    },
-    // Phase A's response.cancel with nothing active to cancel is a deliberate, expected part of
-    // this scenario (it is what makes the on_barge_in proof confound-free): GA/the fake correctly
-    // rejects it with a generic upstream `error` event (relayed to the browser like any other
-    // upstream frame, per rtmt.py's ordinary passthrough -- not swallowed or mishandled), and
-    // rtmt.py additionally logs that rejection server-side as a single ERROR-level line. This is
-    // proven harmless above (the browser's own barge-in still works correctly and every
-    // assertion after it passes), so it is not an unexpected/unhandled error.
-    allowedNewBackendErrors: 1);
+    });
 }

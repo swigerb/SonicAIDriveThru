@@ -34,6 +34,7 @@ from audio_pipeline import (
     MARKER_AUDIO_DONE_LEGACY as _MARKER_AUDIO_DONE_LEGACY,
     MARKER_END_SESSION as _MARKER_END_SESSION,
     MARKER_LOG_TO_FILE as _MARKER_LOG_TO_FILE,
+    MARKER_RESPONSE_DONE as _MARKER_RESPONSE_DONE,
     MARKER_RESUME as _MARKER_RESUME,
     MARKER_SESSION_UPDATED as _MARKER_SESSION_UPDATED,
     MARKER_SET_VOICE as _MARKER_SET_VOICE,
@@ -1976,6 +1977,15 @@ class RTMiddleTier:
                                     self._sessions.record_turn(session_id, "guest", json.loads(data).get("transcript"))
                                 except (ValueError, AttributeError):
                                     pass
+                            elif _MARKER_RESPONSE_DONE in data:
+                                # swigerb/SonicAIDriveThru#48: a greeting that produced no
+                                # audio (text-only fallback, cancelled/failed before any
+                                # audio, a no-output rate-limited retry) never reaches
+                                # echo.on_audio_done() -- response.done is the guaranteed
+                                # event for every response, so it's the fallback that ends
+                                # greeting suppression instead of leaving the mic muted
+                                # until the guest physically interrupts.
+                                echo.on_response_done(loop, target_ws, verbose)
 
                             # The bootstrap session.updated arrives as soon as the socket
                             # opens, so it must NOT trigger the greeting -- the browser's

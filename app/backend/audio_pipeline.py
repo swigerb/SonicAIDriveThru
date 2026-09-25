@@ -138,6 +138,7 @@ MARKER_SPEECH_STARTED = '"input_audio_buffer.speech_started"'
 MARKER_SESSION_UPDATE = '"session.update"'
 MARKER_SESSION_UPDATED = '"session.updated"'
 MARKER_RESPONSE_CANCEL = '"response.cancel"'
+MARKER_RESPONSE_DONE = '"response.done"'
 MARKER_VERBOSE_LOGGING = '"extension.set_verbose_logging"'
 MARKER_LOG_TO_FILE = '"extension.set_log_to_file"'
 MARKER_SET_VOICE = '"extension.set_voice"'
@@ -226,3 +227,33 @@ class EchoSuppressor:
         self.ai_speaking = True
         self.greeting_in_progress = True
         vlog(verbose, "  Echo suppression: ai_speaking=True (pre-set for greeting)")
+
+    def on_response_done(self, loop: asyncio.AbstractEventLoop, target_ws: Any, verbose: bool = False) -> None:
+        """A response finished (any status) — the safety net for a greeting with no audio.
+
+        `on_audio_done()` (a real audio delta/done pair) and `on_barge_in()` (browser
+        response.cancel) are the two normal ways `ai_speaking` gets cleared. A greeting that
+        never produces audio at all (text-only fallback, cancelled/failed before any audio,
+        a rate-limited retry with no output) triggers neither, so `should_suppress_audio()`
+        would drop the guest's mic forever until they physically interrupt (#48).
+        `response.done` is the one event GA guarantees for every response regardless of
+        status, so treat it as the fallback: end suppression here too, but only for the
+        pending greeting, and only if nothing else already has.
+        """
+        if not self.greeting_in_progress:
+            return  # no greeting pending, or on_audio_done() already ended it normally.
+        self.greeting_in_progress = False
+        if self.ai_speaking:
+            # Still latched — on_audio_done() never ran for this response, so nothing was
+            # ever actually rendered to the guest (no completed audio.done). With nothing
+            # played, there's no residual/echo risk that would warrant on_audio_done()'s
+            # extended post-greeting cooldown -- unmute immediately, the same as an
+            # explicit browser barge-in (on_barge_in()), instead of imposing an artificial
+            # multi-second mute after a greeting the guest never actually heard.
+            self.ai_speaking = False
+            self.cooldown_end = 0.0
+            logger.debug("Echo suppression: greeting produced no audio — unmuting immediately")
+            vlog(verbose, "─── [Echo] response.done, no audio — ai_speaking=False, no cooldown ───")
+        # else: something else (on_barge_in(), a genuine mid-greeting interrupt) already
+        # cleared ai_speaking before this response.done arrived — the bookkeeping flag
+        # above is all that's left to clear; don't re-arm a cooldown retroactively.
