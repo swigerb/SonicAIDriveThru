@@ -332,4 +332,101 @@ public sealed class CustomisedItemMenuLookupTests
                 OrderScenarioHelpers.AssertMoneyEqual(expectedTotal, OrderScenarioHelpers.GetOrderFinalTotal(result.ToolResultJson!));
             });
     }
+
+    /// <summary>PR #50 review (round 4): pins the exact `_menu_key()` paren-group-stripping
+    /// algorithm end to end, not just via the doctests on `strip_modifiers`'s docstring --
+    /// Rick's review explicitly asked for conformance cases covering two groups, a mid-string
+    /// group, and a nested/unbalanced group (documented in the README's "exact `_menu_key()`
+    /// normalisation algorithm" section).</summary>
+    [Collection(HappyHourJustBeforeOpenCollection.Name)]
+    public sealed class ParenGroupNormalisationTests(HappyHourJustBeforeOpenFixture fixture)
+    {
+        [Fact]
+        public Task Two_parenthesized_modifier_groups_both_strip_and_the_item_still_absorbs_as_a_side() =>
+            fixture.RunAsync(async () =>
+            {
+                // "Tots (Extra Crispy) (No Salt)" -- two separate `(...)` groups -- must strip to
+                // the bare allow-listed key "tots" exactly like a single group would.
+                var ct = TestContext.Current.CancellationToken;
+                const string item = "Tots (Extra Crispy) (No Salt)";
+                const decimal unitPrice = 2.79m; // app/frontend/src/data/menuItems.json, "Tots" Medium
+
+                var (browser, connection, roundTripIndex) = await OrderScenarioHelpers.ConnectAndGreetAsync(fixture, ct);
+                await using var _ = browser;
+
+                var result = await OrderScenarioHelpers.RunOrderStepsAsync(
+                    connection, browser,
+                    [
+                        ("add", BaseComboName, BaseComboSize, 1, BaseComboPrice),
+                        ("add", item, "medium", 1, unitPrice),
+                    ],
+                    roundTripIndex, ct);
+
+                OrderScenarioHelpers.AssertMoneyEqual(
+                    BaseComboPrice,
+                    OrderScenarioHelpers.GetOrderTotal(result.ToolResultJson!),
+                    "Two parenthesized modifier groups must both strip, same as a single group.");
+                Assert.Equal(1, OrderScenarioHelpers.GetOrderItemCount(result.ToolResultJson!));
+            });
+
+        [Fact]
+        public Task Mid_string_parenthesized_group_strips_to_a_different_real_menu_item_and_charges_in_full() =>
+            fixture.RunAsync(async () =>
+            {
+                // "Chili Cheese (Extra Cheese) Tots" -- the `(...)` group sits in the MIDDLE of the
+                // name, not at the end -- must still strip to "Chili Cheese Tots", a real
+                // menuItems.json item that is NOT one of the two allow-listed sides, so it charges
+                // in full exactly like its unparenthesized, differently-worded sibling would.
+                var ct = TestContext.Current.CancellationToken;
+                const string item = "Chili Cheese (Extra Cheese) Tots";
+                const decimal unitPrice = 3.79m; // app/frontend/src/data/menuItems.json, "Chili Cheese Tots" Medium
+
+                var (browser, connection, roundTripIndex) = await OrderScenarioHelpers.ConnectAndGreetAsync(fixture, ct);
+                await using var _ = browser;
+
+                var result = await OrderScenarioHelpers.RunOrderStepsAsync(
+                    connection, browser,
+                    [
+                        ("add", BaseComboName, BaseComboSize, 1, BaseComboPrice),
+                        ("add", item, "medium", 1, unitPrice),
+                    ],
+                    roundTripIndex, ct);
+
+                OrderScenarioHelpers.AssertMoneyEqual(
+                    BaseComboPrice + unitPrice,
+                    OrderScenarioHelpers.GetOrderTotal(result.ToolResultJson!),
+                    "A mid-string parenthesized group must still strip correctly to a real, non-side menu item.");
+                Assert.Equal(2, OrderScenarioHelpers.GetOrderItemCount(result.ToolResultJson!));
+            });
+
+        [Fact]
+        public Task Nested_unbalanced_parenthesized_group_fails_safe_and_charges_in_full() =>
+            fixture.RunAsync(async () =>
+            {
+                // "Tots (Extra (Really) Crispy)" -- a nested group -- cannot be fully stripped by
+                // the single-level `\([^)]*\)` pattern (it can't cross the inner "("), leaving a
+                // stray ")" in the normalised key ("tots crispy)"). This must match NO menu key and
+                // fall through to full price -- a deliberate fail-safe, never a silent free side.
+                var ct = TestContext.Current.CancellationToken;
+                const string item = "Tots (Extra (Really) Crispy)";
+                const decimal unitPrice = 2.79m; // placeholder -- see comment on the off-menu side test above
+
+                var (browser, connection, roundTripIndex) = await OrderScenarioHelpers.ConnectAndGreetAsync(fixture, ct);
+                await using var _ = browser;
+
+                var result = await OrderScenarioHelpers.RunOrderStepsAsync(
+                    connection, browser,
+                    [
+                        ("add", BaseComboName, BaseComboSize, 1, BaseComboPrice),
+                        ("add", item, "medium", 1, unitPrice),
+                    ],
+                    roundTripIndex, ct);
+
+                OrderScenarioHelpers.AssertMoneyEqual(
+                    BaseComboPrice + unitPrice,
+                    OrderScenarioHelpers.GetOrderTotal(result.ToolResultJson!),
+                    "A nested/unbalanced parenthesized group must fail safe to full price, never a silent free side.");
+                Assert.Equal(2, OrderScenarioHelpers.GetOrderItemCount(result.ToolResultJson!));
+            });
+    }
 }

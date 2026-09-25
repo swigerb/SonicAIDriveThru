@@ -797,6 +797,50 @@ like their on-menu counterparts do — that flag is the single switch for every 
 customised, on-menu or off. See `app/backend/tests/test_menu_utils.py::CustomisedItemMenuLookupTests`
 and `CustomisedItemMenuLookupTests.cs` in this suite.
 
+**The exact `_menu_key()` normalisation algorithm (PR #50 review, round 4 — state it precisely so
+C# does the same thing, not just "something similar")**, applied in this order to *every* raw
+`item_name` before it is used as a lookup key into `MENU_CATEGORY_MAP`, `_COMBO_SIDE_ITEMS`, or
+`_SUNDAES`, and before the two keyword-fallback functions ever see it:
+1. Remove **every** `\s*\([^)]*\)\s*` group anywhere in the string, not just a trailing one —
+   `"Chili Cheese (Extra Cheese) Tots"` (a mid-string group) strips to `"Chili Cheese Tots"` exactly
+   like a trailing one would, and `"Tots (Extra Crispy) (No Salt)"` (two groups) strips to `"Tots"`.
+   `[^)]*` cannot cross an inner `(`, so a **nested or unbalanced** group — e.g.
+   `"Tots (Extra (Really) Crispy)"` — only partially matches and leaves a stray `)` in the result
+   (`"Tots Crispy)"`); this is a deliberate fail-safe, not a bug: the mangled string matches no real
+   menu key, so the item falls through to full-price/no-discount rather than risking a wrong match.
+2. Collapse all whitespace via `str.split()`/`" ".join(...)`, which treats Unicode whitespace
+   (including U+00A0 NBSP, present verbatim in some `menuItems.json` names, e.g. the OREO Blast) the
+   same as an ordinary space — no special-casing needed.
+3. Lowercase (`str.lower()`).
+4. Remove the `®` character (`str.replace("®", "")`). This used to be a second, separate rule that
+   only lived in `order_state.py`'s combo-conversion base-name matching; PR #50 review round 4 found
+   that `MENU_CATEGORY_MAP` itself was still keyed by bare `name.lower()` (no `®` removal), so a
+   *lookup* of a `®`-bearing name (e.g. `"SuperSONIC® Bacon Double Cheeseburger"`,
+   `"SONIC® Cheeseburger"`) missed the map's own entry for itself and fell through to keyword
+   guessing — 12 of the 60 menu items were affected, not just the single NBSP case originally
+   reported. `®` removal is now step 4 of the *one* shared `_menu_key()` function, used everywhere
+   (map construction, map lookup, combo-slot/sundae/happy-hour classification, and
+   `order_state.py`'s combo-conversion matching) — there is no second place left where this rule
+   could drift.
+
+Keyword fallbacks (`_keyword_fallback_combo_drink`, `_keyword_fallback_happy_hour_discounted`, for
+names that resolve to no `MENU_CATEGORY_MAP` entry at all, i.e. genuinely off-menu) match on
+**word boundaries**, not bare substrings (PR #50 review round 4): a bare substring check let
+`"tea"` match inside `"steak"`, silently absorbing an off-menu `"Philly Cheesesteak"`/
+`"Steak Sandwich"` into a combo's drink slot for free and happy-hour-discounting it. Both keyword
+lists are compiled regexes with `\b...\b` boundaries and an optional trailing `s` for plurals
+(`r"\b(?:slush|limeade|ocean water|drink|tea|lemonade|coke|sprite|root beer)s?\b"` for fountain
+drinks, `r"\b(?:shake|blast|malt)s?\b"` for shakes/blasts/malts); Dr Pepper keeps its own,
+already-word-boundary regex unchanged. Every genuine on-menu item still resolves via
+`MENU_CATEGORY_MAP` directly and never reaches these fallbacks at all — see
+`test_menu_utils.py::MenuCategoryMapDirectResolutionTests`, which patches both fallback functions to
+raise and asserts classification never touches them for any of the 60 `menuItems.json` names.
+
+See `app/backend/tests/test_menu_utils.py::KeywordFallbackWordBoundaryTests`,
+`MenuCategoryMapDirectResolutionTests`, and `CustomisedItemMenuLookupTests.cs`'s
+`ParenGroupNormalisationTests` in this suite for the paren-group-stripping edge cases (two groups,
+mid-string group, nested/unbalanced group) end to end against the live backend.
+
 All four money fields (`items[].price`, `total`, `tax`, `finalTotal`) are numbers on the wire (not
 quoted, unlike the golden file's storage format) and must always be parsed via
 `JsonElement.GetDecimal()` per the money contract above. Any valid JSON spelling of the same numeric

@@ -478,6 +478,13 @@
   runs the same assertion end to end against the live backend, mirroring the combo-slot version of
   the same case (`Off_menu_fountain_drink_still_absorbs_into_the_combo_drink_slot`) that already
   existed there.
+- **README now states the exact `_menu_key()` algorithm as an ordered list** (paren-group removal
+  anywhere in the string → whitespace collapse → lowercase → `®` removal) so a C# reimplementation
+  has no ambiguity left to diverge on. A new `CustomisedItemMenuLookupTests.cs::
+  ParenGroupNormalisationTests` pins the three edge cases Rick's review explicitly asked for: two
+  separate `(...)` groups (both strip, still absorbs as a side); a *mid-string* (not just trailing)
+  group (strips correctly to a different, non-side real menu item, charges in full); and a
+  nested/unbalanced group (fails safe to full price rather than risking a wrong, silent match).
 - **Explicitly out of scope (Rick will file separately):** the Python conformance-suite money
   tolerance change, and the `menuItems.json` schema redesign referenced in the correction on entry 38
   above.
