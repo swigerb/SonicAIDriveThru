@@ -449,6 +449,45 @@
   tolerance change, and the `menuItems.json` schema redesign referenced in the correction on entry 38
   above.
 
+#### 42. Customised Items Must Be Normalised Before Every Menu Lookup (Summer — Backend Dev, PR #50 review round 2)
+- **Root cause: customizations live *inside* `item_name`, and lookups didn't account for that.**
+  A modifier like `"Tots (Extra Crispy)"` or `"Chili Cheese Tots (Extra Cheese)"` is a single
+  string sent by `update_order` — there is no separate "base item" field. `infer_category()`,
+  `infer_combo_component()`, and `is_happy_hour_discounted()` were all matching against the raw,
+  unstripped, lowercased name. A customised item therefore never hit its real
+  `menuItems.json`/allow-list entry and fell through to substring keyword guessing instead —
+  which could (and did) disagree with the item's true classification. Rick's concrete repro:
+  a Cheeseburger Combo plus `"Chili Cheese Tots (Extra Cheese)"` absorbed the tots for free
+  (matched the bare `"tots"` keyword) instead of charging $3.79 in full, because "Chili Cheese
+  Tots" is its own priced menu item, not one of the two combo-side-slot items.
+- **Fix: one shared `strip_modifiers()`/`_menu_key()` helper, reused everywhere, not duplicated.**
+  `menu_utils.strip_modifiers()` removes the trailing `(...)` suffix and collapses whitespace;
+  `_menu_key()` lowercases the result. Every classification function (category, combo-slot,
+  happy-hour-discount) now normalises through it, and `order_state.py`'s pre-existing ad-hoc
+  combo-conversion base-name stripping (`item_name.split("(")[0]`-style) was replaced with a call
+  to the same helper rather than kept as a second, independent implementation of the same rule —
+  the exact class of bug the Route 44 alias fix (#40, entry 41 above) already taught us to avoid:
+  two pieces of code doing raw string matching against the same source of truth, with no shared
+  normalisation step, desync the moment the model introduces a transformation (aliases there,
+  parenthesized modifiers here).
+- **The side-slot keyword fallback is deleted, not fixed (Rick's explicit instruction).** An
+  unrecognised/off-menu item — customised or not — never fills the combo side slot; it is always
+  charged in full. "A charged item is visible and correctable; a free one is silent revenue
+  loss." Only the literal `_COMBO_SIDE_ITEMS` allow-list (tots, groovy fries, post-normalisation)
+  can occupy that slot.
+- **The drink keyword fallback is split so the happy-hour flag is genuinely the single switch.**
+  Fountain-drink keywords (Dr Pepper, Coke, Sprite, root beer, ...) remain unconditionally
+  eligible for both the combo drink slot and the happy-hour discount — they're always full-price
+  fountain drinks otherwise. Shake/blast/malt keywords are still unconditionally eligible for the
+  combo drink slot (that's a menu-composition fact, unrelated to pricing), but the happy-hour
+  discount question for them is gated exclusively by
+  `_SHAKES_AND_BLASTS_HAPPY_HOUR_DISCOUNTED` — proven by a dedicated test that flips the flag and
+  asserts every shake/blast variant (plain, customised, on-menu, off-menu) changes together, while
+  combo-slot eligibility stays unaffected.
+- **Regression coverage added on both sides:** `test_menu_utils.py::CustomisedItemMenuLookupTests`
+  (12 Python unit tests) and a new `CustomisedItemMenuLookupTests.cs` (5 live-backend Facts,
+  including the customised Cherry Limeade happy-hour case that kills Rick's Y4).
+
 
 
 - All meaningful changes require team consensus
