@@ -1,4 +1,5 @@
 using System.Net.WebSockets;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Conformance.Fakes;
@@ -225,6 +226,21 @@ public sealed class RealtimeBrowserClient : IAsyncDisposable
         {
             _sendLock.Release();
         }
+    }
+
+    /// <summary>
+    /// Sends the given bytes exactly as-is, over a Text frame, bypassing all JSON
+    /// (de)serialisation entirely. Used only by black-box bypass/malformed-frame tests
+    /// (swigerb/SonicAIDriveThru#31 review round 2: M1's duplicate-`type`-key and nested-`type`-
+    /// substring reproductions, S2's malformed-frame-doesn't-crash-the-socket reproductions) that
+    /// need to construct frames no <see cref="JsonNode"/> tree could represent (e.g. a duplicate
+    /// top-level `type` key, or a non-JSON payload) -- something the real frontend never sends,
+    /// but a compromised/malicious same-origin script could.
+    /// </summary>
+    public Task SendRawTextAsync(string rawText, CancellationToken cancellationToken = default)
+    {
+        var bytes = Encoding.UTF8.GetBytes(rawText);
+        return _socket.SendAsync(bytes, WebSocketMessageType.Text, endOfMessage: true, cancellationToken);
     }
 
     /// <summary>The negotiated `Sec-WebSocket-Extensions` response header, or null if none was granted.</summary>

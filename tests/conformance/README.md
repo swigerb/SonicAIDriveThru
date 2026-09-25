@@ -51,7 +51,14 @@ under test:
   fact. Missing or invalid ports fail fast with a clear message (`ExternalModePortPolicy`, PR #22
   review item 16) before either fake even starts, instead of silently running against ports the
   external backend can never match. Start the external backend pointed at those same two fixed
-  ports, then run the suite with the identical env vars set.
+  ports, then run the suite with the identical env vars set. **The external backend must also be
+  started with `CONFORMANCE_TEST_HOOKS=1`** (PR #49 review round 5, "F3") if you want the
+  **Default** collection's browser→upstream allow-list scenarios to pass against it — the harness
+  never sets env vars for an already-running external process (unlike harness-launched mode,
+  where `BackendProfiles.Default` sets it automatically, see the table below); an external backend
+  started without it will fail the scenarios that forge a browser `response.create` and expect it
+  forwarded, since the production gate (see "The exact allow-list" below) drops it when hooks are
+  disabled.
 - In external mode, only the **Default** backend profile collection actually runs against the
   external backend. The `ShortTimers` and `FixedClock` profile collections (see "Backend
   profiles" below) skip themselves instead, with a clear reason (`ExternalModeProfilePolicy`, PR
@@ -67,6 +74,20 @@ under test:
   `AZURE_OPENAI_REALTIME_DEPLOYMENT` its operator gave it, which the harness cannot know or
   change, so running (say) the "reasoning is never sent for 1.5" assertions against it would pass
   or fail for the wrong reason instead of skipping.
+- **`HooksOff` is a non-Default profile, so it is skipped in external mode too** (PR #49 review
+  round 5, "F3"): `ResponseCreateHooksGateTests` launches its own dedicated `HooksOff`-profile
+  backend process specifically to prove the *production* gate (`CONFORMANCE_TEST_HOOKS` unset —
+  see "The exact allow-list" below) drops a browser `response.create` when hooks are off. In
+  external mode that collection skips itself via the same `ExternalModeProfilePolicy` check as
+  `ShortTimers`/`FixedClock` above, since there's only one already-running external backend and no
+  way to know or control whether hooks are enabled on it. **This means the prod `response.create`
+  gate is never verified end-to-end against an external backend (including a future C# one) by
+  this suite** — it's covered only by the Python unit test
+  (`test_rtmt.py::ProcessMessageToServerTests` gate coverage) and by `HooksOff` against the
+  harness-launched Python backend. A C# backend's own test suite must cover this gate itself; when
+  planning C# conformance coverage (issue #7), either give the C# backend an equivalent
+  hooks-off unit/integration test, or extend the harness to launch a second dedicated external
+  process pair for a `HooksOff`-style external run.
 - **#28 N24:** `CONFORMANCE_BACKEND_URL` only changes *how* the backend is reached — it never
   implies *which* backend is running there. Pointing `CONFORMANCE_BACKEND_URL` at an
   already-running C# backend instance **also** requires setting `CONFORMANCE_BACKEND=dotnet`
@@ -125,7 +146,7 @@ developer's local `.env`; every value below is authoritative for the launched pr
 | `RATE_LIMIT_RECOVERY_ENABLED` | `true` | Matches production behaviour for the rate-limit-with-hints scenarios; a neutral need, not Python-specific. |
 | `PYTHONUNBUFFERED` | `1` | Ensures `CapturedProcessOutput` sees stdout/stderr promptly instead of buffered, so failure diagnostics are complete. **Python-specific** (a CPython interpreter env var). |
 | `PYTHONUTF8` | `1` | Deterministic encoding regardless of the launching machine's default. **Python-specific** (a CPython interpreter env var). |
-| `CONFORMANCE_TEST_HOOKS` and its overrides (`CONFORMANCE_FIXED_NOW`, timer overrides, etc) | set only by `BackendProfiles.ShortTimers` / `.FixedClock(instant)` | See "Test hooks" below — **never** set for the default profile, so most scenarios exercise real production timing. |
+| `CONFORMANCE_TEST_HOOKS` and its overrides (`CONFORMANCE_FIXED_NOW`, timer overrides, etc) | `CONFORMANCE_TEST_HOOKS=1` set for **every** profile including `Default` (PR #49 review round 2, "S1"); the timer/clock *override* vars (`CONFORMANCE_FIXED_NOW`, `CONFORMANCE_*_SECONDS`) are set only by `BackendProfiles.ShortTimers` / `.FixedClock(instant)` | See "Test hooks" below — `CONFORMANCE_TEST_HOOKS=1` alone, with no paired override var also set, is a verified no-op for every timer/clock behaviour (`now()`/`seconds()` each independently require their own specific override var), so `Default` gained it purely to keep the browser-simulated `response.create` allow-list entry (gated on `conformance_hooks.hooks_enabled_now()`, see the browser→upstream allow-list contract above) working for every existing scenario without changing any scenario's timing. |
 
 PR #22 review item N8: as of this pass, only `PYTHONUNBUFFERED`/`PYTHONUTF8` are genuinely
 Python-specific (CPython's own interpreter env vars) — `RUNNING_IN_PRODUCTION`, `LOG_LEVEL`,
@@ -454,11 +475,323 @@ which would otherwise let a lookalike Origin with an empty host component slip t
 rejection warning log line includes both values (`host=%s origin=%s`) so a real-world 403 is
 diagnosable from logs alone.
 
+## Browser→upstream allow-list contract (swigerb/SonicAIDriveThru#31)
+
+A backend must never forward a browser-sent WebSocket event to the upstream GA realtime socket
+just because it recognised (or failed to recognise) the event's `type` — every browser→upstream
+event type must be checked against an explicit allow-list, and anything not on it must be dropped
+(not forwarded, socket left open) with a WARNING logged, not silently passed through. Before this
+contract existed, the Python backend rewrote only `session.update` by name and forwarded every
+other client event type completely unchanged, which let a compromised/malicious browser page (not
+just the real frontend — anything running same-origin script) override the operator's system
+prompt/tools for a turn, inject a fabricated system-authored conversation item, or read back any
+conversation item verbatim including middle-tier-authored ones never meant for the browser.
+
+**PR #49 review round 2 hardened this further** after the original allow-list-by-type check turned
+out to be bypassable three ways, all reproduced against the real backend, plus several should-fix
+items. Every backend implementation must satisfy the full **parse → validate → re-serialise**
+contract below for every browser→upstream frame — checking the type by name is necessary but not
+sufficient.
+
+### Parse → validate → re-serialise
+
+Every browser→upstream frame is either matched byte-for-byte by the exact-frame fast path below, or
+fully JSON-parsed, validated, and **rebuilt from scratch** before being forwarded — a backend must
+never forward the browser's original bytes/object once its type has merely been checked ("M2"):
+forwarding the original object let any extra top-level key riding along on an otherwise-legitimate
+event (e.g. a forged `item` object smuggled onto `input_audio_buffer.clear`) reach upstream
+unfiltered.
+
+- **Exact-match fast path** (`_CLIENT_APPEND_FAST_PATH_RE` in `rtmt.py`, "M1"): the *only* frame
+  allowed to skip JSON parsing entirely is an exact, byte-for-byte match of
+  `` {"type":"input_audio_buffer.append","audio":"<base64>"} `` — no extra whitespace, no extra
+  keys, this exact key order — confirmed against `useRealtime.tsx`'s/the audio worklet's
+  `JSON.stringify({type: "input_audio_buffer.append", audio: base64Audio})` compact, key-order-stable
+  output. A prior implementation used an *unanchored* `"type":"..."` substring search that matched
+  the *first* such substring anywhere in the raw frame; combined with `json.loads` keeping the
+  *last* value for a repeated key, that let a forged frame reach upstream completely unfiltered via:
+  a repeated top-level `"type"` key, a `"type"` substring nested inside an arbitrary free-form
+  sub-object (e.g. `item.type` or `response.metadata.type`) placed earlier in the byte stream than
+  the real top-level `type`, or the same trick played on `session.update` specifically (which used
+  to skip session building entirely if it took the old fast path). Anything that doesn't match the
+  anchored regex exactly — including a well-formed append frame with different whitespace/key order,
+  or any of the three bypasses above — falls through to the slow path, which still allows a
+  *genuine* append frame in any other shape, just at the cost of a full parse instead of a regex
+  match.
+- **Slow path**: `json.loads` the frame; if that raises, or the result isn't a JSON object, or its
+  `type` isn't a string (covers e.g. `{"type": ["x"]}`, `[]`, `"a string"`, non-JSON text), drop the
+  frame with a WARNING and keep the socket open — never raise out of the message loop ("S2"). Then
+  check the type against the allow-list below. If allowed, **rebuild** the message from only that
+  type's allow-listed top-level keys (never the browser's original dict) and `json.dumps` it fresh —
+  this is what always happens for every type, including `session.update`, whose `session` object then
+  gets a second, narrower filtering pass (below).
+
+### The exact allow-list
+
+**Top-level event types** (`_CLIENT_ALLOWED_TYPES` in `rtmt.py`), derived from every event type
+`app/frontend/src/hooks/useRealtime.tsx` (the only frontend code that talks to this socket)
+actually sends, plus each type's **allow-listed top-level keys** (`_CLIENT_TOP_LEVEL_KEYS`) that
+survive the rebuild:
+
+| Type | Allowed top-level keys | Notes |
+|---|---|---|
+| `session.update` | `type`, `event_id`, `session` | `session` object is further filtered — see below |
+| `input_audio_buffer.append` | `type`, `event_id`, `audio` | matches the fast path above in the common case |
+| `input_audio_buffer.clear` | `type`, `event_id` | |
+| `response.cancel` | `type`, `event_id`, `response_id` | |
+
+Neither the legacy `input_audio_buffer.commit` nor `response.create` is sent by the real frontend
+(server VAD always auto-commits and auto-triggers the model's turn) — both were **removed from the
+production allow-list** ("S1"). `response.create` is re-added, but *only* when
+`conformance_hooks.hooks_enabled_now()` is true (never in a real deployment — see
+`test_conformance_hooks.py::TestNeverInInfraOrDockerfile`), with allowed top-level keys
+`type`, `event_id`: many existing conformance scenarios use a bare `{"type":"response.create"}` as a
+same-effect stand-in for a server-VAD-triggered turn. Because its allowed keys never include
+`response`, any `response.instructions`/`response.tools`/`response.tool_choice` override is stripped
+unconditionally as a structural property of the allow-list, not special-cased code.
+
+**Session keys the browser may set** (`_CLIENT_SESSION_KEYS` in `rtmt.py`, "M3"): exactly
+`turn_detection`, `input_audio_transcription` — what `useRealtime.tsx`'s `startSession()` actually
+sends. Every other GA session key the upstream API accepts (`prompt`, `tracing`, `include`,
+`truncation`, `model`, `output_modalities`, `instructions`, `tools`, `tool_choice`, ...) is
+server-owned and is filtered out of the browser's `session` object *before* it reaches session
+building — not merely overwritten afterwards, which previously left a fail-open gap: `instructions`
+was only overwritten when the backend had its own `system_message` configured, so a backend with none
+configured would forward the browser's `instructions` unchanged.
+
+Being an allowed top-level *key* is not the same as trusting every value inside it — being GA's
+own name for the fields is not a safety guarantee either (review round 3, sub-key hardening):
+
+- **`turn_detection` sub-keys** (`_sanitize_turn_detection` in `rtmt.py`): allow-listed down to
+  exactly `type`, `threshold`, `prefix_padding_ms`, `silence_duration_ms` — the four sub-keys
+  `useRealtime.tsx` ever sends. `type` must be the literal `"server_vad"`; any other value (or a
+  missing `type`, or a non-dict `turn_detection`) rejects the WHOLE object rather than partially
+  filtering it, falling back to the server's own known-good default
+  (`_BOOTSTRAP_CLIENT_SESSION["turn_detection"]`). Each numeric sub-key is bounds-checked and
+  dropped *individually* if out of range or the wrong type (`bool` included — Python's `bool` is
+  an `int` subclass, but `true`/`false` is never legitimate here): `threshold` ∈ `[0, 1]`
+  (`int | float`); `prefix_padding_ms`/`silence_duration_ms` ∈ `[0, 5000]`, and — since review
+  round 5's "S3" — must additionally be a **plain `int`**, not a `float` (`300.5` is rejected: a
+  millisecond count is never legitimately fractional). Real GA `server_vad` also accepts
+  `create_response`, `interrupt_response`, and `idle_timeout_ms` — none of which the frontend ever
+  sends, and none of which are safe to take from the browser (`create_response: false` can
+  silence the assistant entirely); they are simply never in the allow-list, regardless of value.
+- **`input_audio_transcription` is fully server-owned**: the whole object is rebuilt from
+  `self.transcription_model` (`_build_session` in `rtmt.py`) — never merged with whatever the
+  browser sent. If a transcription model is configured, the outgoing object is exactly
+  `{"model": <server's model>}`; if none is configured, no `input_audio_transcription` key is
+  sent at all. Previously this only overwrote the `model` sub-key while merging in the rest of the
+  browser's dict (so a smuggled sub-key, e.g. a Whisper `prompt`, could ride along unfiltered),
+  and if no model was configured the browser's object — `model` included — was forwarded
+  completely unchanged, a fail-open gap.
+
+Exercised black-box by `Scenarios/Security/ClientToServerAllowListTests.cs`'s
+`Turn_detection_and_transcription_sub_keys_are_sanitized_or_server_owned` (forges
+`create_response`/`interrupt_response`/`idle_timeout_ms` and a smuggled `input_audio_transcription`
+`model`/`prompt`; asserts the fake upstream sees only the allow-listed `turn_detection` sub-keys
+and the server's own transcription model, nothing else) and
+`Turn_detection_with_invalid_type_falls_back_to_the_servers_own_default` (a wrong/missing `type`
+falls back to the server's default rather than partially surviving). Unit-tested at the Python
+level in `test_rtmt.py`'s `_sanitize_turn_detection` tests (allow-list, bounds, bool-rejection,
+wrong-type-rejection) and `ProcessMessageToServerTests`'s integration-path tests for both fields.
+
+**Anything else — including, explicitly, `conversation.item.create` (a browser has no legitimate
+reason to author a conversation item; this is also how `role: "system"`/`"developer"` injection is
+blocked, by rejecting the whole event type rather than filtering the role field),
+`conversation.item.retrieve`, `input_audio_buffer.commit` in production, and any bare `extension.*`
+type sent directly by the browser instead of through its dedicated pre-forwarding handling — is
+dropped: not forwarded, connection left open, one WARNING logged** (`Dropped disallowed
+client→server event type %r`). A backend must not close the socket on an unexpected frame; an
+unrecognised event on an otherwise-legitimate session is not itself proof of compromise.
+
+`extension.*` types are deliberately absent from the allow-list table above: the Python backend
+fully consumes them (resume, end_session, set_verbose_logging, set_log_to_file, `set_voice`) before
+a message ever reaches the allow-list check, so they never need an entry there — but a backend
+implementation that instead let an `extension.*` type fall through to this check (e.g. a bare
+`extension.middle_tier_tool_response` sent directly by the browser, bypassing the normal tool-call
+flow — see the GA-validation-fidelity finding #3 below) must still drop it, since it is not one of
+the allow-listed entries. Side effects keyed on a browser frame (idle-activity reset, silence-nudge
+cancellation, the greeting trigger, and echo-suppression barge-in) must fire on the **parsed,
+validated type of the frame actually forwarded** — never on a raw substring match of the browser's
+original bytes — so a dropped/rejected frame triggers none of them ("F1"; a barge-in check keyed on
+a raw `"response.cancel"` substring match, evaluated before the filter ran, was itself found and
+fixed in review round 5, since a frame merely *containing* that substring somewhere — without
+actually being that type — could still disable echo suppression). A backend implementation should
+compute this validated type once per frame and hand it directly to every side effect that needs
+it, rather than having each side effect (or its caller) re-parse the forwarded string itself
+("F4") — this backend's `_process_message_to_server` returns `(forwarded, sent_type)` for exactly
+that reason.
+
+### Value-shape validation, not just key allow-listing (PR #49 review round 5, "S3")
+
+Being an allowed top-level key (or session sub-key) with the right name is still not enough — the
+**shape of the value** must also be validated, independent of the key/type allow-listing above:
+
+- **`audio`** (`input_audio_buffer.append`) must be a string drawn from the base64 alphabet
+  (`^[A-Za-z0-9+/]*={0,2}$`, `_CLIENT_BASE64_RE` in `rtmt.py`) — an object, array, or
+  non-base64-alphabet string drops the **whole frame** (there is no safe partial-audio fallback).
+- **`event_id`** and **`response_id`** must each be a short string matching
+  `^[A-Za-z0-9_-]{1,64}$` (`_CLIENT_EVENT_ID_RE`). `event_id` is advisory only — every
+  `session.update`'s `event_id` is unconditionally replaced by `_SessionUpdateGuard.stamp`
+  regardless of what the browser sent (see "S2" below), and no other type's `event_id` is
+  load-bearing to this backend — so an invalid shape just has the **key** stripped, and the rest of
+  the frame is still forwarded. `response_id` (on `response.cancel`) **is** load-bearing — it tells
+  upstream which response to cancel, with no safe fallback value — so an invalid shape drops the
+  **whole frame**.
+- **`turn_detection.prefix_padding_ms`/`silence_duration_ms`** must be a plain `int`, not `float`
+  (`300.5` is rejected) or `bool` — a millisecond count is never legitimately fractional.
+  `turn_detection.threshold` remains `int | float` (`0.7` is a legitimate value).
+- Every re-serialisation of a filtered frame uses `json.dumps(..., allow_nan=False)`
+  (`_dump_client_to_server` in `rtmt.py`); a `ValueError` (a `NaN`/`Infinity` float smuggled
+  through) drops the whole frame rather than forwarding non-standard JSON upstream. This is
+  defense-in-depth: after the shape validation above, no currently-reachable code path can still
+  produce a `NaN`/`Infinity` at this point, but a backend implementation must have some such
+  backstop for future fields.
+
+Exercised black-box by `ClientToServerAllowListTests.cs`'s
+`Turn_detection_ms_field_as_float_is_dropped_not_the_whole_object`,
+`Forged_event_id_shapes_are_stripped_not_the_whole_frame`, and
+`Malformed_response_id_and_audio_shapes_drop_the_whole_frame`. Unit-tested at the Python level in
+`test_rtmt.py`'s `ClientToServerAllowListTests` (audio/event_id/response_id shape probes and
+`_dump_client_to_server`'s NaN backstop).
+
+### `extension.set_voice` allow-list and per-connection semantics (issue #43, PR #49 review rounds 5-6, "M1"/"S1")
+
+`extension.set_voice` is consumed entirely by the middle tier (never forwarded as-is — see the
+"`extension.*` types are deliberately absent..." paragraph above) but the **value** it adopts is
+still part of this contract, because a bad value here doesn't just corrupt one guest's own session
+— it used to leak into every *other* guest's bootstrap and session-echo too:
+
+- **Allow-listed values only**: a browser-sent voice must be a string drawn from a server-side,
+  per-brand voice list (`RTMiddleTier.allowed_voices`, defaulting to the ten voices in
+  `app/frontend/src/lib/voices.ts` — the frontend itself is never touched). Anything else (a
+  non-string, or a string not in the list) is dropped with a WARNING; neither forwarded upstream nor
+  adopted anywhere.
+- **Per-connection, session-persisted, never a shared mutable global**: picking a valid voice used
+  to overwrite `self.voice_choice` — a single field shared across the whole worker process — so
+  guest A's pick leaked into guest B's bootstrap and echo the moment B connected, even though A and
+  B never shared a session. Round 5 stopped it leaking into an *already-open* connection (a local
+  `voice` read once at connection start) but left a process-wide `self._voice_override` field that
+  every subsequent NEW connection's bootstrap still read — so guest A's pick still became guest B's,
+  C's, ... default for as long as the worker process ran (Rick's S1: "Guest A can still change
+  every guest's voice"). Round 6 removes `self._voice_override` entirely: a validated pick is
+  stored by `session_manager.py`'s `SessionManager.set_voice(session_id, voice)`, keyed on the
+  picking guest's own `session_id` — never on `RTMiddleTier`, never readable by any other session.
+  `self.voice_choice` (the config default) is never mutated after `__init__`; a brand-new
+  connection's `voice` local is always initialised from it, so a totally unrelated guest always
+  gets the server default, regardless of what any other guest ever picked.
+- **Resume restores the picking guest's OWN voice, and only that guest's**: because the pick is
+  keyed on `session_id` (not the connection), it survives a detach/resume (a Wi-Fi blip must not
+  silently revert a guest's own choice). A resume opens a brand-new upstream connection (this
+  backend never reattaches an existing one), so the unconditional bootstrap sent at connection
+  start always uses the config default — the resuming guest's own persisted voice can only be
+  applied by a **follow-up** `session.update`, sent once `handle_resume` confirms which
+  `session_id` this socket is resuming, mirroring the existing rehydration-item follow-up pattern.
+  A different, brand-new session (no resume presented) never reads any other session's persisted
+  voice, so it is unaffected either way.
+
+Exercised black-box by `Scenarios/Security/ClientToServerAllowListTests.cs` (an unknown voice
+reaches neither the sender's own upstream frames nor a later guest's) and
+`Scenarios/Sessions/VoicePickerTests.cs`'s
+`Two_concurrent_guests_voice_choices_do_not_leak_into_each_other` (an already-open connection is
+unaffected by a concurrent guest's pick),
+`Voice_picked_after_lock_does_not_carry_to_a_brand_new_unrelated_connection` (a brand-new,
+unrelated connection's bootstrap always uses the server default, never a prior guest's pick), and
+`Resumed_connection_restores_the_picked_voice` (the SAME guest's resumed connection restores their
+own picked voice via a follow-up session.update, while the bootstrap that fires before the resume
+is confirmed still shows the default). Unit-tested at the Python level in
+`test_session_bootstrap.py` (`_only_session`-scoped assertions against
+`self.rtmt._sessions.get_voice/set_voice`), `test_order_resume.py`'s `VoicePersistenceTests`
+(`test_resumed_connection_restores_the_picked_voice`,
+`test_a_different_brand_new_session_still_gets_the_default`), and `test_rtmt.py`'s
+`ExtensionSetVoiceTests`/`SanitizeVoiceTests`.
+
+
+Exercised black-box by `Scenarios/Security/ClientToServerAllowListTests.cs`: a malicious
+`response.create` override is stripped down to the bare form before the fake upstream ever sees it
+(and the override text never appears on any upstream frame); a `conversation.item.create` with
+`role: "system"` never reaches upstream; a `conversation.item.retrieve` never reaches upstream; each
+of the three fast-path bypasses above (repeated `type` key, nested `type` substring, and the same on
+`session.update`) is reproduced and proven *not* to reach upstream unfiltered; a forged extra
+top-level key on an otherwise-legitimate event is proven stripped; each malformed-frame shape from
+"S2" is proven dropped without tearing down the connection; and — to prove the allow-list is a
+*filter*, not a kill-switch — every one of the frontend's own legitimate event types
+(`session.update`, `input_audio_buffer.append`, `response.cancel`, `extension.set_voice`) still
+reaches the fake upstream unimpeded. Unit-tested at the Python level in `test_rtmt.py`'s
+`ProcessMessageToServerTests` (integration path, including the fast-path bypass and malformed-frame
+reproductions) and `ClientToServerAllowListTests` (pure `_filter_client_to_server`/
+`_CLIENT_ALLOWED_TYPES`/`_CLIENT_TOP_LEVEL_KEYS`/`_CLIENT_SESSION_KEYS` unit tests, log assertions
+included).
+
+**C# note — the repeated-`type`-key bypass has two equally-acceptable outcomes, not one:**
+`AllowListBypassHardeningTests.cs`'s repeated-top-level-`type`-key scenario
+(`Duplicate_top_level_type_key_is_resolved_by_last_value_or_the_whole_frame_is_dropped`) accepts
+either (a) the frame is parsed with last-value-wins semantics (matching Python's `json.loads`,
+which RFC 8259 permits but does not mandate) and forwarded as the *last* `type`'s allow-listed
+shape with the forged override stripped, **or** (b) the whole frame is dropped outright, because
+some JSON parsers (including some `System.Text.Json` configurations) reject duplicate keys rather
+than silently resolving them. The security property under test is "the forged override/type-sniff
+bypass must never reach upstream" — both outcomes satisfy it equally, and a future C# backend
+should not be required to reproduce Python's specific last-value-wins choice to pass this
+scenario.
+
+
+
+## Session-echo allow-list contract (swigerb/SonicAIDriveThru#45)
+
+Symmetrically, a backend must never let the browser see the *full* upstream `session.created`/
+`session.updated` object either — it must build a fresh, minimal, explicitly allow-listed copy for
+every such echo, not a deny-list scrub of the full object. A deny-list has to be updated every time
+the upstream GA API adds a new top-level session key, and silently leaks any key nobody has
+enumerated yet: GA has since shipped `prompt`, `tracing`, `include`, and `truncation`, none of which
+a hypothetical deny-list written before they existed could have known to strip.
+
+**The exact session-echo shape** (`_client_session_echo` in `rtmt.py`) every `session.created` and
+`session.updated` frame is replaced with before being sent to the browser — nothing else, no matter
+what the upstream session object also contains:
+
+```json
+{
+  "type": "session.created",
+  "event_id": "evt_...",
+  "session": {
+    "id": "sess_...",
+    "object": "realtime.session",
+    "audio": { "output": { "voice": "marin" } }
+  }
+}
+```
+
+i.e. exactly `{type, event_id, session:{id, object, audio:{output:{voice}}}}` — every other
+top-level session key (`instructions`, `tools`, `tool_choice`, `model`, `prompt`, `tracing`,
+`include`, `truncation`, `reasoning`, `parallel_tool_calls`, `max_output_tokens`,
+`output_modalities`, ...) is absent, unconditionally, because the copy is built field-by-field
+rather than derived from (and then pruned out of) the upstream object. `voice` is kept only because
+a hypothetical future frontend handler might reasonably want the active voice — the current
+frontend (`useRealtime.tsx`) has no handler at all for either event type, verified by inspection.
+
+Exercised black-box by `Scenarios/Security/ScrubHardeningTests.cs`'s
+`Session_updated_relays_only_the_allow_listed_shape_even_with_every_ga_top_level_key_set`: every GA
+top-level key (including `prompt`, `tracing`, `include`, `truncation`) is set upstream via the
+browser's own `session.update` (all of them are legitimately forwardable per `_GA_SESSION_TOP_LEVEL`
+and accepted by `GaSessionValidator`), yet the resulting `session.updated` the browser receives has
+top-level keys of exactly `{id, object, audio}`, `audio` keys of exactly `{output}`, and `output`
+keys of exactly `{voice}`. The pre-existing scrub/visibility scenarios (`SessionUpdatedClientVisibilityTests.cs`
+and the rest of `ScrubHardeningTests.cs`) continue to pass unchanged under the new allow-list shape.
+Unit-tested at the Python level in `test_rtmt.py`.
+
+**Related scrub, not a separate allow-list of its own:** `response.done`'s `output` array is also
+scrubbed before being relayed to the browser — every `function_call` and `function_call_output`
+item is stripped out (tool names and raw arguments/results are operator-only), leaving only
+`message` items. Covered by `WholeSessionLeakTests` (tool-call arguments added to the tracked secret
+set) plus a targeted `test_rtmt.py` scenario per output-item kind
+(swigerb/SonicAIDriveThru#32).
+
 ## Session-scrub conversation item contract (swigerb/SonicAIDriveThru#29)
 
 A backend must never let the browser see operator-only text: the bootstrap `session.instructions`
 and `tools[].description`/`parameters` (scrubbed from every `session.created`/`session.updated`
-echo — see `_scrub_session_for_client` in `rtmt.py`), and any conversation item the middle tier
+echo — see the session-echo allow-list contract above, `_client_session_echo` in `rtmt.py`), and any conversation item the middle tier
 itself authored (the greeting, resume rehydration, silence nudge, and a tool's
 `function_call_output`) — none of these may reach the browser verbatim, across **every** GA
 subtype that can carry a full item (`conversation.item.created`/`.added`/`.done`/`.retrieved`).
@@ -511,8 +844,13 @@ mutation-checked (see that file's module docstring). **Never** set `CONFORMANCE_
 `infra/` (bicep), the `Dockerfile`, or `azure.yaml` — guarded by
 `test_conformance_hooks.py::TestNeverInInfraOrDockerfile`, which fails the build if the literal
 string `CONFORMANCE_` ever appears in any of those files. It is only ever set by the conformance
-harness's own child-process environment (`BackendProfiles.ShortTimers` / `.FixedClock(instant)` →
-`PythonBackendOptions.ExtraEnvironment` → `BackendEnvironment.Build`).
+harness's own child-process environment (`BackendProfiles.Default` / `.ShortTimers` /
+`.FixedClock(instant)` → `PythonBackendOptions.ExtraEnvironment` → `BackendEnvironment.Build`).
+`Default` sets `CONFORMANCE_TEST_HOOKS=1` alone (PR #49 review round 2, "S1") — with no
+`CONFORMANCE_FIXED_NOW`/`CONFORMANCE_*_SECONDS` override also set, this is a verified no-op for
+every mechanism below; it exists purely to keep the browser→upstream allow-list's
+`response.create` entry available for every scenario, since that entry is gated on the flag being
+set (see the browser→upstream allow-list contract above).
 
 Two independent mechanisms:
 
@@ -527,7 +865,7 @@ Two independent mechanisms:
 
 | Variable | Units / format | Allowed range | Consumer | Failure behaviour |
 |---|---|---|---|---|
-| `CONFORMANCE_TEST_HOOKS` | literal string `"1"` to enable | only the exact string `"1"` counts as enabled — `"true"`/`"yes"`/`"TRUE"`/anything else leaves hooks **disabled** | `conformance_hooks.HOOKS_ENABLED`, read once at process import time | N/A — any other value is silently treated as disabled, never an error. |
+| `CONFORMANCE_TEST_HOOKS` | literal string `"1"` to enable | only the exact string `"1"` counts as enabled — `"true"`/`"yes"`/`"TRUE"`/anything else leaves hooks **disabled** | `conformance_hooks.HOOKS_ENABLED`, read once at process import time; also `conformance_hooks.hooks_enabled_now()`, which re-reads it live on every call (used by `rtmt.py`'s `response.create` allow-list gate — see the browser→upstream allow-list contract above — so it can't be left stuck disabled by an unrelated Python test file's in-process module reload) | N/A — any other value is silently treated as disabled, never an error. |
 | `CONFORMANCE_FIXED_NOW` | RFC 3339 timestamp with an explicit **numeric** UTC offset (e.g. `2026-07-04T15:30:00-05:00`, or a trailing `Z` for UTC) | any parseable, offset-aware instant; optional (timer-only profiles like `ShortTimers` leave it unset) | `order_state.py`'s happy-hour / time-based pricing via `conformance_hooks.now(tz)` | **Fails fast at import time** (raises `ValueError`, non-zero backend startup) if hooks are enabled and the value is missing its offset or isn't parseable at all — never silently ignored. This module (and issue #7's original task description) sometimes describes the format loosely as "ISO-8601 plus IANA zone" — that phrasing is imprecise: `datetime.fromisoformat` does **not** accept a trailing IANA zone *name* (e.g. `... America/Chicago`), only a numeric offset. Use a numeric offset always. |
 | `CONFORMANCE_IDLE_TIMEOUT_SECONDS` | seconds, float | positive, finite | `session_manager.py`'s idle-disconnect timer | **Fails fast** (raises `ValueError` at the module's own import time, non-zero backend startup) if hooks are enabled and the value is present but unparseable, NaN, +/-infinity, zero, or negative. Absent/empty falls back to the production default (300s) without error. |
 | `CONFORMANCE_GRACE_SECONDS` | seconds, float | positive, finite | `session_manager.py`'s resume grace-hold window | Same fail-fast rule as above (production default 120s). |
@@ -739,13 +1077,15 @@ is reached, never whether `CONFORMANCE_BACKEND` still says which language is run
 The consequence: **a new backend under test (`CONFORMANCE_BACKEND=dotnet`) actually runs these
 scenarios instead of silently skipping them.** A conforming C# backend must not reproduce these
 Python bugs, so the scenario is expected to *pass* there — an unconditional `Skip` would have hidden
-that expectation entirely, letting a backend with the exact same bug slip through green. The 9
+that expectation entirely, letting a backend with the exact same bug slip through green. The 8
 scenarios marked this way as of this commit: `SpokenTotalHalfCentTests` (#46),
 `ComboAbsorptionTests.Reset_order_clears_the_previous_orders_absorbed_component_display` (#41),
 `HappyHourBoundaryTests`'s Ched 'R' Peppers case (#39), `UpdateOrderAddRemoveModifyTests`'s two
-Route 44 alias cases (#40), `SearchToolTests`'s two fallback cases (#37),
-`ToolErrorSessionSurvivesTests.Session_survives_an_unhandled_tool_exception` (#36), and
-`VoicePickerTests.Two_concurrent_guests_voice_choices_do_not_leak_into_each_other` (#43).
+Route 44 alias cases (#40), `SearchToolTests`'s two fallback cases (#37), and
+`ToolErrorSessionSurvivesTests.Session_survives_an_unhandled_tool_exception` (#36).
+(`VoicePickerTests.Two_concurrent_guests_voice_choices_do_not_leak_into_each_other` was un-skipped
+in PR #49 review round 5 once #43 was actually fixed — this paragraph's count/list is corrected
+here to match; it is a plain `[Fact]` now, listed instead in the voice contract section above.)
 
 This is deliberately **not** applied to the Windows-only Job Object tests elsewhere in the suite
 (`WindowsJobObjectTests.cs`) — those are plain `[Fact]`s that call `Assert.Skip(...)` at runtime
