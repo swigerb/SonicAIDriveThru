@@ -354,7 +354,13 @@ public sealed class ResumeRehydrationAndNudgeTests(ResumeTimersConformanceFixtur
         // SuppressSessionUpdatedOnNextConnection itself could silently turn this into a
         // no-op test that passes for the wrong reason (session.updated arrives normally, the
         // gate is satisfied quickly, and "no second item" would look identical to "gate held").
-        var sessionUpdated = await newConnection.ReceivedFrames.WaitForAsync(
+        // rtmt.py's `_client_session_echo` forwards a scrubbed `session.updated` copy DOWN to the
+        // browser client after every accepted session.update (see rtmt.py's own `case
+        // "session.updated":` handler) -- it never appears on `newConnection` (the fake upstream's
+        // own received-frames log only records frames the *backend* sends *to* the fake, e.g. its
+        // outgoing `session.update`, never the fake's own reply frames echoed back down to the
+        // client), so this must watch `newBrowser.ReceivedFrames`, not `newConnection`'s.
+        var sessionUpdated = await newBrowser.ReceivedFrames.WaitForAsync(
             f => f.Type == "session.updated", TimeSpan.FromSeconds(2), ct);
         Assert.True(sessionUpdated is null,
             "Test setup error: session.updated was NOT suppressed on the resumed connection.");
