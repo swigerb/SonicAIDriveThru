@@ -313,6 +313,20 @@ name/switch decision) — passing or failing without actually exercising what it
 scenario that also needs a forced-reasoning-then-rejected deployment must get its own dedicated
 fixture/collection (a fresh backend process), not add a second `[Fact]` here.
 
+### Backend logging is not a wire contract (PR #42 review item 1)
+
+`ConformanceFixture.RunAsync(body, allowedNewBackendErrors)` bounds — from **above only** — how
+many new backend ERROR-level log lines (`CapturedProcessOutput.CountUnhandledErrors`) a scenario's
+own body may cause, asserted as `actual <= baseline + allowedNewBackendErrors`, never exact
+equality. This is deliberately a ceiling, not a pinned count: *how many* ERROR-level lines a
+backend logs for a given recovered condition (one line vs. two, or ERROR vs. WARNING) is a
+logging/observability choice specific to this backend's own code, not part of the neutral contract
+a correct backend in another language must reproduce. A future .NET backend that logs one line
+where the Python backend logs two — or logs at a level this harness doesn't count as an "unhandled
+error" at all — must still pass every scenario that uses this overload. Only genuinely *unexpected*
+errors (anything above the declared ceiling) fail a scenario. The zero-arg `RunAsync(body)` overload
+still asserts a hard `0` ceiling, i.e. this scenario must cause no new backend errors at all.
+
 ### Shared files
 
 | File | Consumed by | Purpose |
@@ -599,6 +613,179 @@ primary source cited by `GaSessionValidator`):
   `Cancel_while_streaming_stops_the_response_early_and_reports_cancelled_status`,
   `Response_create_while_a_response_is_already_active_is_rejected`. All three are mutation-checked
   (see PR history / squad history for outputs).
+
+## Ordering scenarios (issue #9)
+
+Black-box `update_order`/`get_order`/`reset_order`/`search` scenarios in
+`tests/Conformance.Tests/Scenarios/Ordering/`, driven by scripted function calls from the fake
+upstream and asserting on both the browser-bound `extension.middle_tier_tool_response` and the
+`function_call_output` sent upstream. Golden pricing/tax/combo/Route-44 data ported from
+`app/backend/tests/test_order_state*.py`, `test_tools*.py`, `test_order_logic.py`, and
+`test_combo_orders.py` lives in one file, `tests/conformance/testdata/golden-order-pricing.json`
+(loaded via `GoldenOrderPricingData.cs`), so a future C# backend (S4) can assert against the exact
+same cent-accurate cases instead of a second, independently-transcribed copy.
+
+### Money contract (PR #38 review item 1)
+
+Every money computation this suite asserts on follows exactly one rule, stated in full in
+`golden-order-pricing.json`'s own top-level `description` field:
+
+> `line = unit * qty * (happyHourDiscount iff isDrink and happy hour is active)`;
+> `subtotal = sum(line)`; `tax = subtotal * taxRate`, computed **once per order** (never per line,
+> never re-derived from a rounded subtotal); `finalTotal = subtotal + tax`. There is **no rounding
+> at any step** of this arithmetic — `.2f`/currency formatting is presentation-only and must never
+> feed back into subtotal/tax/finalTotal math.
+
+Consequences for how this suite is written:
+
+- Every money value in the golden file (`unitPrice`/`price`/`taxRate`/`happyHourDiscount`/
+  `expectedSubtotal`/`expectedTax`/`expectedFinalTotal`/`expectedTotal`) is stored as a **quoted,
+  exact decimal string** (e.g. `"0.8152"`, `"10.185"`), computed with true decimal arithmetic —
+  never as a bare JSON number, which would round-trip through `double` during parsing.
+- `GoldenOrderPricingData.cs` loads every money-typed property as C# `decimal` (never `double`).
+  `JsonNumberHandling.AllowReadingFromString` lets a quoted JSON string deserialize straight into a
+  `decimal` property with no intermediate `double` and no custom converter.
+- Scenario code parses money values off the live backend's wire responses via
+  `JsonElement.GetDecimal()` — **never** `JsonElement.GetDouble()` — which reads the raw JSON number
+  token text directly into `decimal`.
+- All money assertions go through `OrderScenarioHelpers.AssertMoneyEqual(expected, actual)`, an
+  absolute-tolerance decimal comparison. The tolerance is **backend-conditional**
+  (PR #38 re-review should-fix 3): `0.000001m` when testing the live Python backend (the default,
+  `CONFORMANCE_BACKEND=python`, or an external URL pointed at one) — solely to absorb *that*
+  backend's own internal `double` arithmetic noise on the wire (e.g. it may echo back
+  `0.8151999999999999` instead of the golden `0.8152`) — and exactly `0m` (no slack at all) when
+  `CONFORMANCE_BACKEND=dotnet`. A real `decimal`-based .NET implementation has no excuse for any
+  noise whatsoever; giving it the same 1e-6 slack as Python would silently let a broken
+  `double`-internally implementation pass, reintroducing precisely the bug this exact-decimal
+  contract exists to catch. Neither tolerance is a license to round anywhere in this suite's own
+  math, and 1e-6 is far too tight to mask a genuinely wrong implementation (e.g. one that rounds
+  tax to cents per line before summing).
+- **Never** use xUnit's `Assert.Equal(double, double, precision: N)` for money in this stream: it
+  rounds *both* operands via `Math.Round(double, N)` (banker's/to-even rounding) before comparing,
+  which is simply the wrong operation for asserting on an exact wire value — a correct
+  implementation's exact `10.185` and a broken one that happens to round to `10.19` first can both
+  satisfy `precision: 2` equally well, and a correct exact `10.185` can just as easily be reported
+  as unequal to another correct exact `10.185` if float parsing introduced even a whisker of noise
+  below the second decimal place. (Separately, `10.185` *rendered* to two decimal places under this
+  suite's own display-rounding rule is `10.19` — see "Rendering money for display" below — but that
+  rule is about presentation text, never about how wire/golden values are compared.) There must be
+  no `precision: 2` (or any other precision-based money assertion) anywhere under
+  `Scenarios/Ordering/`.
+
+### Python-bug scenarios skip only against Python (PR #38 review should-fix 3)
+
+Every scenario documenting a "Known Python bug" — reproducing a genuine defect in `app/backend`
+that this stream is explicitly not allowed to fix (see the fan-out rules) — is marked
+`[Fact(Skip = "...", SkipWhen = nameof(BackendUnderTest.IsPython), SkipType =
+typeof(BackendUnderTest))]` rather than an unconditional `Skip`. `Conformance.Harness.
+BackendUnderTest.IsPython` reads `CONFORMANCE_BACKEND` (default `python`) the same way
+`BackendLauncherFactory` does, so this can never drift from which backend actually got launched
+(and stays correct in external mode too — `CONFORMANCE_BACKEND_URL` only changes *how* the backend
+is reached, never whether `CONFORMANCE_BACKEND` still says which language is running there).
+
+The consequence: **a new backend under test (`CONFORMANCE_BACKEND=dotnet`) actually runs these
+scenarios instead of silently skipping them.** A conforming C# backend must not reproduce these
+Python bugs, so the scenario is expected to *pass* there — an unconditional `Skip` would have hidden
+that expectation entirely, letting a backend with the exact same bug slip through green. The 9
+scenarios marked this way as of this commit: `SpokenTotalHalfCentTests` (#46),
+`ComboAbsorptionTests.Reset_order_clears_the_previous_orders_absorbed_component_display` (#41),
+`HappyHourBoundaryTests`'s Ched 'R' Peppers case (#39), `UpdateOrderAddRemoveModifyTests`'s two
+Route 44 alias cases (#40), `SearchToolTests`'s two fallback cases (#37),
+`ToolErrorSessionSurvivesTests.Session_survives_an_unhandled_tool_exception` (#36), and
+`VoicePickerTests.Two_concurrent_guests_voice_choices_do_not_leak_into_each_other` (#43).
+
+This is deliberately **not** applied to the Windows-only Job Object tests elsewhere in the suite
+(`WindowsJobObjectTests.cs`) — those are plain `[Fact]`s that call `Assert.Skip(...)` at runtime
+when `!OperatingSystem.IsWindows()`, a platform fact about the machine the suite itself is running
+on, not about which backend is under test, and are unrelated to `BackendUnderTest`.
+
+### Tool-error unhandled-error-count contract (PR #38 review item 2)
+
+`ConformanceFixture.RunAsync(Func<Task> body)` asserts, by default, that a scenario introduces
+**zero** new backend unhandled-error log lines relative to a baseline captured before the scenario
+runs (see the fixture's own doc comments for why it's baseline-relative rather than an absolute
+zero). A scenario that deliberately provokes one **caught-and-reported** application-level tool
+exception — the kind `tools.py` itself catches and turns into a graceful apology `ToolResult`
+rather than letting propagate — is expected, even in a fully correct implementation, to log exactly
+one such ERROR line for that exception. Use the second overload,
+`RunAsync(Func<Task> body, int allowedNewBackendErrors)`, to declare an upper bound on that count
+instead of letting the zero-new-errors invariant block an otherwise-passing scenario
+(`ToolErrorSessionSurvivesTests.cs`'s `Session_survives_an_unhandled_tool_exception` — currently
+`[Fact(Skip = ...)]` pending the Python fix tracked in #36 — is written to pass
+`allowedNewBackendErrors: 1` once that fix lands). The assertion is `actual <= baseline +
+allowedNewBackendErrors`, never exact equality: per PR #42 review item 1 (see "Backend logging is
+not a wire contract" above), *how many* ERROR-level lines a backend logs for a given recovered
+condition is a logging/observability choice, not a wire contract — a correct backend that logs
+fewer lines (or none, if it logs at a level this harness doesn't count) must still pass. This
+overload is shared harness (added by the parallel issue #8 stream, originally `100ed8c` as
+`expectedNewBackendErrorCount` with exact-equality semantics, superseded by `39de3e1`'s rename and
+ceiling semantics), which also added a `Deployment` fixture extension point unrelated to this
+stream's scenarios.
+
+### `search`'s two `select` field sets (should-fix #8)
+
+`app/backend/tools.py::search` issues its Azure AI Search query with one of two different
+`$select` field lists, depending on whether the primary attempt succeeded:
+
+- **Primary** `select_fields`: `[id, name, category, description, sizes]` (or the configured
+  identifier/content field names in place of `id`/`description`).
+- **Fallback** `select` (used only after Azure responds "Could not find a property named" — the
+  field-name-mismatch 400 this suite's `FakeSearchServer.RejectSelectFieldOnce` hook simulates):
+  `[id, description]` (or the configured identifier/content field names). Notably, `sizes` is
+  present in the primary set and **absent** from the fallback — `SearchToolTests.cs`'s fallback
+  test deliberately rejects `"sizes"` for exactly this reason, so a successful retry can only be
+  observed by the second request omitting it.
+
+### Order-summary wire schema
+
+`update_order`/`get_order`/`reset_order` are all `ToolResultDirection.TO_BOTH` (see
+`app/backend/tools.py`): the `tool_result` field of the browser-bound
+`extension.middle_tier_tool_response` frame is a **JSON-encoded string** (not a nested JSON object —
+parse it with a second `JsonDocument.Parse`/`JsonSerializer.Deserialize` call) containing the order
+summary:
+
+```json
+{
+  "items": [
+    { "item": "<name>", "size": "<display size, or empty>", "quantity": <int>, "price": <number>, "display": "<full display string>" }
+  ],
+  "total": <number>,
+  "tax": <number>,
+  "finalTotal": <number>
+}
+```
+
+All four money fields (`items[].price`, `total`, `tax`, `finalTotal`) are numbers on the wire (not
+quoted, unlike the golden file's storage format) and must always be parsed via
+`JsonElement.GetDecimal()` per the money contract above. Any valid JSON spelling of the same numeric
+value is equivalent on the wire (`10.185`, `10.1850`, `1.0185e1` all parse to the identical
+`decimal`) — this suite must never assert on the literal token text, only on the parsed `decimal`
+value, per `AssertMoneyEqual`. `search`'s `tool_result` is always `null`
+(it's `ToolResultDirection.TO_SERVER`-only and never reaches the browser at all) — its
+model-visible content is instead the plain-text `function_call_output` sent upstream.
+
+### Rendering money for display (PR #38 re-review should-fix 2)
+
+The exact-decimal contract above governs every wire/golden numeric field (`total`, `tax`,
+`finalTotal`, `items[].price`) — there is no rounding anywhere in that arithmetic. Separately, the
+**spoken/human-readable `$X.XX` text** the model reads back to the guest (and any `.2f`-style
+display formatting) is presentation-only and follows its own, additional rule: round the exact
+decimal to two places using **round half away from zero** (C#: `decimal` value with
+`Math.Round(value, 2, MidpointRounding.AwayFromZero)`). This rule only ever consumes the exact
+decimal as input — it must never feed back into subtotal/tax/finalTotal math, and it is
+independent of (not a replacement for) the wire/golden exact-decimal contract.
+
+Python's actual behavior does not implement this (or any single) decimal rounding rule for
+half-cent-landing totals: it renders with `float`'s `:.2f` format specifier, which round-trips
+through IEEE-754 double and can disagree with *every* consistent decimal rounding rule (round half
+away from zero, round half to even, etc.) depending on the specific value's binary representation.
+Rick's 200k-order simulation found hundreds of disagreements for values that land exactly on a half
+cent. Golden cases whose `finalTotal` lands exactly on a half cent (e.g. a scenario engineered so
+pre-tax subtotal + tax produces an `X.XX5` total) therefore have their spoken-text assertion
+`Skip`'d, referencing #46 — this is a known, filed Python defect, not a harness or contract defect.
+Non-half-cent cases are not affected by this ambiguity and their spoken-text assertions stay
+active, so a backend that (for example) speaks the pre-tax subtotal instead of the final total is
+still caught today.
 
 ### `response.cancel` still emits the normal `.done`-shaped events (#8 follow-up)
 

@@ -78,11 +78,7 @@ public sealed class OriginValidationTests(ConformanceFixture fixture)
         Assert.Equal(HttpStatusCode.Forbidden, statusCode);
     });
 
-    [Fact(Skip = "Known Python bug: rtmt.py's origin check (`origin.endswith(host)`) is a raw " +
-        "string-suffix comparison with no domain-boundary requirement, so an attacker origin " +
-        "that merely ends with the exact Host value as a substring incorrectly passes same-origin " +
-        "validation instead of being rejected. Reported to the coordinator as #25 (owned by " +
-        "another stream); un-skip once #25 lands.")]
+    [Fact]
     public Task Lookalike_suffix_origin_is_rejected() => fixture.RunAsync(async () =>
     {
         var ct = TestContext.Current.CancellationToken;

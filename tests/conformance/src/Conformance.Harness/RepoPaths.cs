@@ -46,6 +46,15 @@ public static class RepoPaths
         Path.Combine(repoRoot, "app", "frontend", "src", "data", "menuItems.json");
 
     /// <summary>
+    /// Issue #9: the golden order-pricing/combo/Route-44 dataset ported from
+    /// app/backend/tests/test_order_state*.py, test_tool_calling.py, and test_combo_orders.py,
+    /// so both the S1-3 conformance scenarios and a future C# backend's own test suite (S4) can
+    /// assert against the exact same cent-accurate cases from one shared file.
+    /// </summary>
+    public static string GoldenOrderPricingJsonPath(string repoRoot) =>
+        Path.Combine(repoRoot, "tests", "conformance", "testdata", "golden-order-pricing.json");
+
+    /// <summary>
     /// app/backend/static is gitignored — populated only by `npm run build` in app/frontend
     /// (vite's outDir points there). aiohttp's `add_static` raises at app-creation time if this
     /// directory doesn't exist, so the Python backend fails immediately on startup without it.
