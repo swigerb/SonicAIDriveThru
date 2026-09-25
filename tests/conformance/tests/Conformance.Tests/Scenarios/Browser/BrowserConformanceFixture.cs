@@ -167,18 +167,50 @@ public sealed class BrowserConformanceFixture : IAsyncLifetime
     /// <c>Traceback (most recent call last):</c>. Both are matched here, individually, by exact
     /// content -- this method is invoked once per incident by
     /// <see cref="CapturedProcessOutput.CountUnhandledErrors(Func{IReadOnlyList{string}, bool})"/>.
+    ///
+    /// CI run 36142470529: the Linux leg of the main <c>conformance</c> job ran this suite's own
+    /// unit tests (<see cref="CapturedProcessOutputTests"/>) -- not the flake itself, which only
+    /// the Windows-only <c>conformance-browser</c> job can ever hit -- and a unit test that fed
+    /// this exact benign-shaped stderr straight into <see cref="IsBenignProactorTeardownIncident(IReadOnlyList{string})"/>
+    /// got <c>false</c> back on that Linux runner (correctly -- there is no ProactorEventLoop
+    /// there), so the two incidents were never discarded and the test's own fixed expectation of
+    /// "0 after filtering" failed. That the *gate* is OS-conditional is correct and deliberate
+    /// (PR #54 review); the bug was testing the gated method with a fixed OS assumption instead of
+    /// testing the content-shape logic and the gate as two separately-testable things. Split
+    /// accordingly: <see cref="MatchesProactorTeardownIncident"/> below is the pure, OS-independent
+    /// content-shape check (safe for a unit test to call unconditionally on any runner), and this
+    /// method -- still the one <see cref="RunAsync"/> above actually filters with -- is just that
+    /// check gated by the real OS. The <c>isWindows</c>-overload lets a unit test also exercise
+    /// *this* gated method's OS branch explicitly on every runner, rather than only being able to
+    /// observe one branch of it depending on which OS happens to run the test.
     /// </summary>
-    internal static bool IsBenignProactorTeardownIncident(IReadOnlyList<string> incidentLines)
-    {
+    internal static bool IsBenignProactorTeardownIncident(IReadOnlyList<string> incidentLines) =>
+        IsBenignProactorTeardownIncident(incidentLines, OperatingSystem.IsWindows());
+
+    /// <summary>
+    /// Same as <see cref="IsBenignProactorTeardownIncident(IReadOnlyList{string})"/>, but with the
+    /// "are we on Windows" fact passed in explicitly instead of read from the real OS -- an
+    /// injectable seam so a unit test can prove both the true and the false branch of the gate on
+    /// a single runner, rather than only ever observing whichever branch its own OS happens to
+    /// take. Production code always goes through the zero-arg overload above.
+    /// </summary>
+    internal static bool IsBenignProactorTeardownIncident(
+        IReadOnlyList<string> incidentLines, bool isWindows) =>
         // PR #54 review: this signature is Windows-only by construction (ProactorEventLoop only
         // runs there), but gate explicitly rather than relying on the content check alone -- a
         // non-Windows runner can then never match this filter, full stop, even if some future
         // incident's text happened to coincidentally contain the same substrings.
-        if (!OperatingSystem.IsWindows())
-        {
-            return false;
-        }
+        isWindows && MatchesProactorTeardownIncident(incidentLines);
 
+    /// <summary>
+    /// The content-shape half of <see cref="IsBenignProactorTeardownIncident(IReadOnlyList{string})"/>
+    /// only -- deliberately OS-independent so a unit test can assert this exact stderr shape is
+    /// recognised on every runner (Linux included), leaving only the "and are we on Windows"
+    /// question to the gate above. Never called directly by production code; <see cref="RunAsync"/>
+    /// always goes through the gated <see cref="IsBenignProactorTeardownIncident(IReadOnlyList{string})"/>.
+    /// </summary>
+    internal static bool MatchesProactorTeardownIncident(IReadOnlyList<string> incidentLines)
+    {
         if (incidentLines is [
                 "ERROR:asyncio:Exception in callback _ProactorBasePipeTransport._call_connection_lost(None)",
             ])

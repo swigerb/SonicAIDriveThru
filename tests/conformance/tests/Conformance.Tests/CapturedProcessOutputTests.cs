@@ -48,34 +48,42 @@ public sealed class CapturedProcessOutputTests
         Assert.Equal(0, await RunAndCountAsync(script));
     }
 
+    /// The exact two-incident stderr shape captured live from a real flaked run (a real browser
+    /// abruptly severing a live `/realtime` WebSocket raced CPython's ProactorEventLoop teardown
+    /// path on Windows). Shared by the pure-matcher tests below and the OS-gate tests further
+    /// down, so both exercise the identical content.
+    private const string ProactorTeardownScript =
+        "import sys\n" +
+        "print('ERROR:asyncio:Exception in callback _ProactorBasePipeTransport._call_connection_lost(None)', file=sys.stderr)\n" +
+        "print('handle: <Handle _ProactorBasePipeTransport._call_connection_lost(None)>', file=sys.stderr)\n" +
+        "print('Traceback (most recent call last):', file=sys.stderr)\n" +
+        "print('  File \"C:\\\\Python312\\\\Lib\\\\asyncio\\\\events.py\", line 88, in _run', file=sys.stderr)\n" +
+        "print('    self._context.run(self._callback, *self._args)', file=sys.stderr)\n" +
+        "print('  File \"C:\\\\Python312\\\\Lib\\\\asyncio\\\\proactor_events.py\", line 165, in _call_connection_lost', file=sys.stderr)\n" +
+        "print('    self._sock.shutdown(socket.SHUT_RDWR)', file=sys.stderr)\n" +
+        "print('ConnectionResetError: [WinError 10054] An existing connection was forcibly closed by the remote host', file=sys.stderr)\n" +
+        "print('INFO:sonic-drive-in:Session abc detached (client close code=1001); holding order for 10s', file=sys.stderr)\n";
+
     /// <summary>
-    /// Deterministic regression coverage for the issue #10/#26 Windows Browser-category flake
-    /// (see <see cref="Scenarios.Browser.BrowserConformanceFixture.IsBenignProactorTeardownIncident"/>):
-    /// replays the *exact* two-incident stderr shape captured live from a real flaked run (a real
-    /// browser abruptly severing a live `/realtime` WebSocket raced CPython's ProactorEventLoop
-    /// teardown path on Windows) through the actual capture-and-count pipeline, rather than relying
-    /// on that race reoccurring on demand. Proves both that the raw, unfiltered count still sees
-    /// two incidents (so <see cref="CapturedProcessOutput.CountUnhandledErrors()"/> itself is
+    /// Deterministic regression coverage for the issue #10/#26 Windows Browser-category flake,
+    /// against the pure, OS-independent content-shape check
+    /// (<see cref="Scenarios.Browser.BrowserConformanceFixture.MatchesProactorTeardownIncident"/>)
+    /// only -- deliberately *not* the OS-gated <c>IsBenignProactorTeardownIncident</c>, so this
+    /// assertion holds, and is exercised, on every CI runner (Linux included), not just Windows.
+    /// CI run 36142470529 failed this expectation on Linux because an earlier version of this
+    /// test called the gated method directly, which -- correctly, per PR #54's review -- always
+    /// returns <c>false</c> off Windows; testing the gate and the content-shape logic separately
+    /// (see the two <c>..._when_isWindows_is_...</c> tests below for the gate itself) fixes that
+    /// without loosening the gate. Proves both that the raw, unfiltered count still sees two
+    /// incidents (so <see cref="CapturedProcessOutput.CountUnhandledErrors()"/> itself is
     /// completely unchanged) and that the filtered overload recognises and discards precisely
     /// those two, and only those two.
     /// </summary>
     [Fact]
     public async Task CountUnhandledErrors_filtered_overload_discards_the_known_benign_proactor_teardown_incident()
     {
-        const string script =
-            "import sys\n" +
-            "print('ERROR:asyncio:Exception in callback _ProactorBasePipeTransport._call_connection_lost(None)', file=sys.stderr)\n" +
-            "print('handle: <Handle _ProactorBasePipeTransport._call_connection_lost(None)>', file=sys.stderr)\n" +
-            "print('Traceback (most recent call last):', file=sys.stderr)\n" +
-            "print('  File \"C:\\\\Python312\\\\Lib\\\\asyncio\\\\events.py\", line 88, in _run', file=sys.stderr)\n" +
-            "print('    self._context.run(self._callback, *self._args)', file=sys.stderr)\n" +
-            "print('  File \"C:\\\\Python312\\\\Lib\\\\asyncio\\\\proactor_events.py\", line 165, in _call_connection_lost', file=sys.stderr)\n" +
-            "print('    self._sock.shutdown(socket.SHUT_RDWR)', file=sys.stderr)\n" +
-            "print('ConnectionResetError: [WinError 10054] An existing connection was forcibly closed by the remote host', file=sys.stderr)\n" +
-            "print('INFO:sonic-drive-in:Session abc detached (client close code=1001); holding order for 10s', file=sys.stderr)\n";
-
         var (raw, filtered) = await RunAndCountBothAsync(
-            script, Scenarios.Browser.BrowserConformanceFixture.IsBenignProactorTeardownIncident);
+            ProactorTeardownScript, Scenarios.Browser.BrowserConformanceFixture.MatchesProactorTeardownIncident);
 
         Assert.Equal(2, raw);
         Assert.Equal(0, filtered);
@@ -92,10 +100,48 @@ public sealed class CapturedProcessOutputTests
             "print(\"KeyError: 'oops'\", file=sys.stderr)\n";
 
         var (raw, filtered) = await RunAndCountBothAsync(
-            script, Scenarios.Browser.BrowserConformanceFixture.IsBenignProactorTeardownIncident);
+            script, Scenarios.Browser.BrowserConformanceFixture.MatchesProactorTeardownIncident);
 
         Assert.Equal(1, raw);
         Assert.Equal(1, filtered);
+    }
+
+    /// <summary>
+    /// Exercises the OS gate itself (<c>IsBenignProactorTeardownIncident(lines, isWindows)</c>'s
+    /// injectable-<c>isWindows</c> overload) rather than the content-shape matcher, and forces the
+    /// <c>true</c> branch explicitly so this passes -- and actually tests the gate's Windows
+    /// branch -- on every runner, not only a real Windows one.
+    /// </summary>
+    [Fact]
+    public async Task IsBenignProactorTeardownIncident_gate_discards_the_incident_when_isWindows_is_true()
+    {
+        var (raw, filtered) = await RunAndCountBothAsync(
+            ProactorTeardownScript,
+            lines => Scenarios.Browser.BrowserConformanceFixture.IsBenignProactorTeardownIncident(
+                lines, isWindows: true));
+
+        Assert.Equal(2, raw);
+        Assert.Equal(0, filtered);
+    }
+
+    /// <summary>
+    /// Same exact benign-shaped incident as the tests above, but forces the gate's <c>isWindows</c>
+    /// seam to <c>false</c> -- proving the *filter*, not just the content matcher, discards nothing
+    /// off Windows (the CI run 36142470529 regression: on the real Linux runner the zero-arg
+    /// <c>IsBenignProactorTeardownIncident(lines)</c> already takes this branch via
+    /// <c>OperatingSystem.IsWindows()</c>, but this test proves it deterministically on any runner
+    /// instead of only ever observing one branch depending on which OS happens to execute it).
+    /// </summary>
+    [Fact]
+    public async Task IsBenignProactorTeardownIncident_gate_discards_nothing_when_isWindows_is_false()
+    {
+        var (raw, filtered) = await RunAndCountBothAsync(
+            ProactorTeardownScript,
+            lines => Scenarios.Browser.BrowserConformanceFixture.IsBenignProactorTeardownIncident(
+                lines, isWindows: false));
+
+        Assert.Equal(2, raw);
+        Assert.Equal(2, filtered);
     }
 
     private static async Task<(int Raw, int Filtered)> RunAndCountBothAsync(
