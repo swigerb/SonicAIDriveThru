@@ -620,32 +620,107 @@ _CLIENT_APPEND_FAST_PATH_RE = re.compile(
     r'\{"type":"input_audio_buffer\.append","audio":"[A-Za-z0-9+/=]*"\}')
 
 
-# swigerb/SonicAIDriveThru#36, PR #58 re-review "S2": after this many *consecutive*
-# unhandled tool exceptions on one connection with no successful tool call in
+# swigerb/SonicAIDriveThru#36, PR #58 re-review "S2"/"S1": after this many
+# *consecutive* failed tool rounds on one connection with no guest turn in
 # between, stop auto-continuing the model (see the "response.done" case's
 # tools_pending handling below). Retrying the identical broken flow silently a
 # third time in a row is more likely to compound a bad order state than help --
-# the model still gets the function_call_output (so it can tell the guest
-# something went wrong), but only the guest's own next utterance (through
-# server VAD) starts a new response, breaking the loop instead of extending it.
+# the model still gets the function_call_output(s) (so it can tell the guest
+# something went wrong), and at the cap it's given one server-authored,
+# tool-free response.create so it can apologise out loud and ask the guest,
+# instead of either silently retrying tools again or going dead-air.
 _TOOL_FAILURE_CAP = 2
+
+# swigerb/SonicAIDriveThru#36, PR #58 re-review "S1": sent (server-authored,
+# never client-originated -- the #31 browser->upstream allow-list in
+# _filter_client_to_server is unaffected) in place of a bare response.create
+# once the consecutive-failed-round cap is reached. `response.tool_choice` is
+# a documented GA field on response.create's `response` object -- this same
+# codebase's own #31 work already established it as a real override the
+# model honours (rtmt.py strips a *browser*-supplied response.tool_choice
+# for exactly that reason; see the README "backend contract" section and
+# _filter_client_to_server's RESPONSE_OVERRIDE_KEYS) -- "none" tells the
+# model it must not call a tool on this turn, so it can only speak.
+_RESPONSE_CREATE_TOOL_CHOICE_NONE_MSG = json.dumps(
+    {"type": "response.create", "response": {"tool_choice": "none"}})
 
 
 class _ToolFailureTracker:
-    """Per-connection consecutive-tool-failure counter (#36, PR #58 re-review "S2")."""
-    __slots__ = ("count",)
+    """Per-connection consecutive-failed-tool-*round*-counter (#36, PR #58 re-review "S1"/"S2").
+
+    Counts failed tool rounds since the last guest turn, not failed calls or
+    tool successes (PR #58 re-review "S1"): the earlier per-call, reset-on-
+    any-success version let a model loop `update_order` (fails) -> `get_order`
+    (succeeds -- the very call our own error text tells it to make) ->
+    `update_order` (fails) -> ... forever without ever reaching the cap, since
+    each `get_order` reset the count back to zero with no guest input at all.
+    A round with several parallel tool calls where only some fail is also
+    counted once, not once per failing call.
+
+    Once the cap is reached, `consume_cap_notice()` grants exactly ONE
+    server-authored, tool-free response.create (see
+    `_RESPONSE_CREATE_TOOL_CHOICE_NONE_MSG`) so the model can apologise out
+    loud -- but every response.done *after* that, while still at cap and
+    with no guest turn in between, goes back to sending nothing at all. A
+    model (or, in the fake upstream's deterministic scripting, a test) that
+    keeps calling tools every round regardless of what `tool_choice` said
+    must not be able to ride an unbounded ladder of one-more-apology
+    responses with zero guest input -- only a single apology per capped
+    streak, exactly like the plain "stop auto-continuing" cap this replaces.
+    """
+    __slots__ = ("count", "_round_had_failure", "_cap_notice_sent")
 
     def __init__(self):
         self.count = 0
+        self._round_had_failure = False
+        self._cap_notice_sent = False
 
-    def record_failure(self) -> None:
-        self.count += 1
+    def record_call_failure(self) -> None:
+        """One tool call in the current round raised an unhandled exception.
 
-    def record_success(self) -> None:
+        Marks the round as failed; does not touch `count` yet -- `end_round()`
+        does that once per round, so several parallel failing calls in one
+        round (e.g. two tool calls in the same response, both raising) still
+        only count as a single failed round.
+        """
+        self._round_had_failure = True
+
+    def end_round(self) -> None:
+        """Call once per response.done that had >=1 tool call pending.
+
+        Increments the streak only if at least one call in this round failed.
+        A round with only successful calls (e.g. the `get_order` the model's
+        own error text tells it to make after a failure) leaves the streak
+        unchanged -- it must NOT reset it back to zero, or the cap could
+        never be reached no matter how long the loop runs.
+        """
+        if self._round_had_failure:
+            self.count += 1
+            self._round_had_failure = False
+
+    def reset_for_new_turn(self) -> None:
+        """Genuine guest activity (speech_started / a completed input
+        transcription) breaks the streak -- only the guest, not the model
+        retrying tools on its own, gets to start the count over."""
         self.count = 0
+        self._round_had_failure = False
+        self._cap_notice_sent = False
 
     def at_cap(self) -> bool:
         return self.count >= _TOOL_FAILURE_CAP
+
+    def consume_cap_notice(self) -> bool:
+        """True (and marks the notice sent) the first time this is called
+        after the cap is reached; False every time after that, until
+        `reset_for_new_turn()` runs. Lets the response.done handler send
+        exactly one tool_choice="none" apology per capped streak, then fall
+        back to sending nothing at all for as long as the streak continues
+        with no guest turn -- see the class docstring.
+        """
+        if self._cap_notice_sent:
+            return False
+        self._cap_notice_sent = True
+        return True
 
 
 class ToolResultDirection(Enum):
@@ -1501,12 +1576,10 @@ class RTMiddleTier:
                                     output_text = result.to_text() if result.destination in (ToolResultDirection.TO_SERVER, ToolResultDirection.TO_BOTH) else ""
                                     send_to_client = result.destination in (ToolResultDirection.TO_CLIENT, ToolResultDirection.TO_BOTH)
                                     client_text = result.to_client_text() if send_to_client else None
-                                    if tool_failures is not None:
-                                        # #36 S2: a successful tool call, of any kind, breaks a
-                                        # consecutive-failure streak -- only unhandled exceptions
-                                        # that happen back-to-back should ever suppress the
-                                        # auto-continue below.
-                                        tool_failures.record_success()
+                                    # #36 S1 (PR #58 re-review): a successful tool call no
+                                    # longer resets the failure streak here -- see
+                                    # _ToolFailureTracker's docstring for why (the model's own
+                                    # prescribed get_order retry must not be what un-caps it).
                                 except Exception:
                                     # #36: a genuinely unhandled exception inside a tool handler
                                     # (e.g. a malformed call missing a required argument) used to
@@ -1549,7 +1622,7 @@ class RTMiddleTier:
                                                 "tool_result": ticket_json,
                                             })
                                     if tool_failures is not None:
-                                        tool_failures.record_failure()
+                                        tool_failures.record_call_failure()
 
 
                                 await server_ws.send_json({
@@ -1581,16 +1654,40 @@ class RTMiddleTier:
                         return None
                     if tools_pending:
                         tools_pending.clear()
+                        if tool_failures is not None:
+                            # #36 S1 (PR #58 re-review): tally this round's outcome once,
+                            # here -- not per call -- so several parallel failing tool calls
+                            # in the same response only count as a single failed round.
+                            tool_failures.end_round()
                         if tool_failures is not None and tool_failures.at_cap():
-                            # #36 S2: two (or more) consecutive unhandled tool exceptions on
-                            # this connection with no success in between -- don't auto-continue
-                            # into a third identical silent retry. The model already has the
-                            # function_call_output(s) in context; only the guest's own next
-                            # utterance (server VAD) starts a new response from here.
-                            logger.warning(
-                                "Suppressing auto response.create after %d consecutive tool "
-                                "failures (session=%s)", tool_failures.count, session_id,
-                            )
+                            # #36 S1/S2: two (or more) consecutive *failed rounds* on this
+                            # connection with no guest turn in between. The FIRST
+                            # response.done that reaches the cap gets one server-authored,
+                            # tool-free response.create instead of nothing: the model
+                            # already has the function_call_output(s) in context, so it can
+                            # apologise out loud and ask the guest what to do, but
+                            # tool_choice="none" stops it from calling a tool again on this
+                            # turn. This frame is server-authored (never derived from
+                            # browser input), so the #31 browser->upstream allow-list in
+                            # _filter_client_to_server is unaffected. Every response.done
+                            # AFTER that one, while still at the cap with no guest turn in
+                            # between, goes back to sending nothing at all -- otherwise a
+                            # model (or a deterministic test double) that keeps calling
+                            # tools regardless of tool_choice could ride an unbounded
+                            # ladder of one-more-apology responses with zero guest input.
+                            if tool_failures.consume_cap_notice():
+                                logger.warning(
+                                    "Capping auto response.create with tool_choice=none "
+                                    "after %d consecutive failed tool round(s) (session=%s)",
+                                    tool_failures.count, session_id,
+                                )
+                                await server_ws.send_str(_RESPONSE_CREATE_TOOL_CHOICE_NONE_MSG)
+                            else:
+                                logger.warning(
+                                    "Suppressing auto response.create -- still at the "
+                                    "%d-round cap with no guest turn since the apology "
+                                    "(session=%s)", tool_failures.count, session_id,
+                                )
                         else:
                             await server_ws.send_str(_RESPONSE_CREATE_MSG)
                     is_tool_call_response = False
@@ -2242,6 +2339,14 @@ class RTMiddleTier:
                                     self._sessions.touch_activity(session_id)
                                 cancel_nudge("guest speech")
                                 recovery.on_guest_speech()
+                                if tool_failures is not None:
+                                    # #36 S1 (PR #58 re-review): input_audio_buffer.speech_started
+                                    # is in _PASSTHROUGH_SERVER_TYPES (the fast path below returns
+                                    # before _process_message_to_client's switch/case ever runs),
+                                    # so this marker check -- not that switch/case -- is the only
+                                    # reachable place to reset the tool-failure streak on genuine
+                                    # guest speech.
+                                    tool_failures.reset_for_new_turn()
                             elif _MARKER_TRANSCRIPTION_COMPLETED in data and session_id:
                                 self._sessions.touch_activity(session_id)
                                 cancel_nudge("guest transcript")
@@ -2249,6 +2354,10 @@ class RTMiddleTier:
                                     self._sessions.record_turn(session_id, "guest", json.loads(data).get("transcript"))
                                 except (ValueError, AttributeError):
                                     pass
+                                if tool_failures is not None:
+                                    # #36 S1 (PR #58 re-review): a completed input transcription
+                                    # is the other guest-turn signal that breaks the failure streak.
+                                    tool_failures.reset_for_new_turn()
                             elif _MARKER_RESPONSE_DONE in data:
                                 # swigerb/SonicAIDriveThru#48: a greeting that produced no
                                 # audio (text-only fallback, cancelled/failed before any

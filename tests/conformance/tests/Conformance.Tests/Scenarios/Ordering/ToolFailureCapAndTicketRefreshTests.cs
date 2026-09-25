@@ -154,32 +154,34 @@ public sealed class ToolFailureCapAndTicketRefreshTests(ConformanceFixture fixtu
             "call_cap_b's function_call_output never reached upstream -- the auto-continue after " +
             "the FIRST failure should still fire; only the cap-th consecutive failure suppresses it.");
 
-        // At the cap: rtmt must NOT auto-continue a third time. Rather than racing an uncertain
-        // amount of async processing time after callB, send a KNOWN, always-forwarded, unrelated
-        // frame (input_audio_buffer.clear, same idiom as ResponseCreateHooksGateTests) and wait
-        // for IT to arrive -- since every frame on this connection is strictly ordered, by the
-        // time `clear` has been recorded, anything an errant auto-continue was ever going to send
-        // in response to callB's response.done has necessarily already arrived too. This makes
-        // the snapshot check below a hard ordering guarantee, not a timing-dependent race.
-        await browser.SendInputAudioClearAsync(ct);
-        var clear = await connection.ReceivedFrames.WaitForAsync(
-            f => f.Type == "input_audio_buffer.clear" && f.Sequence > callB!.Sequence,
+        // At the cap: rtmt must send exactly ONE server-authored response.create with
+        // response.tool_choice="none" instead of silence (PR #58 re-review "S1") -- the model
+        // can still apologise out loud and ask the guest, but can't call a tool again with no
+        // guest input.
+        var capNotice = await connection.ReceivedFrames.WaitForAsync(
+            f => f.Type == "response.create" && f.Sequence > callB!.Sequence &&
+                 f.Json.TryGetProperty("response", out var respObj) &&
+                 respObj.TryGetProperty("tool_choice", out var toolChoiceProp) &&
+                 toolChoiceProp.GetString() == "none",
             OrderScenarioHelpers.FrameTimeout, ct);
-        Assert.True(clear is not null, "Expected input_audio_buffer.clear to still reach the fake upstream.");
+        Assert.True(capNotice is not null,
+            "Expected a server-authored response.create with response.tool_choice=\"none\" at the " +
+            "cap -- the model can still apologise out loud, but must not be allowed to call a tool " +
+            "again with no guest input (swigerb/SonicAIDriveThru#36 S1).");
 
-        var prematureRoundTrip = browser.ReceivedFrames.Snapshot().Any(f =>
-            f.Type == "extension.round_trip_token" &&
-            f.Json.GetProperty("roundTripIndex").GetInt32() > roundTripIndex);
-        Assert.False(prematureRoundTrip,
-            "An extension.round_trip_token arrived with no browser action after the second " +
-            "consecutive tool failure -- the auto-continue should have been suppressed at the cap " +
-            "(swigerb/SonicAIDriveThru#36 S2).");
-        var prematureResponseCreate = connection.ReceivedFrames.Snapshot().Any(f =>
-            f.Sequence > callB!.Sequence && f.Sequence < clear!.Sequence && f.Type == "response.create");
-        Assert.False(prematureResponseCreate,
-            "An unexpected response.create reached upstream between the second tool failure and " +
-            "the probe frame -- the auto-continue should have been suppressed at the cap " +
-            "(swigerb/SonicAIDriveThru#36 S2).");
+        // Nothing else was queued behind call_cap_a/call_cap_b, so the cap notice falls through
+        // to ResponseScript.Default (a plain audio reply, no tool call) -- proving the apology
+        // itself doesn't re-open the tool-calling loop: no THIRD function_call_output ever
+        // reaches upstream.
+        var thirdToolCall = connection.ReceivedFrames.Snapshot().Any(f =>
+            f.Sequence > capNotice!.Sequence &&
+            f.Type == "conversation.item.create" &&
+            f.Json.TryGetProperty("item", out var item3) &&
+            item3.TryGetProperty("type", out var item3Type) &&
+            item3Type.GetString() == "function_call_output");
+        Assert.False(thirdToolCall,
+            "A third function_call_output reached upstream after the cap notice -- the one-time " +
+            "apology must not itself re-open the auto-continue loop (swigerb/SonicAIDriveThru#36 S1).");
         Assert.Null(browser.CloseStatus);
 
         // The connection is still usable: the browser's own next action (not an auto-continue)
@@ -191,4 +193,156 @@ public sealed class ToolFailureCapAndTicketRefreshTests(ConformanceFixture fixtu
         var order = JsonDocument.Parse(next.ToolResultJson!).RootElement;
         Assert.Equal(1, order.GetProperty("items").GetArrayLength());
     }, allowedNewBackendErrors: 2);
+
+    /// <summary>
+    /// PR #58 re-review "S1" repro (Rick's verbatim test, adapted): the earlier per-call,
+    /// reset-on-any-success cap let a model loop <c>update_order</c> (fails) -&gt;
+    /// <c>get_order</c> (succeeds -- the very call our own error text tells it to make) -&gt;
+    /// <c>update_order</c> (fails) -&gt; ... forever with no guest input, because each
+    /// <c>get_order</c> success reset the streak back to zero. This scripts three such pairs
+    /// behind a SINGLE browser response.create and asserts the third <c>update_order</c>
+    /// (call_id <c>"f3"</c>) never reaches upstream: by the second failed round the cap is
+    /// hit and rtmt sends its one tool_choice="none" apology; since the fake upstream (like a
+    /// real model that ignores tool_choice) will still dequeue and play whatever's next if
+    /// asked, the ONLY thing that can stop "f3" from ever running is that rtmt must NOT send a
+    /// second auto-continue after the apology -- proving both the round-based counting (not
+    /// reset by get_order) and the one-shot-notice behaviour together, black-box.
+    /// </summary>
+    [Fact]
+    public Task Cap_is_not_reset_by_the_prescribed_get_order() => fixture.RunAsync(async () =>
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (browser, connection, _) = await OrderScenarioHelpers.ConnectAndGreetAsync(fixture, ct);
+        await using var _b = browser;
+        foreach (var (name, args, id) in new[] {
+            ("update_order", BadPriceArgs, "f1"), ("get_order", "{}", "g1"),
+            ("update_order", BadPriceArgs, "f2"), ("get_order", "{}", "g2"),
+            ("update_order", BadPriceArgs, "f3"), ("get_order", "{}", "g3") })
+            connection.Script.Enqueue(new ResponseScript([new FunctionCallEvent(name, args, id), new DoneEvent()]));
+
+        await browser.SendResponseCreateAsync(ct);   // the only guest/browser action
+
+        var f3 = await connection.ReceivedFrames.WaitForAsync(
+            f => f.Type == "conversation.item.create" &&
+                 f.Json.TryGetProperty("item", out var it) &&
+                 it.TryGetProperty("call_id", out var cid) && cid.GetString() == "f3",
+            TimeSpan.FromSeconds(8), ct);
+        Assert.True(f3 is null, "third failing update_order reached with no guest input -- cap never engaged");
+        Assert.Null(browser.CloseStatus);
+    }, allowedNewBackendErrors: 3);
+
+    /// <summary>
+    /// PR #58 re-review "S1" follow-up scenario: genuine guest activity (not another tool
+    /// success) is the only thing that resets the failed-round streak. After the cap trips
+    /// (two failed rounds, one apology sent), a guest speaking (input_audio_buffer.append,
+    /// which the fake's VAD-default script answers with a synthetic
+    /// speech_started -&gt; ... -&gt; transcription.completed sequence) must clear the streak so a
+    /// further tool call from the guest's own next turn can fail and NOT immediately hit the
+    /// cap again.
+    /// </summary>
+    [Fact]
+    public Task Guest_speech_resets_the_failure_streak_after_the_cap() => fixture.RunAsync(async () =>
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (browser, connection, roundTripIndex) = await OrderScenarioHelpers.ConnectAndGreetAsync(fixture, ct);
+        await using var _ = browser;
+
+        connection.Script.Enqueue(new ResponseScript([
+            new FunctionCallEvent(Name: "update_order", ArgumentsJson: BadPriceArgs, CallId: "call_reset_a"),
+            new DoneEvent(),
+        ]));
+        connection.Script.Enqueue(new ResponseScript([
+            new FunctionCallEvent(Name: "update_order", ArgumentsJson: BadPriceArgs, CallId: "call_reset_b"),
+            new DoneEvent(),
+        ]));
+        await browser.SendResponseCreateAsync(ct);
+
+        var callB = await connection.ReceivedFrames.WaitForAsync(
+            f => f.Type == "conversation.item.create" &&
+                 f.Json.TryGetProperty("item", out var itemB) &&
+                 itemB.TryGetProperty("call_id", out var idB) && idB.GetString() == "call_reset_b",
+            OrderScenarioHelpers.FrameTimeout, ct);
+        Assert.True(callB is not null, "call_reset_b's function_call_output never reached upstream.");
+        var capNotice = await connection.ReceivedFrames.WaitForAsync(
+            f => f.Type == "response.create" && f.Sequence > callB!.Sequence &&
+                 f.Json.TryGetProperty("response", out var respObj) &&
+                 respObj.TryGetProperty("tool_choice", out var toolChoiceProp) &&
+                 toolChoiceProp.GetString() == "none",
+            OrderScenarioHelpers.FrameTimeout, ct);
+        Assert.True(capNotice is not null, "Expected the one-time cap apology after the second failure.");
+
+        // Guest speaks (mic audio), same idiom as the VAD-default scenarios elsewhere -- this is
+        // genuine guest activity, so it must reset the failed-round streak. The cap notice's own
+        // Default reply just produced real audio, so echo suppression (config.yaml's
+        // audio.echo_cooldown_seconds=1.5, NOT doubled here since this isn't the greeting) is
+        // genuinely active for a moment afterward and would otherwise drop this append entirely
+        // before it ever reaches upstream (see EchoSuppressionBargeInTests' M4 for the same drop
+        // proven directly) -- there is no CONFORMANCE_* hook for this cooldown. A single fixed
+        // Task.Delay before the append is not fully reliable: the cooldown clock starts when the
+        // backend finishes the cap notice's own audio, which can lag well past 1.5s under system
+        // load (observed under a fresh build's CPU contention), so a delay sized for the nominal
+        // cooldown occasionally isn't enough. Poll instead: retry the append (each one a fresh,
+        // otherwise-identical mic chunk) until the fake's VAD-default transcription-completed
+        // reply shows up, bounded overall.
+        RecordedFrame? transcriptionCompleted = null;
+        for (var attempt = 0; attempt < 8 && transcriptionCompleted is null; attempt++)
+        {
+            await Task.Delay(TimeSpan.FromSeconds(0.75), ct);
+            var browserWatermarkForAppend = browser.ReceivedFrames.Count;
+            await browser.SendInputAudioAppendAsync("dGVzdC1hdWRpby1jaHVuaw==", ct);
+            transcriptionCompleted = await browser.ReceivedFrames.WaitForAsync(
+                f => f.Sequence >= browserWatermarkForAppend &&
+                     f.Type == "conversation.item.input_audio_transcription.completed",
+                TimeSpan.FromSeconds(1), ct);
+        }
+        Assert.True(transcriptionCompleted is not null,
+            "Expected the VAD-default transcription-completed reply after retrying past echo cooldown.");
+
+        // A single further failing tool call must auto-continue as normal (not suppressed) --
+        // proving the streak was reset to zero, not left at the cap. Watermark on the upstream
+        // connection's OWN log (transcriptionCompleted's Sequence is a browser-log sequence
+        // number, not comparable to connection.ReceivedFrames' independent counter).
+        var connectionWatermarkForCallC = connection.ReceivedFrames.Count;
+        connection.Script.Enqueue(new ResponseScript([
+            new FunctionCallEvent(Name: "update_order", ArgumentsJson: BadPriceArgs, CallId: "call_reset_c"),
+            new DoneEvent(),
+        ]));
+        await browser.SendResponseCreateAsync(ct);
+        var callC = await connection.ReceivedFrames.WaitForAsync(
+            f => f.Sequence >= connectionWatermarkForCallC &&
+                 f.Type == "conversation.item.create" &&
+                 f.Json.TryGetProperty("item", out var itemC) &&
+                 itemC.TryGetProperty("call_id", out var idC) && idC.GetString() == "call_reset_c",
+            OrderScenarioHelpers.FrameTimeout, ct);
+        Assert.True(callC is not null,
+            "call_reset_c's function_call_output never reached upstream -- a single failure right " +
+            "after a guest turn must not be treated as already at the cap.");
+        // Positively wait for the bare (no tool_choice override) auto-continue -- a Snapshot()
+        // taken right after callC is unsafe under concurrent test load: the backend can take a
+        // little longer than usual to get to response.done and send the continuation, and a
+        // one-shot check can race ahead of it (observed directly: callC arrived, but the bare
+        // continuation was still ~2.5s away under a busy shared backend). WaitForAsync polls
+        // with FrameTimeout instead of assuming it's already there.
+        var bareAutoContinue = await connection.ReceivedFrames.WaitForAsync(
+            f => f.Sequence > callC!.Sequence &&
+                 f.Type == "response.create" &&
+                 (!f.Json.TryGetProperty("response", out var respObj3) ||
+                  !respObj3.TryGetProperty("tool_choice", out var toolChoiceUnused3)),
+            OrderScenarioHelpers.FrameTimeout, ct);
+        Assert.True(bareAutoContinue is not null,
+            "Expected a bare (no tool_choice override) auto-continue after the single post-reset " +
+            "failure -- the streak must be 1, not already back at the cap.");
+        // Now that the bare continuation has been positively observed, it's safe to check that no
+        // tool_choice=none cap notice snuck in before it (a Snapshot() bounded by two confirmed
+        // frames, not a race against an unconfirmed one).
+        var strayCapNotice = connection.ReceivedFrames.Snapshot().Any(f =>
+            f.Sequence > callC!.Sequence && f.Sequence < bareAutoContinue!.Sequence &&
+            f.Type == "response.create" &&
+            f.Json.TryGetProperty("response", out var respObj2) &&
+            respObj2.TryGetProperty("tool_choice", out var toolChoiceProp2) &&
+            toolChoiceProp2.GetString() == "none");
+        Assert.False(strayCapNotice,
+            "A tool_choice=none cap notice fired after only ONE failed round post-reset.");
+        Assert.Null(browser.CloseStatus);
+    }, allowedNewBackendErrors: 3);
 }

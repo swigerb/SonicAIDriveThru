@@ -41,6 +41,7 @@ from rtmt import (
     _CLIENT_SESSION_KEYS,
     _CLIENT_TEST_ONLY_TYPES,
     _CLIENT_TOP_LEVEL_KEYS,
+    _RESPONSE_CREATE_TOOL_CHOICE_NONE_MSG,
     _TOOL_FAILURE_CAP,
     RTMiddleTier,
     RTToolCall,
@@ -2492,12 +2493,13 @@ class ProcessMessageToClientTests(unittest.IsolatedAsyncioTestCase):
         server_ws.send_json.assert_called_once()  # the model still gets its function_call_output
         client_ws.send_json.assert_not_called()
 
-    async def test_consecutive_tool_failures_suppress_auto_response_create_at_cap(self):
-        """PR #58 re-review "S2": two consecutive unhandled tool exceptions on one
-        connection, with no successful tool call in between, must suppress the usual
-        auto response.create after the second failure's response.done -- retrying the
-        same broken flow silently a third time in a row is more likely to compound a
-        bad order state than help. The model still gets both function_call_outputs."""
+    async def test_consecutive_failed_rounds_send_tool_choice_none_at_cap(self):
+        """PR #58 re-review "S1"/"S2": two consecutive *failed rounds* on one connection
+        (round = everything between one response.create and its response.done), with no
+        guest turn in between, must switch the auto-continue at the cap from a bare
+        response.create to a server-authored one with response.tool_choice="none" -- the
+        model still gets to speak (and apologise), but can't call a tool a third time in a
+        row. The model still gets both function_call_outputs either way."""
         rtmt = self._make_rtmt()
         client_ws = _make_mock_ws()
         server_ws = _make_mock_ws()
@@ -2524,16 +2526,23 @@ class ProcessMessageToClientTests(unittest.IsolatedAsyncioTestCase):
 
         tools_pending = {"call-a": RTToolCall("call-a", "prev-a")}
         await _one_failed_round("call-a", tools_pending)
-        self.assertEqual(server_ws.send_str.call_count, 1)  # round 1: not yet at cap, auto-continues
+        # round 1: not yet at cap, auto-continues with a bare response.create.
+        self.assertEqual(server_ws.send_str.call_count, 1)
+        server_ws.send_str.assert_called_with(RESPONSE_CREATE_MSG)
 
         tools_pending = {"call-b": RTToolCall("call-b", "prev-b")}
         await _one_failed_round("call-b", tools_pending)
-        # round 2: at the cap -- no additional response.create sent.
-        self.assertEqual(server_ws.send_str.call_count, 1)
+        # round 2: at the cap -- one more response.create, but with tool_choice="none".
+        self.assertEqual(server_ws.send_str.call_count, 2)
+        server_ws.send_str.assert_called_with(_RESPONSE_CREATE_TOOL_CHOICE_NONE_MSG)
 
-    async def test_tool_success_resets_the_failure_streak(self):
-        """A successful tool call between two failures must reset the streak -- the cap
-        is about *consecutive* failures, not a lifetime total for the connection."""
+    async def test_tool_success_does_not_reset_the_failure_streak(self):
+        """PR #58 re-review "S1": Rick's core repro. A successful tool call between two
+        failed rounds must NOT reset the streak -- `get_order`, the very call our own
+        tool_execution_failed error text tells the model to make, must not be what
+        silently un-caps a broken retry loop. The streak is only cleared by an actual
+        guest turn (_ToolFailureTracker.reset_for_new_turn(), exercised separately
+        below and by the conformance-level guest-speech scenario)."""
         rtmt = self._make_rtmt()
         client_ws = _make_mock_ws()
         server_ws = _make_mock_ws()
@@ -2575,13 +2584,62 @@ class ProcessMessageToClientTests(unittest.IsolatedAsyncioTestCase):
 
         await _failed_round("call-1")
         self.assertEqual(tool_failures.count, 1)
-        await _successful_round("call-2")
-        self.assertEqual(tool_failures.count, 0)
+        await _successful_round("call-2")  # the model's prescribed "call get_order" retry
+        self.assertEqual(tool_failures.count, 1)  # unchanged -- NOT reset by the success
         server_ws.send_str.reset_mock()
         await _failed_round("call-3")
-        # Streak is back to 1 (not 2) -- still below the cap, so auto-continue fires.
-        self.assertEqual(tool_failures.count, 1)
-        self.assertEqual(server_ws.send_str.call_count, 1)
+        # Streak is now 2 -- at the cap, so the auto-continue is the tool_choice=none variant.
+        self.assertEqual(tool_failures.count, 2)
+        server_ws.send_str.assert_called_once_with(_RESPONSE_CREATE_TOOL_CHOICE_NONE_MSG)
+
+    async def test_third_failed_round_after_the_cap_notice_sends_nothing(self):
+        """PR #58 re-review "S1" repro (`ToolFailureCapNotResetByGetOrderTests`): the model
+        (or a dumb test double that ignores tool_choice) can keep calling tools every round
+        no matter what the previous response.create said. Once the ONE cap-notice
+        response.create has already gone out, every further round in the same streak (no
+        guest turn in between) must send nothing at all -- otherwise that very auto-continue
+        would itself trigger yet another tool call with zero guest input, defeating the cap."""
+        rtmt = self._make_rtmt()
+        client_ws = _make_mock_ws()
+        server_ws = _make_mock_ws()
+        order_state_singleton.sessions = {}
+        rtmt._sessions.create_session(client_ws)
+        tool_failures = _ToolFailureTracker()
+
+        mock_tool_target = AsyncMock(side_effect=KeyError("item_name"))
+        rtmt.tools["exploding_tool"] = Tool(target=mock_tool_target, schema={"name": "exploding_tool"})
+        rtmt.tools["ok_tool"] = Tool(
+            target=AsyncMock(return_value=ToolResult("fine", ToolResultDirection.TO_SERVER)),
+            schema={"name": "ok_tool"},
+        )
+
+        async def _round(name: str, call_id: str):
+            tools_pending = {call_id: RTToolCall(call_id, f"prev-{call_id}")}
+            call_msg = MagicMock()
+            call_msg.data = json.dumps({
+                "type": "response.output_item.done",
+                "item": {"type": "function_call", "name": name, "call_id": call_id, "arguments": "{}"},
+            })
+            if name == "exploding_tool":
+                with self.assertLogs("sonic-drive-in", level="ERROR"):
+                    await rtmt._process_message_to_client(call_msg, client_ws, server_ws, tools_pending, tool_failures=tool_failures)
+            else:
+                await rtmt._process_message_to_client(call_msg, client_ws, server_ws, tools_pending, tool_failures=tool_failures)
+            done_msg = MagicMock()
+            done_msg.data = json.dumps({"type": "response.done", "response": {"output": []}})
+            await rtmt._process_message_to_client(done_msg, client_ws, server_ws, tools_pending, tool_failures=tool_failures)
+
+        await _round("exploding_tool", "f1")   # round 1: fail -> count=1, bare response.create
+        await _round("ok_tool", "g1")           # round 2: succeed -> count unchanged (1)
+        server_ws.send_str.reset_mock()
+        await _round("exploding_tool", "f2")   # round 3: fail -> count=2, AT CAP -> one apology
+        server_ws.send_str.assert_called_once_with(_RESPONSE_CREATE_TOOL_CHOICE_NONE_MSG)
+        server_ws.send_str.reset_mock()
+        await _round("ok_tool", "g2")           # round 4: succeed, still at cap -> no notice left
+        server_ws.send_str.assert_not_called()
+        # With rtmt sending nothing, a real model (or the fake upstream in the conformance
+        # scenario) never gets another response.create to reply to, so a further tool call
+        # ("f3" in the conformance repro) never happens -- guest input is the only way out.
 
     async def test_error_message_logged_not_crashed(self):
         """OpenAI error messages should be logged, not crash the handler."""
@@ -2681,6 +2739,106 @@ class ProcessMessageToClientTests(unittest.IsolatedAsyncioTestCase):
         msg.data = '{"type": "session.created", INVALID JSON'
         with self.assertRaises(json.JSONDecodeError):
             await rtmt._process_message_to_client(msg, client_ws, server_ws, tools_pending)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TOOL FAILURE TRACKER TESTS (#36, PR #58 re-review "S1")
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class ToolFailureTrackerTests(unittest.TestCase):
+    """Direct unit tests of `_ToolFailureTracker`'s new round-based semantics, isolated
+    from the full `_process_message_to_client` plumbing (which
+    ToolFailureCapAndTicketRefreshTests/the tests above already cover end-to-end)."""
+
+    def test_round_with_no_failure_does_not_increment(self):
+        t = _ToolFailureTracker()
+        t.end_round()  # a round with only successful calls -- record_call_failure() never called.
+        self.assertEqual(t.count, 0)
+        self.assertFalse(t.at_cap())
+
+    def test_round_with_one_failure_increments_once(self):
+        t = _ToolFailureTracker()
+        t.record_call_failure()
+        t.end_round()
+        self.assertEqual(t.count, 1)
+        self.assertFalse(t.at_cap())
+
+    def test_round_with_two_parallel_failures_still_increments_once(self):
+        """PR #58 re-review "S1" related problem (b): a single round with two parallel
+        failing tool calls must count as ONE failed round, not two."""
+        t = _ToolFailureTracker()
+        t.record_call_failure()
+        t.record_call_failure()
+        t.end_round()
+        self.assertEqual(t.count, 1)
+
+    def test_consecutive_failed_rounds_reach_the_cap(self):
+        t = _ToolFailureTracker()
+        t.record_call_failure()
+        t.end_round()
+        t.record_call_failure()
+        t.end_round()
+        self.assertEqual(t.count, _TOOL_FAILURE_CAP)
+        self.assertTrue(t.at_cap())
+
+    def test_successful_round_between_failures_does_not_reset_count(self):
+        """PR #58 re-review "S1" related problem (a): Rick's core repro at the class
+        level -- a round with no failure (e.g. the model's prescribed get_order retry)
+        must NOT reset the streak, or the cap could never be reached."""
+        t = _ToolFailureTracker()
+        t.record_call_failure()
+        t.end_round()
+        self.assertEqual(t.count, 1)
+        t.end_round()  # a later round, no record_call_failure() call -- it succeeded.
+        self.assertEqual(t.count, 1)  # unchanged, not reset to 0.
+
+    def test_reset_for_new_turn_zeroes_count_and_pending_round_flag(self):
+        """Only genuine guest activity (speech_started / a completed transcription --
+        wired up in from_server_to_client(), since speech_started is a fast-path
+        passthrough type that never reaches _process_message_to_client's switch/case)
+        clears the streak."""
+        t = _ToolFailureTracker()
+        t.record_call_failure()
+        t.end_round()
+        t.record_call_failure()  # mid-round failure recorded, but end_round() not called yet.
+        t.reset_for_new_turn()
+        self.assertEqual(t.count, 0)
+        self.assertFalse(t.at_cap())
+        # The pending round flag was cleared too -- a later end_round() with no further
+        # record_call_failure() call must not resurrect the cleared failure.
+        t.end_round()
+        self.assertEqual(t.count, 0)
+
+    def test_consume_cap_notice_fires_once_then_suppresses_until_reset(self):
+        """PR #58 re-review "S1" repro (`ToolFailureCapNotResetByGetOrderTests`): the fake
+        upstream (like a real model that ignores tool_choice) can keep calling tools every
+        round regardless of what the previous response.create said. If every capped round
+        sent its own tool_choice="none" response.create, that auto-continue would itself
+        let a further scripted/model-chosen tool call run with no guest input at all --
+        exactly the unbounded loop the cap exists to stop. So only the FIRST response.done
+        that reaches the cap gets the one apology; every one after it (same streak, no
+        guest turn) must get nothing until reset_for_new_turn() runs."""
+        t = _ToolFailureTracker()
+        t.record_call_failure()
+        t.end_round()
+        t.record_call_failure()
+        t.end_round()
+        self.assertTrue(t.at_cap())
+        self.assertTrue(t.consume_cap_notice())  # first time at cap: one apology.
+        # Still at cap (e.g. a successful round afterwards leaves the streak unchanged) --
+        # no further notices without a guest turn.
+        t.end_round()
+        self.assertTrue(t.at_cap())
+        self.assertFalse(t.consume_cap_notice())
+        self.assertFalse(t.consume_cap_notice())
+        # A guest turn re-arms exactly one future notice.
+        t.reset_for_new_turn()
+        t.record_call_failure()
+        t.end_round()
+        t.record_call_failure()
+        t.end_round()
+        self.assertTrue(t.at_cap())
+        self.assertTrue(t.consume_cap_notice())
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
