@@ -544,7 +544,7 @@ async def update_order(args, session_id: str) -> ToolResult:
                 delta_text += " (UPSELL HINT: Ask if they'd like to add anything else — maybe a drink, side, or dessert!)"
         logger.debug("Upsell hint for category '%s'", category)
 
-    happy_hour_note = " [HAPPY HOUR ACTIVE: drinks and slushes are half-price!]" if is_happy_hour() else ""
+    happy_hour_note = " [HAPPY HOUR ACTIVE: slushes and fountain drinks are half-price; shakes, Blasts and sundaes are full price]" if is_happy_hour() else ""
     return ToolResult(delta_text + happy_hour_note, ToolResultDirection.TO_BOTH, client_text=json_order_summary)
 
 
@@ -566,7 +566,7 @@ async def get_order(_args: Any, session_id: str) -> ToolResult:
     logger.info("Retrieving order summary for session %s", session_id)
     readback = order_state_singleton.get_grouped_order_for_readback(session_id)
     json_summary = order_state_singleton.get_order_summary_json(session_id)
-    happy_hour_note = " [HAPPY HOUR ACTIVE: drinks and slushes are half-price!]" if is_happy_hour() else ""
+    happy_hour_note = " [HAPPY HOUR ACTIVE: slushes and fountain drinks are half-price; shakes, Blasts and sundaes are full price]" if is_happy_hour() else ""
     return ToolResult(readback + happy_hour_note, ToolResultDirection.TO_BOTH, client_text=json_summary)
 
 

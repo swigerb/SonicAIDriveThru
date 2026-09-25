@@ -38,7 +38,6 @@ upsell_hints:
 system_hints:
   combo_incomplete: "SYSTEM HINT: {{prompt_hint}}"
   out_of_stock: "OOS: {{oos_reason}}"
-  happy_hour_active: "HAPPY HOUR ACTIVE: drinks and slushes are half-price!"
 
 delta_templates:
   item_added: "Added {{quantity}} {{display_name}} — your total is now {{total}}"

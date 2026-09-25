@@ -874,5 +874,55 @@ class EdgeCaseTests(unittest.TestCase):
         self.assertEqual(result.destination, ToolResultDirection.TO_BOTH)
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# HAPPY HOUR BANNER WORDING TESTS (PR #61 review, must-fix 2)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class HappyHourBannerWordingTests(unittest.TestCase):
+    """The [HAPPY HOUR ACTIVE: ...] banner appended to update_order/get_order tool
+    results must say explicitly that slushes and fountain drinks are half-price
+    and that shakes, Blasts and sundaes are full price -- the old wording ("drinks
+    and slushes are half-price!") said nothing about shakes/Blasts/sundaes at all,
+    which is how the carhop kept treating them as discounted (issue #39 / #61).
+    """
+
+    NEW_BANNER = "[HAPPY HOUR ACTIVE: slushes and fountain drinks are half-price; shakes, Blasts and sundaes are full price]"
+
+    def setUp(self):
+        self._hh_patcher = patch("tools.is_happy_hour", return_value=True)
+        self._hh_patcher.start()
+
+    def tearDown(self):
+        self._hh_patcher.stop()
+
+    def test_update_order_banner_states_shakes_blasts_sundaes_are_full_price(self):
+        sid = _make_session()
+        result = _run(update_order({
+            "action": "add", "item_name": "Cherry Limeade",
+            "size": "medium", "quantity": 1, "price": 2.99,
+        }, sid))
+        self.assertIn(self.NEW_BANNER, result.text)
+
+    def test_get_order_banner_states_shakes_blasts_sundaes_are_full_price(self):
+        sid = _make_session()
+        _run(update_order({
+            "action": "add", "item_name": "Cherry Limeade",
+            "size": "medium", "quantity": 1, "price": 2.99,
+        }, sid))
+        result = _run(get_order({}, sid))
+        self.assertIn(self.NEW_BANNER, result.text)
+
+    def test_no_banner_outside_happy_hour(self):
+        self._hh_patcher.stop()
+        with patch("tools.is_happy_hour", return_value=False):
+            sid = _make_session()
+            result = _run(update_order({
+                "action": "add", "item_name": "Cherry Limeade",
+                "size": "medium", "quantity": 1, "price": 2.99,
+            }, sid))
+            self.assertNotIn("HAPPY HOUR", result.text)
+        self._hh_patcher.start()
+
+
 if __name__ == "__main__":
     unittest.main()
