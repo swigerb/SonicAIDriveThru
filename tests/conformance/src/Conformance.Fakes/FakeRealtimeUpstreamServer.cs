@@ -471,7 +471,7 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
 
         try
         {
-            await connection.SendAsync(BuildSessionCreated(), ct).ConfigureAwait(false);
+            await connection.SendAsync(BuildSessionCreated(deployment), ct).ConfigureAwait(false);
 
             while (socket.State == WebSocketState.Open)
             {
@@ -1068,7 +1068,34 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
         };
     }
 
-    private static JsonObject BuildSessionCreated() => new()
+    /// <summary>
+    /// #33: the real GA endpoint's `session.created` echoes a fully-populated default session —
+    /// not just `id`/`object` — so a client can read the server-assigned defaults ("the server
+    /// sets default instructions which will be used if this field is not set and are visible in
+    /// the `session.created` event at the start of the session") before ever sending a
+    /// `session.update`. This was previously stubbed down to two keys, which meant the backend's
+    /// `session.created` scrub path (`RTMiddleTier._scrub_session_for_client`, called from
+    /// `_process_message_to_client`'s `case "session.created"`) was never exercised by anything
+    /// with real secrets to strip — see <see cref="ScrubHardeningTests"/>.
+    ///
+    /// Shape sourced from the OpenAI Realtime API reference's `RealtimeSessionCreateRequest`
+    /// (fields: type, audio, instructions, max_output_tokens, model, output_modalities,
+    /// tool_choice, tools, tracing, truncation) —
+    /// https://developers.openai.com/api/reference/resources/realtime (fetched 2026-09-24), same
+    /// primary source <see cref="GaSessionValidator"/> already cites; Azure's reference confirms
+    /// it follows the OpenAI spec verbatim —
+    /// https://learn.microsoft.com/en-us/azure/foundry/openai/realtime-audio-reference (fetched
+    /// 2026-09-24). `id`/`object`/`model` are server-assigned exactly like `session.updated`
+    /// stamps them (see `HandleSessionUpdateAsync`). The literal default `instructions` text
+    /// itself is NOT published anywhere in the reference (only that the field exists and is
+    /// non-empty) — the string below is a clearly-synthetic placeholder that satisfies the
+    /// "present, non-empty, default" contract without claiming to reproduce OpenAI's actual
+    /// (undisclosed) default prompt. `reasoning` is deliberately omitted here: whether it appears
+    /// is a per-deployment concern the bootstrap `session.update`/`session.updated` round trip
+    /// covers (see ReasoningByDeploymentTests.cs), not something a brand-new, unconfigured
+    /// session would carry.
+    /// </summary>
+    private static JsonObject BuildSessionCreated(string deployment) => new()
     {
         ["type"] = "session.created",
         ["event_id"] = FakeRealtimeConnection.NewEventId(),
@@ -1076,6 +1103,39 @@ public sealed class FakeRealtimeUpstreamServer : IAsyncDisposable
         {
             ["id"] = "sess_fake",
             ["object"] = "realtime.session",
+            ["model"] = deployment,
+            ["type"] = "realtime",
+            ["instructions"] = "You are a helpful voice assistant. (fake GA default placeholder — real default text is not published)",
+            ["tools"] = new JsonArray(),
+            ["tool_choice"] = "auto",
+            ["max_output_tokens"] = "inf",
+            ["output_modalities"] = new JsonArray("audio"),
+            ["truncation"] = "auto",
+            ["tracing"] = null,
+            ["audio"] = new JsonObject
+            {
+                ["input"] = new JsonObject
+                {
+                    ["format"] = new JsonObject { ["type"] = "audio/pcm", ["rate"] = 24000 },
+                    ["noise_reduction"] = null,
+                    ["transcription"] = null,
+                    ["turn_detection"] = new JsonObject
+                    {
+                        ["type"] = "server_vad",
+                        ["threshold"] = 0.5,
+                        ["prefix_padding_ms"] = 300,
+                        ["silence_duration_ms"] = 500,
+                        ["create_response"] = true,
+                        ["interrupt_response"] = true,
+                    },
+                },
+                ["output"] = new JsonObject
+                {
+                    ["format"] = new JsonObject { ["type"] = "audio/pcm", ["rate"] = 24000 },
+                    ["speed"] = 1.0,
+                    ["voice"] = "marin",
+                },
+            },
         },
     };
 
