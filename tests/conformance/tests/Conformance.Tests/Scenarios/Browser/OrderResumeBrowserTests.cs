@@ -169,21 +169,34 @@ public sealed class OrderResumeBrowserTests(BrowserConformanceFixture fixture)
         // ── Drop, then the frontend's own reconnect logic should bring a second socket up ──
         var socketsBeforeDrop = await SocketCountAsync(page);
         var secondConnectionTask = fixture.Realtime.WaitForNextConnectionAsync(FrameTimeout, ct);
+
+        // Arm this *before* dropping (not by calling connection.Script.ClearRules() *after*
+        // obtaining secondConnection below): the fake constructs a fresh FakeRealtimeConnection
+        // -- with RealtimeScript.WithVadDefaults() already installed -- at connection-creation
+        // time, strictly before the socket is accepted/attached/published (see
+        // FakeRealtimeUpstreamServer.HandleConnectionAsync). Calling ClearRules() only *after*
+        // WaitForNextConnectionAsync resolves is too late to be reliable: real network audio
+        // (this resumed session's mic auto-restart) can arrive and get dispatched against the
+        // still-armed default rule in the window between "socket published to this test" and
+        // "this continuation resumes and calls ClearRules()" -- typically microseconds, but not
+        // always. Root-caused via a 40x Browser-category repro after the WinError 10054
+        // proactor-teardown fix (see BrowserConformanceFixture/CapturedProcessOutput's
+        // IsBenignProactorTeardownIncident) still showed an unrelated ~1-in-25-40 failure:
+        // "Expected exactly one nudge..." with the backend log showing "Resume nudge cancelled:
+        // guest speech" ~90ms after resume -- i.e. the very first append got a synthetic
+        // speech_started reply before a test-side ClearRules() call (previously living just
+        // after this point) ever ran. rtmt.py's resume nudge is a one-shot task, cancelled
+        // permanently by any speech_started and never rescheduled, so even that single stray
+        // auto-reply permanently and silently kills the nudge this scenario asserts on. Arming
+        // the clear before the connection is even created removes the race entirely -- see
+        // ClearVadDefaultsOnNextConnection's own doc comment and
+        // FakeRealtimeScriptingModelTests.ClearVadDefaultsOnNextConnection_suppresses_the_reply_to_the_very_first_append
+        // for the deterministic (non-Playwright) regression proof.
+        fixture.Realtime.ClearVadDefaultsOnNextConnection();
         await DropLastSocketAsync(page).ConfigureAwait(false);
         await UntilAsync(() => SocketCountAsync(page), n => n > socketsBeforeDrop, FrameTimeout, "browser auto-reconnect", ct);
         var secondConnection = await secondConnectionTask;
         Assert.True(secondConnection is not null, $"No upstream reconnection was accepted within {FrameTimeout}.");
-
-        // Opt out of WithVadDefaults' speech simulation on this connection before any resumed
-        // audio arrives: the fake device's continuous append stream would otherwise have every
-        // chunk answered with a synthetic speech_started/transcription pair, which touch_activity
-        // (rtmt.py) and the nudge's cancel_nudge("guest speech") both treat exactly like real
-        // guest speech -- and unlike touch_activity (which just needs to not starve the idle
-        // clock), the nudge task is scheduled once per resume and never rescheduled once
-        // cancelled, so a single stray transcription here would permanently and silently prevent
-        // it from ever firing, well before we get to asserting it. This test only needs to prove
-        // real appends *reach* the fake, not that the fake pretends the guest spoke.
-        secondConnection!.Script.ClearRules();
 
         var secondSentFirstFrame = await UntilAsync(
             () => SentAsync(page, socketsBeforeDrop),
@@ -204,17 +217,17 @@ public sealed class OrderResumeBrowserTests(BrowserConformanceFixture fixture)
             .WaitForAsync(new() { Timeout = 5000 }).ConfigureAwait(false);
 
         // Mic auto-restarted with no tap: audio reaches the new upstream connection on its own.
+        // (No speech_started reply is ever sent for these appends -- ClearVadDefaultsOnNextConnection
+        // was armed before this connection was even created, see the comment above -- so this is
+        // purely an "did an append arrive" check, not a race with the fake's own reply.)
         await UntilAsync(
             () => Task.FromResult(secondConnection!.ReceivedFrames.Snapshot().Any(f => f.Type == "input_audio_buffer.append")),
             ok => ok, FrameTimeout, "mic audio reaching the resumed upstream connection", ct);
 
-        // Stop the mic before checking the nudge: FakeRealtimeConnection's default script
-        // (RealtimeScript.WithVadDefaults(), applied to every connection by the harness) replies
-        // to *every* input_audio_buffer.append with a synthetic speech_started/transcription pair
-        // -- realistic for a single scripted "turn", but the fake device's continuous audio
-        // stream would otherwise touch_activity/cancel_nudge on every chunk, exactly like real
-        // guest speech would, and the nudge is specifically about the guest going quiet. Stopping
-        // the mic here is the black-box equivalent of the guest actually falling silent.
+        // Stop the mic before checking the nudge -- the black-box equivalent of the guest
+        // actually falling silent. No auto-reply can spuriously touch_activity/cancel_nudge on a
+        // trailing append here (see the ClearVadDefaultsOnNextConnection comment above), so this
+        // click is a plain UI action, not part of the fix itself.
         await page.GetByRole(AriaRole.Button, new() { Name = "Stop recording", Exact = true }).ClickAsync().ConfigureAwait(false);
 
         // Bootstrap session.update -> rehydration -> no response.create until the nudge.
