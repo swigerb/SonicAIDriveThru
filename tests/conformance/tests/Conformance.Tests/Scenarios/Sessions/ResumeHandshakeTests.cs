@@ -23,11 +23,12 @@ public sealed class ResumeHandshakeTests(ResumeTimersConformanceFixture fixture)
 {
     private static readonly TimeSpan FrameTimeout = TimeSpan.FromSeconds(30);
 
-    // Comfortably below ResumeTimers' first_frame_timeout_seconds=0.5s -- proves the metadata came
+    // Comfortably below ResumeTimers' first_frame_timeout_seconds=2s -- proves the metadata came
     // from the immediate "first frame decided non-resume" path in rtmt.py's from_client_to_server
     // (resume_decided.set() + announce_fresh() run inline, no sleep), not from first_frame_deadline's
-    // 0.5s fallback timer.
-    private static readonly TimeSpan WellUnderFirstFrameTimeout = TimeSpan.FromMilliseconds(400);
+    // 2s fallback timer. (PR #54 review: the timeout used to be 0.5s with only a 400ms bound --
+    // ~100ms of margin under load. Raised to 2s/1000ms for real headroom.)
+    private static readonly TimeSpan WellUnderFirstFrameTimeout = TimeSpan.FromMilliseconds(1000);
 
     private static string RandomResumeLookingId() => Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N"); // 64 chars, in [32,128]
 

@@ -118,7 +118,11 @@ public static class BackendProfiles
     /// processes) it can occasionally lose that race to a *genuine* idle-close that has nothing
     /// to do with the behaviour under test -- observed directly on this dev box. Widening the
     /// budget here removes that coincidental race without changing what any of these scenarios
-    /// actually assert (first-frame-timeout, nudge timing and rate-limit delays are untouched).
+    /// actually assert (nudge timing and rate-limit delays are untouched). PR #54 review: also
+    /// raised CONFORMANCE_FIRST_FRAME_TIMEOUT_SECONDS from 0.5s to 2s (production's own default,
+    /// per README's config table) -- the 0.5s value left ResumeHandshakeTests'
+    /// WellUnderFirstFrameTimeout bound (400ms) only ~100ms of margin under the same load, which
+    /// is exactly the kind of thin-margin flake this profile already exists to eliminate.
     /// </summary>
     public static BackendProfile ResumeTimers { get; } = new("ResumeTimers", new Dictionary<string, string>
     {
@@ -126,7 +130,7 @@ public static class BackendProfiles
         ["CONFORMANCE_IDLE_TIMEOUT_SECONDS"] = "8",
         ["CONFORMANCE_GRACE_SECONDS"] = "8",
         ["CONFORMANCE_NUDGE_AFTER_SECONDS"] = "1",
-        ["CONFORMANCE_FIRST_FRAME_TIMEOUT_SECONDS"] = "0.5",
+        ["CONFORMANCE_FIRST_FRAME_TIMEOUT_SECONDS"] = "2",
         ["CONFORMANCE_GREETING_TIMEOUT_SECONDS"] = "1",
         ["CONFORMANCE_RATE_LIMIT_RETRY_DELAY_SECONDS"] = "0.2",
         ["CONFORMANCE_RATE_LIMIT_SECOND_RETRY_DELAY_SECONDS"] = "0.4",
