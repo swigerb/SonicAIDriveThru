@@ -277,31 +277,61 @@ public sealed class CapturedProcessOutputWaitTests
 
     /// <summary>
     /// #66 M2's fixture-level M1 test: proves a late unhandled-backend-error line -- one that
-    /// arrives so late it survives even scenario A's own post-body quiescence drain -- is
-    /// attributed to scenario A by name, not silently folded into scenario B's baseline the way it
-    /// would have been before #66 M1. Wires the real, production <see cref="CapturedProcessOutput"/>
-    /// (attached to a real Python child process, on the real async
-    /// <see cref="Process.ErrorDataReceived"/> ThreadPool dispatch path -- not a hand-driven
-    /// in-memory fixture) together with the real <see cref="ScenarioErrorAttribution"/>, exactly
-    /// the way <c>ConformanceFixture.RunAsync</c> wires them, deliberately bypassing
-    /// <c>ConformanceFixture</c>/<c>Realtime</c>/<c>Search</c> itself (spinning up a full fixture
-    /// with a real Python backend + fakes would be far slower and would reintroduce the exact kind
-    /// of process-timing race this whole fix exists to eliminate from these tests). The child
-    /// process is stdin-controlled -- it blocks on <c>input()</c> and, on receiving a
-    /// "<c>&lt;delay_ms&gt;|&lt;message&gt;</c>" command line, sleeps exactly that long before
-    /// writing <c>message</c> to stderr and looping back to <c>input()</c> -- so this test commands
-    /// precisely-timed asynchronous stderr output with zero wall-clock racing, reproducing Rick's
-    /// own PR #66 review repro (a child process that "writes an ERROR: line on cue") deterministically.
-    /// Re-review update (R2): now drives <see cref="ScenarioErrorAttribution.BeginScenario"/>/
+    /// arrives after scenario A's own check has already run -- is attributed to scenario A by
+    /// name, not silently folded into scenario B's baseline the way it would have been before
+    /// #66 M1. Wires the real, production <see cref="CapturedProcessOutput"/> (attached to a real
+    /// Python child process, on the real async <see cref="Process.ErrorDataReceived"/> ThreadPool
+    /// dispatch path -- not a hand-driven in-memory fixture) together with the real
+    /// <see cref="ScenarioErrorAttribution"/>, exactly the way <c>ConformanceFixture.RunAsync</c>
+    /// wires them, deliberately bypassing <c>ConformanceFixture</c>/<c>Realtime</c>/<c>Search</c>
+    /// itself (spinning up a full fixture with a real Python backend + fakes would be far slower
+    /// and would reintroduce the exact kind of process-timing race this whole fix exists to
+    /// eliminate from these tests). The child process is stdin-controlled -- it blocks on
+    /// <c>input()</c> and, on receiving a "<c>&lt;delay_ms&gt;|&lt;message&gt;</c>" command line,
+    /// sleeps exactly that long before writing <c>message</c> to stderr and looping back to
+    /// <c>input()</c> -- so this test commands precisely-timed asynchronous stderr output with
+    /// zero wall-clock racing, reproducing Rick's own PR #66 review repro (a child process that
+    /// "writes an ERROR: line on cue") deterministically.
+    /// Re-review update (R2): drives <see cref="ScenarioErrorAttribution.BeginScenario"/>/
     /// <see cref="ScenarioErrorAttribution.EndScenario"/> directly -- the same single-read entry
     /// points <c>ConformanceFixture.RunAsync</c> itself calls -- rather than hand-wiring the raw
     /// <see cref="ScenarioErrorAttribution.ChargeStrandedErrorsToPreviousScenario"/>/
     /// <see cref="ScenarioErrorAttribution.RecordScenarioChecked"/> pair, which is exactly how the
     /// fixture's own R1 bug (Assert.Fail running outside its try/finally) previously slipped past
     /// this test undetected.
+    /// R4 fix (round-3 review): the previous version commanded scenario A's late error BEFORE its
+    /// own post-body quiescence drain, then relied on scenario B's own drain having a fixed 500ms
+    /// idle window (measured from an earlier line) that was still open when a 300ms-delayed error
+    /// arrived -- about 200ms of margin for the Python sleep, the pipe, and ThreadPool dispatch to
+    /// fit inside. That margin is exactly the kind of wall-clock assumption #66 M1(b) exists to
+    /// make safe, not to rely on: a loaded CI runner blew through it (CI failed at
+    /// <c>Assert.NotNull() Failure: Value is null</c>; local repro confirmed 450ms still passes,
+    /// 550ms reproduces the failure exactly). A drain's idle window is a heuristic that can miss an
+    /// in-flight line by design -- a test that assumes it always catches one was testing the wrong
+    /// contract. This version instead asserts the ATTRIBUTION CONTRACT once the error has provably
+    /// been counted, with no drain and no wall-clock margin involved at all: scenario A's own
+    /// <see cref="ScenarioErrorAttribution.EndScenario"/> check runs and passes strictly BEFORE the
+    /// error is even written to the child process's stdin, so it structurally cannot observe it --
+    /// not "probably won't", cannot. Then <see cref="CapturedProcessOutput.WaitForDiagnosticsAsync"/>
+    /// polls the real, ever-increasing <see cref="CapturedProcessOutput.CountUnhandledErrors"/>
+    /// value itself -- re-evaluated after every <see cref="CapturedProcessOutput.Append"/>, i.e.
+    /// after <c>ScanLine</c> has actually incremented the count -- rather than a string match
+    /// against the dumped text (<c>Append</c> enqueues a line before <c>ScanLine</c> increments the
+    /// count, so a text predicate could match one cycle ahead of the count actually moving). The
+    /// wait's own 30s cap is generous enough to swallow any of the lags below with room to spare,
+    /// so the test only proceeds to scenario B's own <see cref="ScenarioErrorAttribution.BeginScenario"/>
+    /// charge once the error has definitely landed -- however long the child process took to
+    /// dispatch it. A <c>[Theory]</c> over 0ms (immediate), 550ms (the exact CI failure
+    /// reproduction above) and 2000ms (a much longer lag) proves the fix is lag-independent, not
+    /// merely no-longer-failing-at-one-specific-value; it still goes red if attribution itself is
+    /// disabled (e.g. short-circuiting <see cref="ScenarioErrorAttribution.ChargeStrandedErrorsToPreviousScenario"/>
+    /// to always return null) -- see the PR's mutation-check evidence.
     /// </summary>
-    [Fact]
-    public async Task Fixture_level_M1_late_error_from_scenario_A_is_attributed_to_A()
+    [Theory]
+    [InlineData(0)]
+    [InlineData(550)]
+    [InlineData(2000)]
+    public async Task Fixture_level_M1_late_error_from_scenario_A_is_attributed_to_A(int lagMs)
     {
         var ct = TestContext.Current.CancellationToken;
         const string script =
@@ -347,56 +377,40 @@ public sealed class CapturedProcessOutputWaitTests
             var (baselineA, strandedBeforeA) = attribution.BeginScenario(output.CountUnhandledErrors);
             Assert.Null(strandedBeforeA); // nothing has run yet -- no history to charge against.
 
-            // Scenario A's body: first an immediate, harmless line -- purely so the drain below
-            // genuinely has to debounce (arms a recent _lastAppendUtc) instead of trivially
-            // taking the #66 S1 fast path on a completely empty history, which would prove
-            // nothing about a drain actually running out its cap. Then commands the child to log
-            // an ERROR: line 300ms from now -- far longer than scenario A's own (short,
-            // test-sized) post-body quiescence drain below, so scenario A's own check will NOT
-            // see it (it genuinely hasn't happened yet), and it will still be in flight once
-            // scenario A finishes.
+            // Scenario A's body: a harmless, immediate line -- realistic backend chatter, not
+            // required by the assertions below, but keeps this test wired the same way
+            // ConformanceFixture actually drives a scenario.
             await process.StandardInput.WriteLineAsync("0|INFO:sonic-drive-in:scenario A body ran");
             var sawBodyOutput = await output.WaitForDiagnosticsAsync(
                 d => d.Contains("scenario A body ran", StringComparison.Ordinal), TimeSpan.FromSeconds(5), ct);
             Assert.True(sawBodyOutput, "The immediate body-output line never arrived.");
-            await process.StandardInput.WriteLineAsync("300|ERROR:sonic-drive-in:late error from scenario A");
 
-            // Scenario A's own post-body quiescence drain: short and bounded, same order of
-            // magnitude as ConformanceFixture's own BaselineQuiescenceWindow/MaxWait -- must NOT
-            // wait the full 300ms (that would defeat the point of this test: the error must still
-            // be genuinely in flight when scenario A finishes checking). Whether this drain
-            // resolves via a genuine debounce-then-cap or (if enough incidental overhead already
-            // elapsed since the body-output line above landed) the #66 S1 fast path is not itself
-            // asserted -- either way it cannot possibly have observed the still-300ms-out ERROR
-            // line, which is the only thing this test needs from it.
-            await output.WaitForOutputQuiescenceAsync(
-                TimeSpan.FromMilliseconds(100), TimeSpan.FromMilliseconds(150), ct);
-
-            // #66 re-review, R2/R1(b): routed through BeginScenario/EndScenario -- the exact same
-            // single-read entry points ConformanceFixture.RunAsync itself calls -- rather than the
-            // raw ChargeStrandedErrorsToPreviousScenario/RecordScenarioChecked pair this test used
-            // to call directly. Rick's PR #66 re-review flagged that hand-wiring the lower-level
-            // methods here let the fixture's own real bug (R1: Assert.Fail running outside its
-            // try/finally) slip through this test undetected -- this real-process test now
-            // exercises the same production entry points the unit tests in
-            // ScenarioErrorAttributionTests also exercise, just against a real async stderr feed.
+            // Scenario A's own check runs and passes HERE -- strictly before the error below is
+            // even written to the child process's stdin, so it structurally cannot observe it.
+            // No drain, no idle window, no wall-clock margin: this is a guarantee, not a timing bet.
             var (actualA, withinBoundA) = attribution.EndScenario(
                 "ScenarioA", output.CountUnhandledErrors, baselineA, allowedNewBackendErrors: 0);
-            Assert.True(withinBoundA); // scenario A's own check correctly sees nothing yet.
+            Assert.True(withinBoundA, "Scenario A's own check must pass -- its error has not been " +
+                "written to the child process yet.");
             Assert.Equal(baselineA, actualA);
 
+            // Now command the child to log the ERROR: line lagMs from now. The error is
+            // guaranteed to be "late" relative to scenario A's own check above (already done and
+            // passed), regardless of how large or small lagMs is.
+            await process.StandardInput.WriteLineAsync(
+                $"{lagMs}|ERROR:sonic-drive-in:late error from scenario A");
+
             // --- Scenario B ---
-            // Scenario B's own pre-body quiescence drain: its idle window (500ms, measured from
-            // the *last append* -- the body-output line above, not from whenever this drain
-            // happens to start -- see WaitForOutputQuiescenceAsync's own first-iteration idleNeeded
-            // math) comfortably outlasts the 300ms-out ERROR line, so the still-in-flight append
-            // interrupts and re-arms this wait instead of the wait concluding "quiet" beforehand;
-            // maxWait is generous so the cap is never in play. This proves it is scenario B's own
-            // drain that surfaces the late line, not some artificial wait inside the test itself.
-            var preBodyQuiescedB = await output.WaitForOutputQuiescenceAsync(
-                TimeSpan.FromMilliseconds(500), TimeSpan.FromMilliseconds(5000), ct);
-            Assert.True(preBodyQuiescedB, "Expected scenario B's own pre-body drain to observe the " +
-                "backend go quiet again once the late line from scenario A finally landed.");
+            // Wait on the real, monotonically-increasing unhandled-error COUNT itself -- not a
+            // string match, and not a fixed-duration idle window -- until it has provably risen
+            // past scenario A's own recorded count. This is re-evaluated every time a new line is
+            // appended, i.e. after ScanLine has actually incremented the count, so it can never
+            // observe a false match ahead of the real increment the way a text-based predicate
+            // could (Append enqueues a line before ScanLine increments the count). 30s is a
+            // generous cap, far larger than any lag exercised by this [Theory].
+            var errorLanded = await output.WaitForDiagnosticsAsync(
+                _ => output.CountUnhandledErrors() > actualA, TimeSpan.FromSeconds(30), ct);
+            Assert.True(errorLanded, "The late error from scenario A never landed within 30s.");
 
             var (_, strandedMessage) = attribution.BeginScenario(output.CountUnhandledErrors);
 
