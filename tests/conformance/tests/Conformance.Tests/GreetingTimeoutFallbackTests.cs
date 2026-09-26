@@ -42,6 +42,14 @@ public sealed class GreetingTimeoutFallbackTests(ShortTimersConformanceFixture f
         var bootstrap = await connection!.ReceivedFrames.WaitForAsync(f => f.Sequence == 0, FrameTimeout, ct);
         Assert.True(bootstrap is not null, "Bootstrap session.update never arrived.");
 
+        // #66 S2: taken before the frame that triggers rtmt.py's fallback-timeout log line, so
+        // the wait below only ever matches output captured from this point on. Without this, the
+        // predicate's Dump() read holds this whole ShortTimers collection's history -- an earlier
+        // ShortTimers scenario that also hit the 1s fallback under load would log the exact same
+        // warning and satisfy the check vacuously, without this scenario's own fallback having
+        // fired at all.
+        var diagnosticsWatermark = fixture.Backend!.DiagnosticsWatermark;
+
         await browser.SendStartSessionAsync(cancellationToken: ct);
 
         // Comfortably above the ShortTimers profile's ~1s override but well under the 5s
@@ -56,7 +64,14 @@ public sealed class GreetingTimeoutFallbackTests(ShortTimersConformanceFixture f
             "fallback wait for this backend process. If this backend used the 5s production " +
             "default instead, this would time out.");
 
-        var diagnostics = fixture.Backend!.DumpDiagnostics();
-        Assert.Contains("No session.updated within", diagnostics, StringComparison.Ordinal);
+        var diagnostics = await fixture.Backend!.WaitForDiagnosticsAsync(
+            d => d.Contains("No session.updated within", StringComparison.Ordinal), FrameTimeout, ct,
+            sinceWatermark: diagnosticsWatermark);
+        Assert.True(diagnostics,
+            "Expected the backend's captured stderr to eventually contain \"No session.updated " +
+            "within\" — the greeting fired via the fallback timeout above, so this line must " +
+            "already be logged or on its way; a synchronous DumpDiagnostics() read right after " +
+            "the greeting frame arrived can otherwise race the backend's own async stderr " +
+            "capture under load (#55).\n\n" + fixture.Backend!.DumpDiagnostics());
     });
 }

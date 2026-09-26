@@ -34,4 +34,50 @@ public interface IBackendUnderTest : IAsyncDisposable
     /// <see cref="ProcessBackend"/> overrides this meaningfully.
     /// </summary>
     int UnhandledErrorCount(Func<IReadOnlyList<string>, bool> isBenignIncident) => UnhandledErrorCount();
+
+    /// <summary>
+    /// Waits for a diagnostics snapshot satisfying <paramref name="predicate"/> to appear —
+    /// event-driven, not an instantaneous <see cref="DumpDiagnostics"/> read (#55: that read can
+    /// race a still-in-flight, asynchronously-captured stderr line under load even though the
+    /// condition it is proving already genuinely happened). <paramref name="sinceWatermark"/>
+    /// (#66 S2) scopes the predicate to output captured at or after a prior <see
+    /// cref="DiagnosticsWatermark"/> reading — 0, the default, means "the whole history", matching
+    /// this method's original (PR #66) behaviour. Default-implemented as a single instantaneous,
+    /// unscoped check so <see cref="ExternalBackend"/> (nothing is captured there) needs no
+    /// changes; only <see cref="ProcessBackend"/> overrides this to actually wait or scope.
+    /// </summary>
+    Task<bool> WaitForDiagnosticsAsync(
+        Func<string, bool> predicate,
+        TimeSpan timeout,
+        CancellationToken cancellationToken = default,
+        int sinceWatermark = 0) =>
+        Task.FromResult(predicate(DumpDiagnostics()));
+
+    /// <summary>
+    /// Opaque low/high-water mark for <see cref="WaitForDiagnosticsAsync"/>'s
+    /// <paramref name="sinceWatermark"/> (see <see cref="Harness.CapturedProcessOutput.Watermark"/>)
+    /// — take this before triggering the condition under test, then pass it back in so the
+    /// predicate only ever sees output captured at or after that point (#66 S2), not (for example)
+    /// an identically-worded diagnostic line an earlier scenario sharing this collection's backend
+    /// process happened to log first. Always 0 for <see cref="ExternalBackend"/> (nothing is
+    /// captured there, so there is nothing to scope).
+    /// </summary>
+    int DiagnosticsWatermark => 0;
+
+    /// <summary>
+    /// Waits for this backend's captured stdout/stderr to go quiet for a bit — see #62: draining
+    /// any output still in flight from a *previous* scenario before a caller snapshots a baseline
+    /// error count closes the window where that in-flight line could land just after the baseline
+    /// read and be misattributed to whatever runs next. Returns <c>true</c> once genuinely
+    /// quiescent, <c>false</c> if <paramref name="maxWait"/> elapsed first without ever observing a
+    /// full <paramref name="idleWindow"/> of silence (#66 S4) — callers decide how loudly to
+    /// surface that rather than have it silently mean "quiescent". Default-implemented as a no-op
+    /// returning <c>true</c> (nothing is captured for <see cref="ExternalBackend"/>, so it is
+    /// trivially already quiescent); only <see cref="ProcessBackend"/> overrides this meaningfully.
+    /// </summary>
+    Task<bool> WaitForOutputQuiescenceAsync(
+        TimeSpan idleWindow,
+        TimeSpan maxWait,
+        CancellationToken cancellationToken = default) =>
+        Task.FromResult(true);
 }

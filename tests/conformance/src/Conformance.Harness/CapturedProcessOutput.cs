@@ -21,13 +21,39 @@ public sealed class CapturedProcessOutput
     private ErrorScanState _scanState = ErrorScanState.Idle;
     private int _unhandledErrorCount;
 
+    // #55/#62: stdout/stderr arrives on a ThreadPool callback (Process.OutputDataReceived /
+    // ErrorDataReceived) some indeterminate time after the child process actually wrote the
+    // line -- under CPU/ThreadPool contention that lag can be large enough to race a caller
+    // that reads Dump()/CountUnhandledErrors() as an instantaneous snapshot right after some
+    // *other*, unrelated signal (a frame arriving over a different channel; a previous
+    // scenario's teardown finishing). Mirrors FrameLog's TaskCompletionSource-swap idiom
+    // (Conformance.Fakes/FrameLog.cs) so callers can react to new captured output the instant
+    // it lands instead of polling or guessing how long to sleep.
+    private readonly Lock _signalGate = new();
+    private TaskCompletionSource _signal = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    // #66 S1: the instant the most recently captured line was appended, guarded by the same
+    // _signalGate lock as _signal so a reader always sees a consistent (signal, timestamp) pair.
+    // Lets WaitForOutputQuiescenceAsync shortcut straight past its idle window when the backend
+    // is *already* silent instead of always paying that window's cost even though nothing was
+    // ever going to arrive. DateTimeOffset.MinValue (never appended) counts as "quiet forever".
+    private DateTimeOffset _lastAppendUtc = DateTimeOffset.MinValue;
+
     public void Attach(Process process)
     {
         process.OutputDataReceived += (_, e) => Append("OUT", e.Data);
         process.ErrorDataReceived += (_, e) => Append("ERR", e.Data);
     }
 
-    private void Append(string stream, string? line)
+    /// <summary>
+    /// #66 M2: internal rather than private so <c>CapturedProcessOutputTests</c> (see
+    /// <c>AssemblyInfo.cs</c>'s <c>InternalsVisibleTo</c>) can drive deterministic, no-process
+    /// unit tests of <see cref="WaitForDiagnosticsAsync"/>/<see
+    /// cref="WaitForOutputQuiescenceAsync"/> directly, instead of having to race a real child
+    /// process's own ThreadPool callback timing -- exactly the nondeterminism these wait methods
+    /// exist to protect callers from in the first place.
+    /// </summary>
+    internal void Append(string stream, string? line)
     {
         if (line is null)
         {
@@ -41,9 +67,175 @@ public sealed class CapturedProcessOutput
         }
 
         ScanLine(stream, line);
+
+        TaskCompletionSource released;
+        lock (_signalGate)
+        {
+            released = _signal;
+            _signal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            _lastAppendUtc = DateTimeOffset.UtcNow;
+        }
+        released.TrySetResult();
     }
 
     public string Dump() => string.Join(Environment.NewLine, _lines);
+
+    /// <summary>
+    /// Opaque watermark = total lines ever captured so far, independent of the bounded dump
+    /// buffer's eviction (<see cref="MaxLines"/>) -- pair with <see cref="DumpSince"/> or the
+    /// <c>sinceWatermark</c> parameter of <see cref="WaitForDiagnosticsAsync"/> to scope a
+    /// predicate to only what was captured at or after a point in time (#66 S2).
+    /// </summary>
+    public int Watermark => Volatile.Read(ref _count);
+
+    /// <summary>
+    /// Every currently-retained captured line appended at or after <paramref name="watermark"/>
+    /// (a value previously returned by <see cref="Watermark"/>). #66 S2: an unscoped <see
+    /// cref="Dump"/> holds this whole collection's history, so a caller's predicate can be
+    /// satisfied vacuously by an unrelated *earlier* scenario's identically-worded diagnostic line
+    /// (e.g. two ShortTimers scenarios both hitting the same fallback-timeout log message) --
+    /// scoping to "since I last checked" removes that false-positive window without needing the
+    /// backend to stamp anything session- or scenario-specific. If lines have since scrolled out
+    /// of the bounded dump buffer, this can only return a superset of "since the watermark" (same
+    /// as an unscoped <see cref="Dump"/>) -- degrading back to pre-#66 scoping for an abnormally
+    /// chatty run, never a new false negative.
+    /// </summary>
+    public string DumpSince(int watermark)
+    {
+        var snapshot = _lines.ToArray();
+        var totalEverAppended = Volatile.Read(ref _count);
+        var evictedBeforeSnapshot = Math.Max(0, totalEverAppended - snapshot.Length);
+        var skip = Math.Max(0, watermark - evictedBeforeSnapshot);
+        return string.Join(Environment.NewLine, snapshot.Skip(skip));
+    }
+
+    /// <summary>
+    /// Awaits the first already-captured or future output snapshot satisfying
+    /// <paramref name="predicate"/> (evaluated against <see cref="DumpSince"/>, scoped to
+    /// <paramref name="sinceWatermark"/> -- 0, the default, is equivalent to the whole <see
+    /// cref="Dump"/> history) -- event-driven, not a fixed-interval poll or an instantaneous
+    /// single read. Fixes #55: a synchronous <c>Dump()</c> read taken immediately after an
+    /// unrelated signal (e.g. a frame arriving on a different channel) can race a still-in-flight
+    /// stderr line under load; this reacts the instant the line actually lands instead. Returns
+    /// the last-seen snapshot's match result on timeout rather than throwing, so callers can
+    /// assert with a clear message; a genuine <paramref name="cancellationToken"/> cancellation
+    /// propagates instead of being swallowed as a timeout (#66 S3).
+    /// </summary>
+    public async Task<bool> WaitForDiagnosticsAsync(
+        Func<string, bool> predicate,
+        TimeSpan timeout,
+        CancellationToken cancellationToken = default,
+        int sinceWatermark = 0)
+    {
+        // #66 S3: one timeout task for the entire wait -- the previous version recomputed
+        // "remaining" and allocated a fresh Task.Delay on every wake, which also meant a
+        // cancelled delay winning Task.WhenAny fell through to a final predicate check instead of
+        // propagating the cancellation.
+        var timeoutTask = Task.Delay(timeout, cancellationToken);
+        while (true)
+        {
+            Task signalTask;
+            lock (_signalGate)
+            {
+                if (predicate(DumpSince(sinceWatermark)))
+                {
+                    return true;
+                }
+                signalTask = _signal.Task;
+            }
+
+            var completed = await Task.WhenAny(signalTask, timeoutTask).ConfigureAwait(false);
+            if (completed == timeoutTask)
+            {
+                // Rethrows only if cancellationToken (not the plain timeout) is what completed
+                // this task -- an ordinary elapsed timeout completes normally and falls through
+                // to the final check below.
+                await timeoutTask.ConfigureAwait(false);
+                return predicate(DumpSince(sinceWatermark));
+            }
+            // A new line landed (signalTask completed first) -- loop and re-check the predicate
+            // against the latest capture.
+        }
+    }
+
+    /// <summary>
+    /// Waits until no new stdout/stderr line has been captured for at least
+    /// <paramref name="idleWindow"/> (an explicit quiet-period signal, not a blind sleep), giving
+    /// up after <paramref name="maxWait"/> total regardless. Fixes #62: <see
+    /// cref="Conformance.Tests.ConformanceFixture.RunAsync(Func{Task}, int)"/> snapshots a
+    /// per-scenario baseline error count before running the scenario body; if a *previous*
+    /// scenario's own already-accounted-for stderr line was still in flight through the
+    /// ThreadPool callback at that instant, it could land just after this baseline snapshot and
+    /// get misattributed as a *new* error this scenario introduced. Draining any in-flight output
+    /// before the baseline is read closes that window without changing any existing timeout or
+    /// retrying the scenario itself.
+    /// <para>
+    /// #66 S1: when the backend has already been silent for a full <paramref name="idleWindow"/>
+    /// (the common case -- most scenario boundaries have nothing in flight at all), this returns
+    /// immediately instead of always paying the window's cost regardless. Neither this fast path
+    /// nor the debounce loop below it can ever observe a line that genuinely hasn't been
+    /// dispatched yet, so the fast path changes nothing about what this method can detect --only
+    /// how long it takes when there is nothing to detect.
+    /// </para>
+    /// <para>
+    /// Returns <c>true</c> once the backend has gone quiet for a full <paramref
+    /// name="idleWindow"/>; <c>false</c> if <paramref name="maxWait"/> elapsed first (#66 S4) --
+    /// still never throws for a mere cap hit, only for a genuine <paramref
+    /// name="cancellationToken"/> cancellation (#66 S3), so callers can decide how loudly to
+    /// surface a cap hit rather than have it silently mean "quiescent".
+    /// </para>
+    /// </summary>
+    public async Task<bool> WaitForOutputQuiescenceAsync(
+        TimeSpan idleWindow,
+        TimeSpan maxWait,
+        CancellationToken cancellationToken = default)
+    {
+        var deadline = DateTimeOffset.UtcNow + maxWait;
+        var firstIteration = true;
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var remaining = deadline - DateTimeOffset.UtcNow;
+            if (remaining <= TimeSpan.Zero)
+            {
+                return false;
+            }
+
+            Task signalTask;
+            TimeSpan idleNeeded;
+            lock (_signalGate)
+            {
+                signalTask = _signal.Task;
+                // #66 S1 fast path: only ever applies on the FIRST iteration -- every later
+                // iteration got here because a new line just landed and re-armed the debounce, so
+                // this can only ever shortcut the common "already silent" case, never a line still
+                // being dispatched.
+                var quietFor = firstIteration ? DateTimeOffset.UtcNow - _lastAppendUtc : TimeSpan.Zero;
+                idleNeeded = quietFor >= idleWindow ? TimeSpan.Zero : idleWindow - quietFor;
+            }
+            firstIteration = false;
+
+            if (idleNeeded <= TimeSpan.Zero)
+            {
+                // Already quiet for a full idle window -- nothing to wait for at all.
+                return true;
+            }
+
+            var cappedByDeadline = remaining < idleNeeded;
+            var waitFor = cappedByDeadline ? remaining : idleNeeded;
+            var idleTask = Task.Delay(waitFor, cancellationToken);
+            var completed = await Task.WhenAny(signalTask, idleTask).ConfigureAwait(false);
+            if (completed == idleTask)
+            {
+                await idleTask.ConfigureAwait(false); // rethrows only for a genuine cancellation.
+                // waitFor was clipped to whatever was left of maxWait (never a full idle window):
+                // the cap was hit before quiescence was ever observed, not the other way around.
+                return !cappedByDeadline;
+            }
+            // A new line landed (signalTask completed first) -- loop and re-arm a fresh idle
+            // window instead of returning early on a stale one.
+        }
+    }
 
     /// <summary>
     /// Counts unhandled-error incidents in captured stderr — a python.exe subprocess implementation

@@ -152,5 +152,14 @@ public sealed class ToolErrorSessionSurvivesTests(ConformanceFixture fixture)
             nextIndex, ct);
         var order = JsonDocument.Parse(next.ToolResultJson!).RootElement;
         Assert.Equal(1, order.GetProperty("items").GetArrayLength());
-    }, allowedNewBackendErrors: 1);
+    }, allowedNewBackendErrors: 0);
+    // #66 (non-blocking, verified): tools.py::update_order's #36 fix (see the required-argument
+    // validation block a few lines above item_name = args["item_name"]) now catches a missing
+    // "item_name" before ever reaching the bare-KeyError path this test's own docstring describes
+    // -- it logs at logger.warning (not logger.exception/ERROR) and returns the same graceful
+    // ToolResult as the "application-level" scenario above. CountUnhandledErrors only counts
+    // ERROR:-level lines and Python tracebacks (see its own doc comment), so this WARNING no
+    // longer counts as one; confirmed by running this scenario with allowedNewBackendErrors: 0
+    // and observing it still pass. The stale allowedNewBackendErrors: 1 this line replaced dated
+    // from before the #36 fix landed and was never revisited.
 }
