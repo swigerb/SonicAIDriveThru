@@ -88,6 +88,18 @@ public class ConformanceFixture : IAsyncLifetime
             Backend = await BackendLauncherFactory.StartAsync(
                 Realtime.BaseUri, Search.BaseUri, port, extraEnvironment: Profile.ExtraEnvironment, deployment: Deployment)
                 .ConfigureAwait(false);
+
+            // #66 re-review, R1(c): seed the attribution's watermark from the count observed the
+            // moment the backend finishes starting, labelled as a pseudo-scenario distinct from
+            // any real scenario name AND from ScenarioErrorAttribution's own "<unknown scenario>"
+            // fallback for a genuinely missing history. Without this, the very first real
+            // scenario's own pre-body charge would see the whole of any startup-time error count
+            // as "stranded since the beginning of time" and, if it exceeded that scenario's own
+            // allowance, fail misleadingly naming "<unknown scenario>". If a startup line is still
+            // trickling in as the first scenario begins, this at least names it clearly instead of
+            // blaming a scenario that never ran.
+            _errorAttribution.RecordScenarioChecked(
+                ScenarioErrorAttribution.StartupScenarioName, Backend.UnhandledErrorCount(), unusedAllowance: 0);
         }
         catch (ConformanceBackendNotImplementedException ex)
         {
@@ -227,17 +239,35 @@ public class ConformanceFixture : IAsyncLifetime
         // the previous scenario's own post-body check against THAT scenario's leftover allowance
         // (see ScenarioErrorAttribution), and fail loudly -- naming that scenario -- if it had
         // none left, instead of folding the line into this scenario's baseline unnoticed.
+        //
+        // #66 re-review, R2: BeginScenario takes exactly ONE UnhandledErrorCount() read and reuses
+        // it both for the charge above and as this scenario's own baseline below -- the original
+        // M1 fix took two separate reads back-to-back here, so a line landing in the gap between
+        // them was neither charged to the previous scenario nor counted in this scenario's own
+        // baseline (silently lost).
         var preBaselineQuiesced = true;
+        var baselineUnhandledErrors = 0;
+        string? strandedMessage = null;
         if (Backend is not null)
         {
             preBaselineQuiesced = await Backend.WaitForOutputQuiescenceAsync(
                 BaselineQuiescenceWindow, BaselineQuiescenceMaxWait, TestContext.Current.CancellationToken)
                 .ConfigureAwait(false);
 
-            var strandedMessage = _errorAttribution.ChargeStrandedErrorsToPreviousScenario(
-                Backend.UnhandledErrorCount());
+            (baselineUnhandledErrors, strandedMessage) = _errorAttribution.BeginScenario(Backend.UnhandledErrorCount);
+        }
+
+        var postBodyRecorded = false;
+        try
+        {
             if (strandedMessage is not null)
             {
+                // #66 re-review, R1(b): this Assert.Fail now runs INSIDE the try/finally (it used
+                // to run before the try even started) so the finally below still records this
+                // scenario's own watermark -- otherwise every following scenario re-charged the
+                // same stranded line(s) against the same previous scenario, cascading one late
+                // error into a failure for the rest of the collection.
+                //
                 // #66 S4: hitting the quiescence cap is no longer silent -- surfaced here because
                 // it directly explains why a line could have still been "stranded" past even the
                 // drain above.
@@ -247,12 +277,7 @@ public class ConformanceFixture : IAsyncLifetime
                       $"its {BaselineQuiescenceMaxWait} cap without the backend ever going fully " +
                       "quiet, so there may be even more still in flight.)");
             }
-        }
-        var baselineUnhandledErrors = Backend?.UnhandledErrorCount() ?? 0;
 
-        var scenarioSucceeded = false;
-        try
-        {
             await body().ConfigureAwait(false);
 
             // Let every connection this scenario touched actually finish closing before checking
@@ -302,15 +327,23 @@ public class ConformanceFixture : IAsyncLifetime
                 var postBodyQuiesced = await Backend.WaitForOutputQuiescenceAsync(
                     BaselineQuiescenceWindow, BaselineQuiescenceMaxWait, TestContext.Current.CancellationToken)
                     .ConfigureAwait(false);
-                var actual = Backend.UnhandledErrorCount();
-                Assert.True(actual <= baselineUnhandledErrors + allowedNewBackendErrors,
+
+                // #66 re-review, R2: EndScenario takes exactly ONE read too, reused both for the
+                // bound check below and for the watermark/allowance recorded for the NEXT
+                // scenario's own BeginScenario charge -- the original M1 fix re-read the count a
+                // second time in this method's own `finally` for exactly that record, which could
+                // observe one more stray line than this check saw and silently drop it (neither
+                // charged nor checked).
+                var (actual, withinBound) = _errorAttribution.EndScenario(
+                    scenarioName, Backend.UnhandledErrorCount, baselineUnhandledErrors, allowedNewBackendErrors);
+                postBodyRecorded = true;
+                Assert.True(withinBound,
                     $"Expected at most {allowedNewBackendErrors} new backend error(s) above the " +
                     $"baseline of {baselineUnhandledErrors}, but observed {actual}." +
                     (postBodyQuiesced ? "" : " (This scenario's own post-body quiescence wait hit " +
                       $"its {BaselineQuiescenceMaxWait} cap without the backend ever going fully " +
                       "quiet, so there may be even more still in flight.)"));
             }
-            scenarioSucceeded = true;
         }
         catch (Exception ex) when (Backend is not null)
         {
@@ -319,18 +352,19 @@ public class ConformanceFixture : IAsyncLifetime
         }
         finally
         {
-            // #66 M1: recorded regardless of outcome, so the NEXT scenario's own charge above has
-            // an accurate watermark. A scenario that never reached its own "actual" check (it
-            // threw for an unrelated reason, or that check itself failed) leaves 0 unused
+            // #66 M1 / re-review R1(b): recorded regardless of outcome (a failed stranded-error
+            // charge, the scenario's own body throwing, a settle timeout, a handler fault, or any
+            // other exception), so the NEXT scenario's own BeginScenario charge has an accurate
+            // watermark. A scenario that never reached its own post-body check above (it threw for
+            // an unrelated reason, or the stranded-error charge itself failed) leaves 0 unused
             // allowance behind -- conservative, so nothing more is silently absorbed on its
             // behalf, but never blocks a later, unrelated scenario from passing on its own merits.
-            if (Backend is not null)
+            // If EndScenario above already ran (and already recorded via RecordScenarioChecked),
+            // this must NOT record a second time with a fresh re-read -- that would itself be
+            // exactly the double-read/lost-line class R2 closes, just one level up.
+            if (Backend is not null && !postBodyRecorded)
             {
-                var countNow = Backend.UnhandledErrorCount();
-                var unusedAllowance = scenarioSucceeded
-                    ? allowedNewBackendErrors - (countNow - baselineUnhandledErrors)
-                    : 0;
-                _errorAttribution.RecordScenarioChecked(scenarioName, countNow, unusedAllowance);
+                _errorAttribution.RecordScenarioFailed(scenarioName, Backend.UnhandledErrorCount);
             }
         }
     }

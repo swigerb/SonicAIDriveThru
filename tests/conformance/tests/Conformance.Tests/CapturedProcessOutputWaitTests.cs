@@ -292,6 +292,13 @@ public sealed class CapturedProcessOutputWaitTests
     /// writing <c>message</c> to stderr and looping back to <c>input()</c> -- so this test commands
     /// precisely-timed asynchronous stderr output with zero wall-clock racing, reproducing Rick's
     /// own PR #66 review repro (a child process that "writes an ERROR: line on cue") deterministically.
+    /// Re-review update (R2): now drives <see cref="ScenarioErrorAttribution.BeginScenario"/>/
+    /// <see cref="ScenarioErrorAttribution.EndScenario"/> directly -- the same single-read entry
+    /// points <c>ConformanceFixture.RunAsync</c> itself calls -- rather than hand-wiring the raw
+    /// <see cref="ScenarioErrorAttribution.ChargeStrandedErrorsToPreviousScenario"/>/
+    /// <see cref="ScenarioErrorAttribution.RecordScenarioChecked"/> pair, which is exactly how the
+    /// fixture's own R1 bug (Assert.Fail running outside its try/finally) previously slipped past
+    /// this test undetected.
     /// </summary>
     [Fact]
     public async Task Fixture_level_M1_late_error_from_scenario_A_is_attributed_to_A()
@@ -337,9 +344,8 @@ public sealed class CapturedProcessOutputWaitTests
         try
         {
             // --- Scenario A ---
-            var strandedBeforeA = attribution.ChargeStrandedErrorsToPreviousScenario(output.CountUnhandledErrors());
+            var (baselineA, strandedBeforeA) = attribution.BeginScenario(output.CountUnhandledErrors);
             Assert.Null(strandedBeforeA); // nothing has run yet -- no history to charge against.
-            var baselineA = output.CountUnhandledErrors();
 
             // Scenario A's body: first an immediate, harmless line -- purely so the drain below
             // genuinely has to debounce (arms a recent _lastAppendUtc) instead of trivially
@@ -365,11 +371,19 @@ public sealed class CapturedProcessOutputWaitTests
             // line, which is the only thing this test needs from it.
             await output.WaitForOutputQuiescenceAsync(
                 TimeSpan.FromMilliseconds(100), TimeSpan.FromMilliseconds(150), ct);
-            var actualA = output.CountUnhandledErrors();
-            Assert.Equal(baselineA, actualA); // scenario A's own check correctly sees nothing yet.
 
-            attribution.RecordScenarioChecked(
-                "ScenarioA", checkedAgainstCount: actualA, unusedAllowance: 0 /* allowedNewBackendErrors: 0, none unused */);
+            // #66 re-review, R2/R1(b): routed through BeginScenario/EndScenario -- the exact same
+            // single-read entry points ConformanceFixture.RunAsync itself calls -- rather than the
+            // raw ChargeStrandedErrorsToPreviousScenario/RecordScenarioChecked pair this test used
+            // to call directly. Rick's PR #66 re-review flagged that hand-wiring the lower-level
+            // methods here let the fixture's own real bug (R1: Assert.Fail running outside its
+            // try/finally) slip through this test undetected -- this real-process test now
+            // exercises the same production entry points the unit tests in
+            // ScenarioErrorAttributionTests also exercise, just against a real async stderr feed.
+            var (actualA, withinBoundA) = attribution.EndScenario(
+                "ScenarioA", output.CountUnhandledErrors, baselineA, allowedNewBackendErrors: 0);
+            Assert.True(withinBoundA); // scenario A's own check correctly sees nothing yet.
+            Assert.Equal(baselineA, actualA);
 
             // --- Scenario B ---
             // Scenario B's own pre-body quiescence drain: its idle window (500ms, measured from
@@ -384,7 +398,7 @@ public sealed class CapturedProcessOutputWaitTests
             Assert.True(preBodyQuiescedB, "Expected scenario B's own pre-body drain to observe the " +
                 "backend go quiet again once the late line from scenario A finally landed.");
 
-            var strandedMessage = attribution.ChargeStrandedErrorsToPreviousScenario(output.CountUnhandledErrors());
+            var (_, strandedMessage) = attribution.BeginScenario(output.CountUnhandledErrors);
 
             Assert.NotNull(strandedMessage);
             Assert.Contains("ScenarioA", strandedMessage);
