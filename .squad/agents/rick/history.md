@@ -54,3 +54,7 @@
   - R3 guard scans source as well as locales, so a leftover can't come back through a component.
   - Left alone deliberately: the internal `voicerag` logger name in `setup_search_index.py`, the VoiceRAG attribution in README / `voice_rag_README.md`, unused `groundingFiles.*` keys.
   - Deploy-only: real Azure rate-limit error shape and retry hint; a live retry regenerating the answer; clip autoplay on devices; the postdeploy smoke hook under azd.
+
+## 2026-09-25 — Team update
+
+- **PR #66 awaits Rick review:** Birdperson's conformance suite flakes fix (issues #55/#62) merged to dev branch, 12/12 test classes green, awaiting approval before main merge.

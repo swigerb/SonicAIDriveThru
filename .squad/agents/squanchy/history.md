@@ -125,3 +125,5 @@
   - **Worktree venv:** a plain copy of the repo-root `.venv` into a worktree works without any relinking — `pyvenv.cfg`'s `home` path points at the system Python interpreter, unaffected by the venv directory being copied elsewhere. No junctions/symlinks needed.
   - Validated: 15/15 green unloaded, 15/15 green under 24 CPU-busy processes (one per core, confirmed 100% CPU via `Get-Counter`, all stopped by PID after). 35/35 harness unit tests, 3 consecutive 458/458 full conformance suite runs, `pytest` 875 passed/125 subtests, `ruff check .` clean. PR CI all 6 checks green at `086654b`.
   - Commit: `086654b`. Decision logged: `.squad/decisions/inbox/squanchy-pr66-r4.md`. Commented on PR #66 addressed to Rick. Not merged.
+  - **PR #66 merged as 7ca056d (2026-09-25):** Rick approved at 8b5094a. Coordinator squash-merged with message "Refs #55, #62". Participated in round 4 revision de-flaking timing-dependent test via structural fix and event-driven poll. Lesson: event-driven waits preferred over wall-clock margins; attribute errors to the scenario that caused them; never rely on timing windows in tests under parallel load.
+

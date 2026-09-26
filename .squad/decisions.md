@@ -728,3 +728,478 @@
 - All meaningful changes require team consensus
 - Document architectural decisions here
 - Keep history focused on work, decisions focused on direction
+
+
+#### 2026-09-23: .NET 11 xUnit v3 harness implementation details (Beth)
+**By:** Beth (.NET implementation) — suite designed with Birdperson, CI consumer is Squanchy
+**Issue:** #7 (S1.1), branch `feat/conformance-harness`
+
+**Toolchain:** SDK `11.0.100-rc.1.26425.128` (per-user install, not on PATH — called by full path throughout). `global.json` pins it with `rollForward: latestFeature`, `allowPrerelease: true`. Central Package Management (`Directory.Packages.props`) — no per-project versions. Packages restore only through `packagefeedproxy.microsoft.io`; confirmed working for `xunit.v3`, `Microsoft.AspNetCore.Mvc.Testing`, `YamlDotNet` was not actually needed (menu JSON and config are all plain JSON/env vars — no YAML parsing in the harness itself).
+
+**`.slnx` hand-authoring:** `dotnet sln Conformance.slnx add <project>` throws on this SDK build (CLI bug against the new `.slnx` XML format). Worked around by hand-writing the `.slnx` XML directly — a `<Project Path="..."/>` per project, verified it still opens/builds/tests identically to a generated one.
+
+**xUnit v3 APIs confirmed correct (previously assumed):** `Assert.Skip(string)` for the `CONFORMANCE_BACKEND=dotnet` placeholder path, `Xunit.TestContext.Current.CancellationToken` for every async wait, `IAsyncLifetime` returning `ValueTask` for fixture setup/teardown. All build and run clean with 0 warnings under `TreatWarningsAsErrors` + `Nullable=enable`.
+
+**Bug found and fixed — WebSocket server-side close handshake:** When `System.Net.WebSockets.WebSocket`'s `ReceiveAsync` returns a client-initiated close frame, `socket.State` becomes `CloseReceived`, not `Open`. `FakeRealtimeUpstreamServer`'s original guard (`if (socket.State == WebSocketState.Open)`) skipped completing the handshake in that case, so the *client's* `CloseAsync()` threw `WebSocketException: remote party closed the WebSocket connection without completing the close handshake` — this broke 3 of the fake-only scripting tests on first run. Fixed by checking `socket.State is WebSocketState.Open or WebSocketState.CloseReceived` and wrapping the close call in try/catch for `WebSocketException` (best-effort, since the peer may already be gone).
+
+**Bug found and fixed — health check assertion:** `HealthEndpointTests` originally did a raw substring match for `"status":"healthy"`, but the real payload is pretty/spaced JSON (`"status": "healthy"`). Rewrote to parse via `JsonDocument` and assert on `GetProperty("status").GetString()`.
+
+**Cross-platform fix for CI (#11):** `RepoPaths.PythonExecutable()` was hardcoded to `.venv/Scripts/python.exe` (Windows venv layout). GitHub-hosted Linux runners create venvs at `.venv/bin/python`. Branched on `OperatingSystem.IsWindows()`. Also swapped a hardcoded backslash in `PythonBackendLauncher`'s "venv not found" exception message for `Path.Combine`. Verified no regression: 8/8 green, 3× in a row, on Windows after the change.
+
+**C# standards followed:** nullable enabled + warnings-as-errors in every suite project; `TimeProvider` not directly needed (the harness doesn't fake time itself — that's Summer's Python-side `test_hooks.py`), but all async waits use `CancellationToken`s end-to-end and no `Thread.Sleep`/`Task.Delay`-for-synchronization — every wait is `FrameLog.WaitForAsync(predicate, timeout, cancellationToken)` against recorded frames.
+
+**Validation:** `dotnet test tests/conformance` green 3× in a row at three separate points in the work (initial 8/8, after Python test-hook changes, after the cross-platform fix) — no flakiness observed. `git status` clean; `.gitignore` correctly excludes `bin/`/`obj/` (verified nothing leaked into the initial commit).
+
+
+#### 2026-09-24: Full GA response item lifecycle in FakeRealtimeUpstreamServer (Beth)
+**By:** Beth (.NET implementation)
+**Issue:** #7, branch `feat/conformance-harness`, PR #22, Rick's review items 2, 3, 4, 5
+
+**What changed in `RespondAsync`:** previously the fake emitted a flat sequence — `response.created`, a run of `response.output_audio.delta`/`response.function_call_arguments.done` events, then `response.done`. GA's real contract nests every output under a proper item lifecycle. The rewrite now emits, per response:
+- One `response.output_item.added` (with `item.type`, `item.id`) followed by `conversation.item.added` for each logical output item — either an assistant "message" item (opened lazily on the first `AudioDeltaEvent`) or a `function_call` item (one per `FunctionCallEvent`).
+- For the message item: `response.content_part.added` once, then one `response.output_audio.delta` per scripted audio event, closed by `response.output_audio.done` → `response.content_part.done` → `response.output_item.done` — the audio item is closed automatically before a function-call item opens, since GA never interleaves two open items.
+- For a function-call item: `response.function_call_arguments.done` (carrying the full arguments JSON) → `response.output_item.done`, no content-part events (function calls have no audio/text parts).
+- Every event now carries a real `event_id` (`NewEventId()`), and every item-scoped event additionally carries `item_id`, `output_index`, and `content_index` (`0` for function calls, matching GA).
+- The final `response.done` accumulates all closed items into `response.output[]` and includes a new `BuildUsage(...)` helper producing a plausible GA-shaped `usage` object (`total_tokens`, `input_tokens`, `output_tokens`, nested `input_token_details`/`output_token_details`). No test currently asserts exact token counts — this is deliberately "shaped like GA" per the issue wording, not GA-exact, and is flagged as an extension point if a future scenario needs precise accounting.
+
+**Why this fixes item 2 (missing `extension.round_trip_token`):** confirmed by reading `app/backend/rtmt.py` (read-only, no changes) that `_process_message_to_client`'s `response.done` handling does `output = message["response"]["output"]` **unconditionally**, with no `.get()` guard, at line ~874. A `response.done` lacking `output` (the fake's old shape) throws `KeyError: 'output'`, which is caught by `_forward_messages`'s outer `except Exception: logger.exception(...)` — but that handler doesn't resume the loop, it lets the exception propagate out of the `asyncio.gather()` of both forwarding directions, **silently killing the whole WebSocket connection** from the browser's perspective. The browser never sees an error frame; it just stops receiving anything, including `extension.round_trip_token`. Making the fake's `response.done` always carry `output[]` + `usage` (matching GA) makes this code path succeed instead of throwing.
+
+**Mutation-check (item 2), full before/after:**
+- **Before (mutant):** temporarily stripped `output`/`usage` keys from the fake's `response.done` body. Reran `ResponseDoneRoundTripTests` alone: **failed**, with the captured backend stderr showing:
+  ```
+  Traceback (most recent call last):
+    ...
+    File ".../app/backend/rtmt.py", line 874, in _process_message_to_client
+      output = message["response"]["output"]
+                ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^
+  KeyError: 'output'
+  ```
+  (pasted in full in commit `688d713`'s message)
+- **After (restored):** reran the same test — **passed**; ran the full suite — 13/13 (this test alone raised the count from 12→13; item 3's test later brought it to 14). `git status` clean except the intended new test file.
+
+**Why item 3 needed the same rewrite:** proving `update_order` "actually executes" requires the full round trip — `output_item.added` → `conversation.item.added` (with `item.call_id`/`item.name`/`item.arguments`) → `function_call_arguments.done` → `output_item.done` → `response.done` with the item present in `output[]` — because `rtmt.py`'s tool-calling logic (`tools_pending`, `previous_item_id` chaining) keys off exactly these fields to know when to invoke the tool and where to attach the resulting `function_call_output`. Added `RealtimeSessionState.LastConversationItemId` to correctly chain `previous_item_id` across responses, matching how `rtmt.py` reads `message.get("previous_item_id", "")`.
+
+**Item 4 (`AssistantAudioSeen`):** set the flag the moment the first `response.output_audio.delta` is emitted (not at `response.done`), since GA's real `cannot_update_voice` restriction applies as soon as any assistant audio has started streaming, not only after a full response completes. New self-test drives a real scripted response to completion, then proves a subsequent voice change in `session.update` is rejected with the correct error code and echoed `event_id`.
+
+**Item 5 (per-connection identity), engine-side implication:** `RespondAsync` and all scripting state now operate against a `FakeRealtimeConnection` instance rather than shared server fields, so two connections' in-flight responses can never cross-contaminate each other's frame logs — a prerequisite for items 2/3's scenarios to assert reliably on "their own" connection's frames.
+
+**Validation:** full suite green 3× in a row from a genuinely clean state (14/14, ~1s per run) after restoring `app/backend/static` (moved aside earlier to prove item 1's fail-fast message fires correctly). `pytest app/backend/tests -q`: 586 passed / 61 subtests (unchanged baseline — no Python changes this round). `ruff check .` clean. `npm test` in `app/frontend`: 116 passed (unchanged — no frontend changes this round). `git status` clean; no `bin/`/`obj/` tracked (`tests/conformance/.gitignore` verified via `git check-ignore -v`).
+
+
+#### 2026-09-23: Black-box conformance suite design (Birdperson)
+**By:** Birdperson (suite design/ownership) — with Beth (.NET implementation), Summer (Python test hooks), Squanchy (CI)
+**Issue:** #7 (S1.1), branch `feat/conformance-harness`
+
+**What:** `tests/conformance/` is a standalone .NET 11 xUnit v3 solution (`Conformance.slnx`, hand-authored — `dotnet sln add` has a CLI bug against `.slnx` on this SDK) with three projects:
+- `Conformance.Fakes` — `FakeRealtimeUpstreamServer` (Kestrel; GA realtime protocol at `/openai/v1/realtime?model=`, `GaSessionValidator`, `FrameLog`, `RealtimeScript` for per-test scripting of audio deltas/function calls/`response.done`/errors) and `FakeSearchServer` (Kestrel; answers Azure AI Search REST from `menuItems.json`).
+- `Conformance.Harness` — `PythonBackendLauncher` + `BackendEnvironment` + `RepoPaths` (starts `app/backend` in its `.venv` on a free port, pointed at the fakes, waits on `/health`, captures stdout/stderr), `BackendLauncherFactory` (dispatches on `CONFORMANCE_BACKEND=python|dotnet`, `dotnet` throws a typed `ConformanceBackendNotImplementedException` callers turn into a clean `Assert.Skip`, or honours `CONFORMANCE_BACKEND_URL` to point at an already-running backend), `RealtimeBrowserClient` (sends exactly what `useRealtime.tsx` sends), `NetworkUtils.GetFreeTcpPort`.
+- `Conformance.Tests` — 5 test classes, `ConformanceFixture`/`ConformanceCollection` for one shared fake-server + backend-process lifetime per test class.
+
+**Scenarios (8 total, all green):**
+1. `SmokeSessionBootstrapTests` (2 tests) — the acceptance scenario: connect → bootstrap `session.update` (4 tools, `tool_choice=auto`) is upstream frame 0 → browser `session.update` relayed (GA-translated) → greeting `response.create` arrives only after `session.updated`.
+2. `HealthEndpointTests` — `/health` returns 200 with `{"status":"healthy",...}` (parsed as JSON, not raw substring — the real payload has spaces after colons).
+3. `AuthSessionTests` — `/api/auth/session` returns a token.
+4. `WebSocketCompressionTests` — permessage-deflate is not negotiated (matches the `fix/ws-transport` decision: `connection.ws_compression: false`).
+5. `FakeRealtimeScriptingTests` (3 tests) — exercises the fake's scripting API directly (audio deltas, function calls, rate-limited `response.done` with hints) without the Python backend, proving the fakes work standalone.
+
+**Mutation-check (bootstrap send removed from `rtmt.py`):**
+```
+Before fix removed:  Passed! - Failed: 0, Passed: 8, Skipped: 0, Total: 8
+After commenting out the bootstrap session.update send in rtmt.py:
+  Failed! - Failed: 2, Passed: 6, Skipped: 0, Total: 8
+  SmokeSessionBootstrapTests.Bootstrap_session_update_is_first_upstream_frame [FAIL]
+    Expected an upstream frame at index 0 recording a session.update within 00:00:30.
+  SmokeSessionBootstrapTests.Greeting_waits_for_session_updated [FAIL]
+    Bootstrap session.update never arrived.
+After restoring rtmt.py (git diff clean):
+  Passed! - Failed: 0, Passed: 8, Skipped: 0, Total: 8
+```
+Confirms the smoke scenario actually exercises the real backend behavior, not just the fakes.
+
+**`CONFORMANCE_BACKEND=dotnet` skip path verified:** 5 backend-dependent tests skip cleanly with a clear reason ("S2 placeholder"), 3 fake-only scripting tests still run and pass, overall run reports `Passed!` (0 failed, 5 skipped) — a future S2 .NET backend won't need this suite rewritten, just `BackendLauncherFactory`'s `dotnet` branch filled in.
+
+**Extension points left for S1.2–S1.4:** `FakeRealtimeScriptingTests` is the template for new upstream-behavior scenarios (rate limiting with hints, `response.done` failures, function-call round trips already scripted end-to-end); `RealtimeScript`'s queued-response model (one scripted response per `response.create` seen, FIFO) is reusable for any new scenario without touching the fake server itself; `ConformanceFixture` is the one place a new test class needs to hook into for a fresh backend+fakes lifetime.
+
+**Determinism:** ran the full suite 3× in a row green (no flaky timing) both before and after Summer's Python test-hook changes and Beth's cross-platform fix; `FrameLog.WaitForAsync`-style awaits with timeouts are used everywhere instead of sleeps.
+
+
+# Learning: conformance flakes #55/#62 — instantaneous stderr checks race the async capture callback
+
+**From:** Birdperson (Tester), 2026-09-25, branch `squad/55-62-conformance-flakes`, PR #66.
+
+## What happened
+
+Two intermittent conformance-suite flakes (#55 `GreetingTimeoutFallbackTests`, #62
+`UpdateOrderToolCallTests.Scripted_update_order_call_executes_and_notifies_the_browser`)
+were the same class as the earlier #52/#54 timing races, but with a subtly different
+mechanism worth recording for future harness work (see also #63's N32, which is the
+same underlying symptom from a different angle):
+
+`CapturedProcessOutput` fills asynchronously via the .NET `Process.ErrorDataReceived`
+event, dispatched on the ThreadPool. Any code that reads from it — `Dump()`,
+`CountUnhandledErrors()` — does so **instantaneously**: it returns whatever has been
+appended *so far*, with no guarantee that a line already "in flight" through the
+async callback has actually landed yet. Under normal (unloaded) conditions the
+ThreadPool dispatches fast enough that this race window never fires. Under
+full-suite load (many other tests contending for the ThreadPool and CPU), the window
+widens and the race becomes observable, at a low, inherently intermittent rate.
+
+Two different call sites hit this race in two different ways:
+- **#55**: the test itself did an instantaneous `Dump()` right after an unrelated
+  frame arrived on a separate channel, with no synchronization to the diagnostics
+  line actually being captured yet.
+- **#62**: the *shared fixture* (`ConformanceFixture.RunAsync`) captured a
+  `baselineUnhandledErrors` snapshot instantaneously at scenario start, while a
+  previous scenario's own already-accounted-for stderr line could still be
+  in-flight. If it landed after the new baseline snapshot, it was misattributed as
+  a *new* error the current (unrelated) scenario introduced.
+
+## The fix pattern
+
+Both fixes replace an instantaneous read with an **event-driven wait**, reusing the
+same idiom `FrameLog` already established for frame waits: swap out a
+`TaskCompletionSource` on every `Append()`, and let waiters await either "a specific
+predicate becomes true" (`WaitForDiagnosticsAsync`) or "no new output has landed for
+an idle window" (`WaitForQuiescenceAsync`, debounce-style, capped by a max wait so it
+can never hang forever). Neither approach bumps a timeout number or adds a blind
+retry — both make the check actually synchronize with the real event it's supposed
+to be checking.
+
+**General principle for this harness:** any code that reads captured process
+output/diagnostics for a correctness check (not just a debug dump) should default to
+requiring an explicit wait primitive, not an instantaneous read, whenever the check
+could plausibly run concurrently with in-flight async capture. Instantaneous reads
+are fine for genuinely-after-the-fact diagnostics dumps (e.g. inside a `catch` block
+building a failure message *after* everything else has already settled).
+
+## Mutation-check learning
+
+For the shared zero-tolerance backend-error-count check (#62's fix, exercised
+indirectly by every strict-mode test via `ConformanceFixture.RunAsync`), the first
+mutation target chosen (`ToolErrorSessionSurvivesTests`) unexpectedly did **not**
+fail when tightened from `allowedNewBackendErrors: 1` to `0`. Investigation
+concluded that test doesn't reliably produce a countable new-error delta in
+isolation the way the docstring implies — worth a follow-up look, but out of scope
+for this fix. Switched instead to `ToolMalformedArgumentsTests` (which deliberately
+drives rtmt.py's layer-1 `except Exception` path via malformed, non-JSON tool-call
+arguments — a documented, deterministic single-error path referencing #36 S3), which
+mutated and failed exactly as expected. **Lesson:** when choosing a mutation target
+for a shared invariant, prefer the test whose docstring/name most directly documents
+*why* it produces the exact error count it asserts, not just any test that happens
+to pass a non-default parameter — the assumption that "any test using
+`allowedNewBackendErrors: N > 0` reliably produces exactly N new errors every run"
+is not automatically safe.
+
+## Load calibration for reproducing this flake class
+
+On the dev machine used (24 logical cores), CPU-busy-job load below ~20 jobs barely
+reproduces #55/#62-class races (very sparse — 0 hits in 30 sequential runs at times).
+20 jobs is a reasonable calibrated target: enough contention to widen the async race
+window without tripping the many unrelated 30s teardown timeouts elsewhere in the
+suite. 40 jobs is too much: it causes wholesale, unrelated breakage (ThreadPool/CPU
+starvation trips generous timeouts across many unrelated tests) that is not
+representative of these specific tight races — don't mistake that for evidence
+either for or against a specific fix.
+
+Also: running **multiple concurrent `dotnet test` processes** against the same
+worktree is not equivalent to "load" for this suite's purposes — it introduces a
+confound (port-bind collisions between unrelated collections' backend/fake-upstream
+port selection) that looks like new failures but has nothing to do with #55/#62's
+actual reported failure mode (sequential full-suite runs). Use CPU-busy background
+jobs plus a single sequential `dotnet test` process for genuine load reproduction.
+
+
+#### 2026-09-24: Stage A response to Rick's PR #22 review (Birdperson)
+**By:** Birdperson (suite design), with Beth (engine) and Squanchy (CI item 1)
+**Issue:** #7 / #11 (S1.1 / S1.5), branch `feat/conformance-harness`, PR #22
+
+**Root cause of red CI (Rick's report):** `app/backend/static` is gitignored and only exists after `npm run build` runs. The coordinator's earlier local "8/8" green result was misleading because that machine already had a stale built frontend from prior work — a genuinely clean checkout (as GitHub-hosted runners are) has no `static/` directory at all, so the Python backend fails to start and the harness previously reported an opaque "backend exited early". **Lesson applied across the squad:** always validate from a state that matches a clean runner, not just "works on my machine".
+
+**Scope for this round — Stage A only:** Rick's "must fix before merge" items 1–7 plus item 19. Items 8–17 (Stage B) are explicitly deferred until the coordinator pushes this round and confirms CI is green. No Python backend behavior, frontend, prompts, or `infra/` were touched — only the conformance harness itself, plus the CI workflow's frontend-build step (item 1).
+
+**Validation approach for this round:** rather than trusting a single green run, re-created the exact clean-runner condition locally: moved `app/backend/static` aside, confirmed the harness fails with the intended clear message (not "backend exited early"), restored it, then ran the full suite 3× in a row plus the full baseline validation matrix (pytest, ruff, frontend tests). This is the same clean-state discipline CI now enforces structurally (build frontend before either test job runs).
+
+**Scenario/design decisions this round (owned by Birdperson, implemented jointly with Beth):**
+- **Per-connection identity (item 5):** every fake-upstream connection is now a distinct `FakeRealtimeConnection` object with its own frame log, rather than one shared server-level log. Tests explicitly wait for and capture *their* connection via `WaitForNextConnectionAsync()`, and assert no connections are already open at test start — this eliminates a whole class of latent cross-test leakage bugs the old shared-log design could have hidden.
+- **Voice-lock self-test (item 4):** rather than trusting that `AssistantAudioSeen` was wired correctly in the validator (it was, from the original harness build, but never exercised end-to-end), added a scenario that actually drives a full scripted response through the fake and then proves the *next* voice-changing `session.update` is rejected with `cannot_update_voice`, echoing the request's `event_id` per GA's error-shape convention.
+- **`response.done` shape + traceback detection (item 2):** the strongest signal in this round. Waiting *past* the greeting for `extension.round_trip_token` and asserting the captured backend stderr contains no `"Traceback"` is a black-box-safe way to detect a real backend crash that would otherwise be invisible to a WebSocket client (the connection simply stops receiving frames, no error surfaces). Mutation-checked by removing `output`/`usage` from the fake's `response.done` — reproduced the *exact* real `rtmt.py` `KeyError: 'output'` traceback, then confirmed the fix cures it. This is the single most convincing piece of evidence for Rick that the scenario actually tests what it claims to.
+- **Full GA item lifecycle + tool execution (item 3):** proving `update_order` executes for real (a `function_call_output` reaches the fake upstream with the right `call_id`, and `extension.middle_tier_tool_response` reaches the browser) required the engine to emit the complete `output_item.added → conversation.item.added → ...done` sequence, not just deltas — this was the largest single implementation change this round and is shared with item 2's fix (both live in `RespondAsync`).
+
+**Test count progression this round:** 8 (start of Stage A) → 14 (end of Stage A), across 9 commits. All green 3× in a row from the final, genuinely clean state.
+
+**Extension points flagged for Stage B (item 8 in particular):** `Script`/`AutoRespond`/`QueuedResponses` remain server-level (not per-connection) by deliberate choice this round — moving them per-connection is explicitly Stage B's job. This is safe today only because xUnit's `[Collection(ConformanceCollection.Name)]` serializes all fixture-sharing tests; it would not be safe if tests using `ConformanceFixture` ever ran in parallel.
+
+
+#### 2026-09-23: Conformance CI workflow (Squanchy)
+**By:** Squanchy (CI/DevOps) — consumes Birdperson/Beth's harness (#7) and Summer's test hooks
+**Issue:** #11 (S1.5), branch `feat/conformance-harness`
+
+**What:** `.github/workflows/conformance.yml`, triggered on `pull_request` to `dev`/`main` (+ `workflow_dispatch`), three independent jobs (each its own PR check):
+1. **`python-tests`** — installs `app/backend/requirements.txt` + pinned dev tooling not in that file (`ruff==0.16.1`, `pytest==9.1.1`, `pytest-asyncio==1.4.0` — the exact versions this branch was validated against locally), runs `ruff check .` then `pytest app/backend/tests -q`.
+2. **`frontend-tests`** — `npm ci` → `npm run build` → `npm test` (vitest) in `app/frontend`.
+3. **`conformance`** — creates a repo-root `.venv` from `app/backend/requirements.txt` (what `PythonBackendLauncher` expects), installs .NET 11 RC1 (`actions/setup-dotnet`, `dotnet-version: 11.0.100-rc.1.26425.128`), runs `dotnet test tests/conformance` with `CONFORMANCE_BACKEND=python`. Matrixed on `backend: [python]` today so S2 can extend to `[python, dotnet]` with a one-line diff — `CONFORMANCE_BACKEND=dotnet` already skips cleanly (Beth's `BackendLauncherFactory`), it's just nothing to conform against yet.
+
+**Runner:** `ubuntu-latest` for all three jobs — required a cross-platform fix to the harness first (Beth's commit `cc5696a`/`9f8188a`): `RepoPaths.PythonExecutable()` was hardcoded to the Windows venv layout.
+
+**Conventions:**
+- Actions pinned at major-version tags (`checkout@v4`, `setup-python@v5`, `setup-node@v4`, `setup-dotnet@v4`, `cache@v4`, `upload-artifact@v4`) — no `@main`/`@master`.
+- `permissions: contents: read` at the workflow level.
+- `concurrency` group cancels superseded runs on the same PR/ref.
+- Caching: `setup-python`'s built-in pip cache (keyed on `requirements.txt`), `setup-node`'s built-in npm cache (keyed on `package-lock.json`); an explicit `actions/cache` for `~/.nuget/packages` keyed on `Directory.Packages.props` + `*.csproj` since `setup-dotnet` doesn't cache restores itself.
+- Every job tees its test command's output to a log file (plus `--junitxml`/`--logger trx` machine-readable results) and uploads it as a failure-only artifact.
+- `CONFORMANCE_TEST_HOOKS` is never set in the workflow — consistent with never enabling it in bicep or the Dockerfile.
+
+**Registry access confirmed already CI-safe without changes:** `app/frontend/package-lock.json` already resolves entirely against `registry.npmjs.org` (0 internal `pkgs.visualstudio.com`/`pkgs.dev.azure.com` hosts, verified by grep) and the repo has no `NuGet.Config` forcing the corporate-only proxy — so `npm ci` and `dotnet restore` both work unmodified on a GitHub-hosted runner against public registries, per the issue's note that Actions runners are fine using them.
+
+**YAML validated:** parsed with `PyYAML` (`yaml.safe_load`) since Actions can't run locally in this environment — caught and fixed the classic YAML 1.1 gotcha where an unquoted `on:` key parses as the boolean `True` (quoted it `"on":`; GitHub's own parser already treats it as the string key, so this is a lint-cleanliness fix, not a behavior change). Not run through `actionlint` (would need a binary fetch outside the approved proxy list) — schema correctness reasoned about manually against `actions/*` documented inputs instead.
+
+**Not yet empirically verified (can't run Actions locally):** that `actions/setup-dotnet`'s `dotnet-version` input actually resolves `11.0.100-rc.1.26425.128` as a prerelease SDK on a fresh Linux runner. This is a "correct by construction" assumption — flagged for the first real PR run to confirm.
+
+
+#### 2026-09-23: Gated Python test hooks for conformance testing (Summer)
+**By:** Summer (Python backend) — consumed by Birdperson's conformance suite (#7)
+**Issue:** #7 (S1.1), branch `feat/conformance-harness`
+
+**What:** `app/backend/test_hooks.py`, a single small centralized module, gated by `CONFORMANCE_TEST_HOOKS=1` (only the literal string `"1"` after `.strip()` — deliberately not accepting `"true"`/`"yes"` to avoid an accidental-enable footgun):
+- `HOOKS_ENABLED: bool` — read once at import time as a module-level constant, matching the existing convention (`session_manager.py`'s `_RESUME_*` timers are the same shape).
+- `now(tz) -> datetime` — returns a fixed instant from `CONFORMANCE_FIXED_NOW` (must include a UTC offset or IANA zone; raises on naive input) converted into the caller's `tz`, when hooks are enabled; otherwise real `datetime.now(tz)`.
+- `seconds(env_var, default) -> float` — returns a parsed override from `env_var` when hooks are enabled and the value parses; otherwise `default` unchanged. Falls back silently on any parse failure (not just when unset) so a malformed override never hard-crashes backend startup during a test run.
+
+**Wired at 4 call sites, 7 new env vars (all inert unless `CONFORMANCE_TEST_HOOKS=1`):**
+| Site | Constant/behavior gated | Env var |
+|---|---|---|
+| `order_state.py: is_happy_hour()` | store-local "now" for happy-hour/time-based pricing | `CONFORMANCE_FIXED_NOW` |
+| `session_manager.py` | idle timeout | `CONFORMANCE_IDLE_TIMEOUT_SECONDS` |
+| `session_manager.py` | resume grace | `CONFORMANCE_GRACE_SECONDS` |
+| `session_manager.py` | resume nudge-after | `CONFORMANCE_NUDGE_AFTER_SECONDS` |
+| `session_manager.py` | first-frame resume timeout | `CONFORMANCE_FIRST_FRAME_TIMEOUT_SECONDS` |
+| `rtmt.py: _SESSION_CONFIGURED_TIMEOUT_SEC` | greeting timeout | `CONFORMANCE_GREETING_TIMEOUT_SECONDS` |
+| `rate_limit.py: RateLimitSettings.from_config()` | rate-limit retry delay / second retry delay | `CONFORMANCE_RATE_LIMIT_RETRY_DELAY_SECONDS` / `CONFORMANCE_RATE_LIMIT_SECOND_RETRY_DELAY_SECONDS` |
+
+**Never enabled in bicep or the Dockerfile** — confirmed by inspection, no changes made to either.
+
+**Proof of inertness (mutation-checked):** `app/backend/tests/test_test_hooks.py`, 18 tests across `TestInertWhenUnset` (real clock/timers regardless of poisoned env vars; only literal `"1"` enables), `TestActiveWhenSet` (fixed clock honored, zone conversion correct, naive timestamp rejected, unparseable override falls back), `TestHappyHourIntegration` (end-to-end proof through `order_state.is_happy_hour()`). Because `HOOKS_ENABLED` is a module-level constant, tests toggle it via `monkeypatch.setenv/delenv` + `importlib.reload()`, not just setting the env var.
+
+Mutation-check: hardcoded `HOOKS_ENABLED = True` in `test_hooks.py` →
+```
+8 of 18 tests in test_test_hooks.py failed (every TestInertWhenUnset case)
+```
+Restored the line (`git diff` clean) →
+```
+18 passed
+```
+
+**Incidental fix, in-scope (directly coupled to the feature the hooks address):** `tests/test_combo_orders.py::TestAbsorptionPricing::test_combo_plus_standalone_drink_at_full_price` asserted "full price" but never patched `is_happy_hour()`, unlike every sibling test in the file — it was flaky by real time-of-day (failed whenever run between 14:00–16:00 store-local). Added the missing `@patch("order_state.is_happy_hour", return_value=False)`.
+
+**Counts:** `pytest app/backend/tests -q` → **586 passed, 61 subtests** (568 baseline + 18 new). `ruff check .` clean repo-wide (one import-sort fix in `rtmt.py` via `ruff check --fix`).
+
+
+#### 2026-08-19: Squad v0.12.0 rollout repair — casting policy migration (Surgeon)
+**By:** Surgeon (Release Manager) — revision owner, FIDO-assigned
+**What:** Migrated `.squad/casting/policy.json` from legacy/v1.1 schema to v1.2 in all eight canonical repos. Schema change: added `casting_policy_version: "1.2"`, `allow_custom_universes: true`, and `default_naming: "descriptive"`. All project-specific allowlist universes and universe_capacity values were preserved verbatim. Legacy flat-schema repos (dunkin-chat-voice-assistant used `universes_allowed/max_agents_per_universe/overflow_strategy`; mightybs-blog used `universes/max_per_universe`) were migrated to v1.2 field names while preserving intent: dunkin retains `overflow_strategy` as a custom field and uniform cap-of-10 per universe; mightybs-blog retains its single `quake` universe at capacity 15. Custom universes unique to each project (McDonald's, Retail Icons, Rick and Morty) were preserved.
+**Why:** v0.12.0 reads `.squad/casting/policy.json` (nested); the flat `.squad/casting-policy.json` was already at v1.2 post-upgrade but the nested runtime file was stale, causing all casting reads to use legacy schema.
+
+
+#### 2026-09-22: Server-authoritative realtime session bootstrap + voice-lock handling; move to gpt-realtime-2.1 (Unity)
+**By:** Unity (AI/Realtime) — with Birdperson (regression tests), Squanchy (infra review)
+**What:**
+1. `RTMiddleTier` now sends its own GA `session.update` (tools, `tool_choice`, instructions, voice, the browser's VAD/transcription values) as the **first upstream frame** after `ws_connect`, before relaying any browser traffic. The browser's own `session.update` is still honoured, but it is no longer what configures the upstream session.
+2. Once the upstream session has emitted assistant audio, every `session.update` built by the middle tier **omits `audio.output.voice`**, and `extension.set_voice` is deferred to the next conversation rather than sent.
+3. The greeting waits for `session.updated` (5 s timeout), fires only on the browser's `session.update` (not on the bootstrap's `session.updated`), and is still sent only once.
+4. `infra/main.bicep` realtime deployment → `gpt-realtime-2.1` / `2026-07-07` / `GlobalStandard`. `_to_ga_session()` now lets `reasoning` and `parallel_tool_calls` through, but nothing sends them by default.
+
+**Why:** The Carhop Ticket stayed at $0.00 (prod session 26e3f21f, 2026-09-22). The browser only sends `session.update` when the mic is pressed; an auto-reconnected socket with a live mic ran on **service defaults**: no tools, generic instructions, voice `alloy`, server VAD auto-responding. The model spoke, which locked the voice, so the browser's later `session.update` (voice `shimmer`) was rejected wholesale with `invalid_request_error`/`cannot_update_voice`. Tools were never registered and every turn completed with no tool calls. Verified live on gpt-realtime-1.5: the same voice or no voice after audio is accepted, a different voice rejects the whole event. OpenAI's reference documents the lock ("Voice cannot be changed during the session once the model has responded with audio at least once").
+
+**Applies to Dunkin / McDonald's:** Any middle tier that configures the session only when the client asks, or that injects a voice into every `session.update`, has the same failure mode. Port the bootstrap and the voice-strip together, along with `tests/test_session_bootstrap.py` (a fake GA server that enforces VAD auto-response and wholesale `cannot_update_voice` rejection).
+
+**gpt-realtime-2.1 vs 1.5 (docs, 2026-09-22):**
+- Same URL, same session shape, same event names, same 10 voices.
+- Additions are reasoning-model-only: `session.reasoning.effort` (minimal|low|medium|high|xhigh) and `session.parallel_tool_calls`.
+- Learn's model table still labels 2.1 "preview"; the resource catalog (`az cognitiveservices account list-models`) reports `GenerallyAvailable`, retiring 2027-07-31.
+
+**Open (live-only):**
+- Tune `reasoning.effort` for latency on 2.1.
+- Find the cause of `Received frame with non-zero reserved bits` on the browser→backend websocket (Squanchy): it plus the 300 s idle close triggered the reconnect.
+- After a reconnect the order state is lost, because a new session id is issued.
+
+
+# Decision: marin default voice, self-healing session.update, config-driven reasoning.effort
+
+- **Date:** 2026-09-22
+- **Owner:** Unity (AI/Realtime), with Summer (backend), Morty (frontend), Birdperson (tests)
+- **Branch:** `feat/voice-reasoning`
+
+## 1. Default voice is `marin`; the picker offers every voice 2.1 accepts
+- Live probe against `gpt-realtime-2.1`: the ten built-in voices below are all accepted.
+  - alloy, ash, ballad, coral, echo, sage, shimmer, verse, marin, cedar
+- `fable`, `onyx` and `nova` are rejected with `invalid_value`, `param=session.audio.output.voice`. The service's own error text lists exactly the ten above.
+- OpenAI's realtime docs list the same ten and recommend marin and cedar for best quality.
+- The picker's voice list is now in one place, `app/frontend/src/lib/voices.ts`.
+  - marin and cedar are shown first, labelled "(recommended)".
+  - A stored voice that is not on the list falls back to marin.
+- Default set to `marin` in:
+  - `config.yaml` (`model.default_voice`)
+  - `infra/main.parameters.json`
+  - the app.py fallback
+  - `.env-sample`
+  - the local azd env `sonic-demo`. That file is gitignored, but its value overrides the bicep default.
+
+## 2. A rejected session.update can no longer silently drop the tools
+- **event_id on every update.** Each `session.update` we send carries an `event_id`: bootstrap, relayed browser updates, voice updates and fallbacks.
+- **Tracking.** A per-socket `_SessionUpdateGuard` tracks the updates that are still in flight.
+- **Correlating an error to our update:**
+  - If `error.event_id` is one of ours, the error is ours.
+  - If the error has no event_id (gpt-realtime-1.5 rejects `reasoning` with `event_id=None, param=None`), it is attributed to the oldest in-flight update. This happens only when it is an `invalid_request_error` and `param` is empty or starts with `session`.
+  - An error carrying someone else's event_id, a non-session param, a `server_error`, or arriving with nothing in flight is unrelated. It is forwarded as before.
+- **Response to a correlated error:**
+  - Log at ERROR with the code and param.
+  - Immediately send a minimal fallback containing only `type`, `instructions`, `tools` and `tool_choice`.
+  - The browser does not see the original error.
+- **Loop guard:** at most one fallback per original.
+  - If the fallback is also rejected, that error is logged at ERROR and forwarded to the browser.
+  - No further fallback is sent.
+- **Reasoning rejection:** if the rejected payload carried `reasoning`/`parallel_tool_calls` and the param was empty or reasoning-related, reasoning is switched off for the rest of the process.
+- **Transcription model** is configurable through `model.transcription_model` or env `AZURE_OPENAI_REALTIME_TRANSCRIPTION_MODEL`. The default stays `whisper-1`:
+  - `gpt-4o-transcribe`, `gpt-4o-mini-transcribe` and `gpt-4o-transcribe-diarize` are *accepted* by session.update on both 2.1 and 1.5.
+  - At runtime, every turn then fails with `DeploymentNotFound`, because the resource has no deployment of those names.
+  - whisper-1 transcribes in about 0.95s with no deployment.
+  - A failed transcription is now logged at ERROR.
+- **Post-deploy smoke check.** `scripts/smoke_realtime.py` sends the app's real payloads (bootstrap, relayed update, fallback) and a real audio turn. It checks for `session.updated` with all tools, `tool_choice=auto`, the instructions applied, and a completed transcription.
+  - Exit codes: 0 pass, 1 fail, 2 could not run.
+  - It is wired as a **non-fatal** azd `postdeploy` hook. `continueOnError: true` is set, and the wrapper always exits 0 with a loud warning.
+  - Skip it with `SONIC_SKIP_REALTIME_SMOKE=true`.
+
+## 3. reasoning.effort is config-driven and rollback-safe
+- **Live probe results:**
+  - 2.1 accepts none, minimal, low, medium, high and xhigh, and echoes `reasoning` in `session.updated`.
+  - 1.5 rejects every effort (even "none") and `parallel_tool_calls=true`, and drops the tools with them. `parallel_tool_calls=false` is accepted on 1.5.
+- **Configuration:** `model.reasoning_effort`, with env override `AZURE_OPENAI_REALTIME_REASONING_EFFORT`.
+  - `""`, `off` and `disabled` omit the field.
+  - `none` is sent as a real effort level.
+  - A client-supplied `reasoning`/`parallel_tool_calls` is always stripped.
+- **Rollback safety:** `reasoning` is only sent when the deployment name is not a known non-reasoning family: `gpt-realtime-1.x`, `gpt-realtime`, the dated snapshot, mini, and `gpt-4o-*`.
+  - A rollback to `gpt-realtime-1.5` therefore never sends it. This works even without the fallback, which is only the backstop for custom deployment names.
+- **Default and benchmark:** see the table in Unity's history.md entry for 2026-09-22 (r2). The benchmark script is `scripts/benchmark_reasoning.py`.
+
+## Inbox (2026-09-25)
+
+#### 2026-09-25T19:10:59-04:00: P1 persona architecture (Rick, Lead) - PROPOSED, pending Brian's review
+
+**By:** Rick (Lead), for issue #19 (includes the design for #51). Requested by Brian Swiger.
+**Status:** Proposed. Nothing here is binding until Brian reviews the P1 PR. No P2 work starts before that.
+**Docs:** `docs/adr/ADR-001-persona-architecture.md` (decision) and `docs/persona-architecture.md` (full design, 51-row difference inventory), on branch `squad/19-persona-architecture`.
+
+**What:**
+1. Each brand is a data-first persona pack in `personas/<id>/`: `persona.json` (rules, strategies, UI manifest, validated by `personas/persona.schema.json`), `prompts/*.yaml` (moved from `app/backend/prompts/<brand>/`), `menu/menuItems.json` (with the #51 per-item fields), and `assets/`. Python and C# load the same files.
+2. #51 per-item fields: `comboSlot` (`sides|drinks|none`, same values as the golden table), `happyHourDiscounted`, `aliases`, `bundle` (slots, autoFill), `requiresMachine`, `isExtra`; McD's existing `menuPeriod` and `mealNumber` join the schema. Name-keyed tables leave `menu_utils.py`. The off-menu fallback survives only as ordered, word-bounded `offMenu` rules in `persona.json`; the loader rejects any rule with `comboSlot: "sides"`. The golden table is checked against the data, never generated from it.
+3. Only one strategy slot in P2: `searchQueryRewrite` (`none`, `meal_numbers` for McDonald's). New strategies need both backends plus a conformance scenario.
+4. Persona is chosen per session (`/realtime?persona=<id>`, unknown persona gets HTTP 404 before upgrade) inside a per-deployment allow-list (`PERSONAS`, `DEFAULT_PERSONA=sonic`). No mid-session switch. Resume binds the persona (`persona_mismatch` rejection). New endpoints `/api/personas` and `/api/personas/{id}`.
+5. Frontend themes at runtime (PersonaProvider, CSS tokens, no brand hex). This is the approved exception to the "no frontend changes" rule.
+6. The unified app lives in this repo. Siblings stay live, security fixes only (McD #6, Dunkin #11), until parity sign-off, then tag, redirect README, archive.
+7. Dropped from P2: McD local mode, Dunkin crew dashboard, CRM simulator, Azure Local / k8s / flux, and the Azure Speech toggle (dead in all three repos).
+8. Internal protocol ids (`sonic_mt_` prefix, `sonic_*` event ids, logger names) stay unchanged; #29 depends on the prefix.
+
+**Why:** Almost every brand difference is data. One shared contract means one conformance suite and one C# port (#12 to #16) with no name tables to transcribe.
+
+**Team impact:**
+- Summer: P2-1, P2-2, P2-3, P2-5 to P2-7, P2-10. Birdperson: P2-4 (persona dimension; invert the brand guards in `test_rebrand_verification.py` and `locales.test.ts`). Morty: P2-8. Unity: prompts in P2-6/P2-7, and P2-9. Squanchy: P2-10 hook, P2-11. Beth: reviews the P2-4 harness; the C# issues gain persona scope (design doc section 12).
+- Sibling bug found: McD's prompt tells the model to call `update_order` `modify`, but the YAML tool schema that actually loads only allows add/remove, so `modify` is dormant. Fixed in P2-6.
+
+**Open for Brian (design doc section 14):** Q1 switching model, Q2 which personas on the main URL, Q3 #64 floats, Q4 keep or remove the off-menu fallback, Q5 McD happy hour, Q6 Dunkin silent happy hour, Q7 dropped features, Q8 repo name, Q9 sibling cutover grace period, Q10 deploy target.
+
+#### 2026-09-25T19:10:59-04:00: PR #66 revision (#55/#62 conformance flakes) — Beth, pushed for Rick's re-review
+
+**By:** Beth (.NET/C# Backend Dev), revising PR #66 after Rick (Lead) requested changes. Birdperson (original author) is locked out of this revision per the Squad's strict reviewer-lockout rule. Requested by Brian Swiger.
+**Status:** Pushed to `squad/55-62-conformance-flakes` (commit `bbd3d5e` on top of `35a19ad`). PR body rewritten, summary comment posted, Rick re-tagged for review. **Not merged** — coordinator/Rick still needs to sign off.
+
+**What changed vs. the original PR:**
+1. **M1 (never silently absorb a stray error between scenarios):** `WaitForOutputQuiescenceAsync` now runs *after* each scenario body completes, not just before the next scenario's baseline capture. A new pure `ScenarioErrorAttribution` bookkeeping class charges any error landing in the gap to the *previous* scenario's remaining allowance and fails naming that scenario if it's exceeded — previously this landed silently and only surfaced as a confusing failure on the *next* test.
+2. **M2 (mutation evidence):** added 19 deterministic unit tests (`ScenarioErrorAttributionTests`, `CapturedProcessOutputWaitTests`), including a fixture-level test proving a late error from scenario A is attributed to A. All 7 distinct guarded behaviours confirmed red under a targeted mutation, then reverted cleanly (mutated files verified byte-identical to pre-mutation backups afterward via `Compare-Object`).
+3. **M3 (honest evidence):** PR body rewritten — states plainly neither #55 nor #62 was ever reproduced, both root causes are inferred from code inspection of the race shape, and the original 20/20-under-load number has no pre-fix baseline to compare against. `Fixes #55, #62` changed to `Refs #55, #62`.
+4. **S1–S5:** last-append-timestamp fast path (S1, ~0ms when silent instead of always paying the idle window); monotonic watermark so `WaitForDiagnosticsAsync` can't match an older scenario's line (S2); both waits now propagate `OperationCanceledException` and use one shared timeout task instead of a per-wake timer (S3); both waits return `bool` so a cap-hit is surfaced instead of silent, with `ConformanceFixture` failing with a clear message naming the scenario (S4); interface renamed to `WaitForOutputQuiescenceAsync` to match the implementation (S5).
+5. **Non-blocking:** verified `update_order`'s #36 fix now validates required args upfront and logs at WARNING (not ERROR/exception) level, so tightened `ToolErrorSessionSurvivesTests`' `allowedNewBackendErrors` from `1` to `0` (re-verified green).
+6. Filed **#68** for a previously-unfiled CI flake, `RateLimitGuestSpeechCancellationTests` (dev @ `d720e16`, run 36198921931) — tracked only (`track:conformance`, milestone "S2 C# skeleton", refs #63), explicitly not fixed as part of #66.
+
+**Validation:** full conformance suite (`Category!=Browser`) green 5/5 consecutive runs, 449/449 each (avg ~45.2s — the 430-test pre-M2 baseline plus 19 new tests). `python -m pytest app/backend/tests -q`: 875 passed, 125 subtests. `ruff check .`: clean. No backend (Python) code touched.
+
+**Environment note for whoever revises a PR like this next:** the worktree needs its own `.venv` (`ruff`/`pytest`/`pytest-asyncio` matching CI's `requirements.txt`) and its own built `app/backend/static` (`npm ci && npm run build` in `app/frontend`) — `RepoPaths.FindRepoRoot()` resolves relative to the worktree root (it accepts a `.git` *file*, which is what a worktree has, not just a `.git` directory), so the harness looks for these next to the worktree, not the main checkout.
+
+**Reviewer-identity limitation encountered:** GitHub's `requestedReviewers` API requires a real, distinct collaborator account. In this environment Rick's prior review was posted from the `swigerb` account (the same account used to push this revision, and the PR's recorded author), so a formal `gh pr edit --add-reviewer` call fails both for `Rick` (not a collaborator login) and `swigerb` (can't request review from the PR author). Re-request was done via an explicit `@Rick` mention and "re-requesting your review" text in both the PR body and the summary comment instead.
+
+**Team impact:** none outside this PR. Birdperson should not act on this revision (reviewer lockout still in effect until Rick/coordinator signs off).
+
+#### PR #66 round 3 (Summer) — R1/R2 fixes for conformance-flake attribution
+
+**Date:** 2026-09-25
+**Author:** Summer (Backend Dev)
+**PR:** #66 (`squad/55-62-conformance-flakes` → `dev`), commit `0ad194e` on top of `f5bd8b4`
+**Refs:** #55, #62
+
+**Context:** Rick requested changes twice on PR #66 (round 1 reviewed by Birdperson's fix, round 2 by Beth's fix). Both are locked out under strict reviewer lockout; I own round 3. Scope was limited to exactly Rick's two remaining round-2 items (R1, R2) — R3 (squash-merge with edited commit message) belongs to the coordinator, not me.
+
+**R1 — one late error cascades into every remaining scenario:** Three compounding bugs, all in `ScenarioErrorAttribution` / `ConformanceFixture.RunAsync`:
+1. The charge to the previous scenario didn't advance the watermark/consumed count on the failing branch, so the same stranded error line(s) got re-attributed to every subsequent scenario (B, C, D... all re-charged against A's line).
+2. `Assert.Fail` for the charge ran *before* the `try`/`finally` in `RunAsync`, so the current scenario was never recorded when the charge failed — it disappeared from the report entirely instead of being attributed.
+3. Backend-startup errors (before any scenario ran) had no scenario to charge against, surfacing as `<unknown scenario>` and cascading via bug #1.
+
+Fix: make the charge always consume what it charges; move the charge + resulting `Assert.Fail` inside `try`/`finally` so every scenario is always recorded (guarded by a `postBodyRecorded` flag to avoid double-recording); seed a `StartupScenarioName` pseudo-scenario at fixture `InitializeAsync` so startup errors fail once, by name, without cascading.
+
+**R2 — unhandled-error count read twice per checkpoint:** Each checkpoint (scenario start, scenario end) read the live count twice — once for the charge/check, once for the baseline/record — creating a window where a line landing between the two reads was silently lost. Fix: collapsed to `BeginScenario`/`EndScenario`, each taking a single snapshot read and deriving both the charge/check and the baseline/record from that one read.
+
+**Testing approach:**
+- 7 new unit tests in `ScenarioErrorAttributionTests.cs` (cascade regression, idempotency, startup pseudo-scenario, fixed the pre-existing first-scenario test that only asserted the zero-count case despite describing the nonzero case in its own comment, single-read proofs via a fake count source that increments between reads).
+- Updated the one existing real-process integration test (`CapturedProcessOutputWaitTests.Fixture_level_M1...`) to route through `BeginScenario`/`EndScenario` instead of hand-wiring internals — this was the literal gap Rick's review flagged.
+- Mutation-checked all 4 logic changes (byte-identical revert confirmed via file-hash/diff snapshots after each): each caught by 1–3 tests.
+- **Disclosed gap:** the `ConformanceFixture.RunAsync` `try`/`finally` reordering itself has no fast/pure unit-test oracle — it needs a live fixture + real backend process. Validated via code review + full-suite regression (456/456 × 5 local runs) instead of a dedicated mutation-tested unit test. Documented this honestly in the PR comment rather than overclaiming coverage.
+
+**Validation:**
+- Full conformance suite (`Category!=Browser`): 456/456 green × 5 consecutive local runs.
+- Targeted harness unit tests (33 tests): 10/10 consecutive green runs.
+- `pytest app/backend/tests -q`: 875 passed / 125 subtests, clean.
+- `ruff check .`: clean.
+- CI: green on `0ad194e`. One `Conformance suite (backend=python)` run hit a one-off timing flake in the pre-existing real-process `Fixture_level_M1...` test (unrelated to this change's logic — `BeginScenario` is a pure single-read wrapper around the same call path); passed clean on rerun.
+
+**Learnings for the team:**
+- **Worktree frontend/static assets aren't copied by `git worktree add`.** The full conformance suite failed 332/456 in a fresh worktree purely because `app/backend/static/index.html` (a build artifact) didn't exist there. Fixed by `robocopy`-mirroring `node_modules` and the built `static/` dir from the main checkout, same pattern already used for the Python venv. Worth a note in onboarding docs for anyone else spinning up a worktree for this repo.
+- **A single CI flake in a genuinely timing-sensitive real-process test is expected and should be triaged, not panicked over** — rerunning the specific failed job (not the whole suite) confirmed it was environmental (CI runner scheduling jitter under a real child-process wall-clock test), not a regression, before declaring done.
+- **When "@-mentioning" a squad persona in a GitHub PR comment, there is no separate GitHub account per persona** — all reviews/comments post under one shared account (persona identified in the body text, e.g. "## Rick (Lead, ...)"). Don't fabricate an `@handle` for a persona; it renders as a no-op at best and risks pinging an unrelated real GitHub user at worst.
+
+#### Squanchy: PR #66 R4 — de-flake `Fixture_level_M1_late_error_from_scenario_A_is_attributed_to_A`
+
+**Date:** 2026-09-25 (session dated 2026-09-26 per squad clock)
+**PR:** swigerb/SonicAIDriveThru#66 (`squad/55-62-conformance-flakes` → `dev`)
+**Scope:** R4 only, per Rick's round-3 review (`#pullrequestreview-5325876077`). R1–R3 already resolved by Summer; strict reviewer lockout kept Birdperson/Beth/Summer out of this artifact for this round.
+
+**Problem:** `Fixture_level_M1_late_error_from_scenario_A_is_attributed_to_A` scheduled scenario A's late backend error at a fixed 300ms delay and relied on scenario B's 500ms quiescence window (measured from an earlier line) still being open when that error was dispatched — about 200ms of margin for the Python `time.sleep`, the stderr pipe, and .NET's ThreadPool `Process.ErrorDataReceived` dispatch to fit inside. CI run 36218817741 (attempt 1, job 108340055593) blew through that margin: `Assert.NotNull() Failure: Value is null`. Local repro confirmed the exact edge: 450ms still passed, 550ms reproduced the CI failure byte-for-byte.
+
+This was a test-design bug, not a production-code bug: #66 M1(b) exists precisely because a drain's idle window is a heuristic that can miss an in-flight line, so a test that assumed the heuristic would always catch one was asserting the wrong contract.
+
+**Fix:** Rewired the test to Rick's suggested shape (starting point from his round-3 review snippet), then generalized to a `[Theory]`:
+- Scenario A's own `ScenarioErrorAttribution.EndScenario` check now runs and passes **before** the late-error command is even written to the child process's stdin — no drain, no idle window, no wall-clock margin. This is structural, not timing-dependent.
+- The error command is sent only afterwards, with a parameterized `lagMs`.
+- The test then waits on the real, monotonically-increasing `CountUnhandledErrors()` value itself via `WaitForDiagnosticsAsync`'s predicate (re-evaluated after every `Append`, i.e. after `ScanLine` has actually incremented the count — not a string match, which could observe a false match one `Append` cycle ahead of the count moving), capped at a generous 30s.
+- Only once the count has provably risen does the test call scenario B's `BeginScenario` and assert the stranded error is attributed to `'ScenarioA'`.
+- `[Theory]` over `lagMs` = 0, 550 (exact CI repro), 2000 proves the fix is lag-independent, not merely no-longer-failing-at-one-specific-value.
+
+No production harness behavior changed — only this one test.
+
+**Validation evidence:**
+- **Mutation-check:** temporarily made `ScenarioErrorAttribution.ChargeStrandedErrorsToPreviousScenario` always `return null` (disabling charging to the previous scenario). All 3 theory cases went red (`Assert.NotNull() Failure: Value is null`), confirming the test still catches a broken attribution. Reverted via `git checkout --` — `git diff --stat` on that file confirmed a byte-identical restore before proceeding.
+- **Lag sweep:** 0ms, 550ms, 2000ms all green in the same `dotnet test` run (3/3 theory cases passed).
+- **15/15 unloaded:** looped `dotnet test --filter ...Fixture_level_M1...` 15 times, 15/15 green (all 3 lag cases each run).
+- **15/15 under heavy parallel CPU load:** started 24 CPU-busy `powershell.exe` processes (one per logical core; confirmed 100% CPU via `Get-Counter`), looped the same test 15 times, 15/15 green. All 24 load processes stopped by PID afterward; CPU returned to baseline (~5%).
+- **Harness unit tests:** 35/35 green (`CapturedProcessOutputTests` + 10 `ScenarioErrorAttributionTests` + `CapturedProcessOutputWaitTests`, which now includes the 3 R4 theory cases in place of the old single fact) — exceeds the 10/10 bar.
+- **Full conformance suite** (`dotnet test Conformance.slnx --filter "Category!=Browser"`, `CONFORMANCE_BACKEND=python`): 3 consecutive green runs, 458/458 each time.
+- **`python -m pytest app/backend/tests -q`:** 875 passed, 125 subtests passed. Clean.
+- **`ruff check .`:** All checks passed. Clean.
+- **PR CI:** pushed as commit `086654b`; see PR #66 comment for final CI status.
+
+**Toolchain notes for future agents on this artifact:**
+- Worktree venv: a plain copy of the repo-root `.venv` (never a junction/symlink) works fine in a worktree — `pyvenv.cfg`'s `home` path points at the system Python install, which is unaffected by the venv's own directory being copied elsewhere.
+- `app/backend/static` is gitignored build output required by the harness's Python launcher; copying it from an already-built sibling checkout (rather than re-running `npm run build`) is a valid, faster local shortcut when one is available — CI always builds it fresh via the workflow's own `npm ci && npm run build` step regardless.
+- `.NET 11 RC1` at `C:\Users\brswig\.dotnet-sdks\11.0.100-rc.1.26425.128\` needs both `DOTNET_ROOT` and a `PATH` prefix set per-process (PowerShell sessions don't persist env vars across tool calls) — set both at the top of every command block that shells out to `dotnet`.
+
+**Commit:** SHA: `086654bdc86211be8b3612c6eeab8cc6f8081ab7`. Message: `R4: de-flake Fixture_level_M1_late_error_from_scenario_A_is_attributed_to_A`, trailer `Refs #55, #62` (never `Fixes` — R3/M3 already established `dev`'s default-branch auto-close risk), `Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>`. Pushed to `origin/squad/55-62-conformance-flakes` as a new commit on top of `90d06a8` (no force-push), using `$env:GH_TOKEN = (gh auth token --user swigerb)` for that one process only — `brswig_microsoft` push was refused with a 403 as expected.
+
+**Not merged:** Per instructions, PR #66 was not merged. Commented on the PR addressed to Rick with the change description and evidence above; awaiting his re-review.
+
