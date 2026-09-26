@@ -243,14 +243,17 @@ internal sealed class ProcessBackend(
     public Task<bool> WaitForDiagnosticsAsync(
         Func<string, bool> predicate,
         TimeSpan timeout,
-        CancellationToken cancellationToken = default) =>
-        output.WaitForDiagnosticsAsync(predicate, timeout, cancellationToken);
+        CancellationToken cancellationToken = default,
+        int sinceWatermark = 0) =>
+        output.WaitForDiagnosticsAsync(predicate, timeout, cancellationToken, sinceWatermark);
 
-    public Task WaitForOutputQuiescenceAsync(
+    public int DiagnosticsWatermark => output.Watermark;
+
+    public Task<bool> WaitForOutputQuiescenceAsync(
         TimeSpan idleWindow,
         TimeSpan maxWait,
         CancellationToken cancellationToken = default) =>
-        output.WaitForQuiescenceAsync(idleWindow, maxWait, cancellationToken);
+        output.WaitForOutputQuiescenceAsync(idleWindow, maxWait, cancellationToken);
 
     public async ValueTask DisposeAsync()
     {
