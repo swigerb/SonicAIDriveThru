@@ -56,7 +56,13 @@ public sealed class GreetingTimeoutFallbackTests(ShortTimersConformanceFixture f
             "fallback wait for this backend process. If this backend used the 5s production " +
             "default instead, this would time out.");
 
-        var diagnostics = fixture.Backend!.DumpDiagnostics();
-        Assert.Contains("No session.updated within", diagnostics, StringComparison.Ordinal);
+        var diagnostics = await fixture.Backend!.WaitForDiagnosticsAsync(
+            d => d.Contains("No session.updated within", StringComparison.Ordinal), FrameTimeout, ct);
+        Assert.True(diagnostics,
+            "Expected the backend's captured stderr to eventually contain \"No session.updated " +
+            "within\" — the greeting fired via the fallback timeout above, so this line must " +
+            "already be logged or on its way; a synchronous DumpDiagnostics() read right after " +
+            "the greeting frame arrived can otherwise race the backend's own async stderr " +
+            "capture under load (#55).\n\n" + fixture.Backend!.DumpDiagnostics());
     });
 }

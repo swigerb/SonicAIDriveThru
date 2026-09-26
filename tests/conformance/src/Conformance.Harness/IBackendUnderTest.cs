@@ -34,4 +34,32 @@ public interface IBackendUnderTest : IAsyncDisposable
     /// <see cref="ProcessBackend"/> overrides this meaningfully.
     /// </summary>
     int UnhandledErrorCount(Func<IReadOnlyList<string>, bool> isBenignIncident) => UnhandledErrorCount();
+
+    /// <summary>
+    /// Waits for a diagnostics snapshot satisfying <paramref name="predicate"/> to appear —
+    /// event-driven, not an instantaneous <see cref="DumpDiagnostics"/> read (#55: that read can
+    /// race a still-in-flight, asynchronously-captured stderr line under load even though the
+    /// condition it is proving already genuinely happened). Default-implemented as a single
+    /// instantaneous check so <see cref="ExternalBackend"/> (nothing is captured there) needs no
+    /// changes; only <see cref="ProcessBackend"/> overrides this to actually wait.
+    /// </summary>
+    Task<bool> WaitForDiagnosticsAsync(
+        Func<string, bool> predicate,
+        TimeSpan timeout,
+        CancellationToken cancellationToken = default) =>
+        Task.FromResult(predicate(DumpDiagnostics()));
+
+    /// <summary>
+    /// Waits for this backend's captured stdout/stderr to go quiet for a bit — see #62: draining
+    /// any output still in flight from a *previous* scenario before a caller snapshots a baseline
+    /// error count closes the window where that in-flight line could land just after the baseline
+    /// read and be misattributed to whatever runs next. Default-implemented as a no-op (nothing is
+    /// captured for <see cref="ExternalBackend"/>, so it is trivially already quiescent); only
+    /// <see cref="ProcessBackend"/> overrides this meaningfully.
+    /// </summary>
+    Task WaitForOutputQuiescenceAsync(
+        TimeSpan idleWindow,
+        TimeSpan maxWait,
+        CancellationToken cancellationToken = default) =>
+        Task.CompletedTask;
 }

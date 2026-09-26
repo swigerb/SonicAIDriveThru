@@ -240,6 +240,18 @@ internal sealed class ProcessBackend(
     public int UnhandledErrorCount(Func<IReadOnlyList<string>, bool> isBenignIncident) =>
         output.CountUnhandledErrors(isBenignIncident);
 
+    public Task<bool> WaitForDiagnosticsAsync(
+        Func<string, bool> predicate,
+        TimeSpan timeout,
+        CancellationToken cancellationToken = default) =>
+        output.WaitForDiagnosticsAsync(predicate, timeout, cancellationToken);
+
+    public Task WaitForOutputQuiescenceAsync(
+        TimeSpan idleWindow,
+        TimeSpan maxWait,
+        CancellationToken cancellationToken = default) =>
+        output.WaitForQuiescenceAsync(idleWindow, maxWait, cancellationToken);
+
     public async ValueTask DisposeAsync()
     {
         if (processExitHandler is not null)

@@ -21,6 +21,17 @@ public sealed class CapturedProcessOutput
     private ErrorScanState _scanState = ErrorScanState.Idle;
     private int _unhandledErrorCount;
 
+    // #55/#62: stdout/stderr arrives on a ThreadPool callback (Process.OutputDataReceived /
+    // ErrorDataReceived) some indeterminate time after the child process actually wrote the
+    // line -- under CPU/ThreadPool contention that lag can be large enough to race a caller
+    // that reads Dump()/CountUnhandledErrors() as an instantaneous snapshot right after some
+    // *other*, unrelated signal (a frame arriving over a different channel; a previous
+    // scenario's teardown finishing). Mirrors FrameLog's TaskCompletionSource-swap idiom
+    // (Conformance.Fakes/FrameLog.cs) so callers can react to new captured output the instant
+    // it lands instead of polling or guessing how long to sleep.
+    private readonly Lock _signalGate = new();
+    private TaskCompletionSource _signal = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
     public void Attach(Process process)
     {
         process.OutputDataReceived += (_, e) => Append("OUT", e.Data);
@@ -41,9 +52,114 @@ public sealed class CapturedProcessOutput
         }
 
         ScanLine(stream, line);
+
+        TaskCompletionSource released;
+        lock (_signalGate)
+        {
+            released = _signal;
+            _signal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+        released.TrySetResult();
     }
 
     public string Dump() => string.Join(Environment.NewLine, _lines);
+
+    /// <summary>
+    /// Awaits the first already-captured or future output snapshot satisfying
+    /// <paramref name="predicate"/> (evaluated against the full <see cref="Dump"/> text, the same
+    /// shape scenarios already assert against) -- event-driven, not a fixed-interval poll or an
+    /// instantaneous single read. Fixes #55: a synchronous <c>Dump()</c> read taken immediately
+    /// after an unrelated signal (e.g. a frame arriving on a different channel) can race a
+    /// still-in-flight stderr line under load; this reacts the instant the line actually lands
+    /// instead. Returns the last-seen snapshot's match result on timeout/cancellation rather than
+    /// throwing, so callers can assert with a clear message.
+    /// </summary>
+    public async Task<bool> WaitForDiagnosticsAsync(
+        Func<string, bool> predicate,
+        TimeSpan timeout,
+        CancellationToken cancellationToken = default)
+    {
+        var deadline = DateTimeOffset.UtcNow + timeout;
+        while (true)
+        {
+            Task signalTask;
+            lock (_signalGate)
+            {
+                if (predicate(Dump()))
+                {
+                    return true;
+                }
+                signalTask = _signal.Task;
+            }
+
+            var remaining = deadline - DateTimeOffset.UtcNow;
+            if (remaining <= TimeSpan.Zero)
+            {
+                return predicate(Dump());
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            var delayTask = Task.Delay(remaining, cancellationToken);
+            var completed = await Task.WhenAny(signalTask, delayTask).ConfigureAwait(false);
+            if (completed != signalTask)
+            {
+                return predicate(Dump());
+            }
+        }
+    }
+
+    /// <summary>
+    /// Waits until no new stdout/stderr line has been captured for at least
+    /// <paramref name="idleWindow"/> (an explicit quiet-period signal, not a blind sleep), giving
+    /// up after <paramref name="maxWait"/> total regardless. Fixes #62: <see
+    /// cref="Conformance.Tests.ConformanceFixture.RunAsync(Func{Task}, int)"/> snapshots a
+    /// per-scenario baseline error count before running the scenario body; if a *previous*
+    /// scenario's own already-accounted-for stderr line was still in flight through the
+    /// ThreadPool callback at that instant, it could land just after this baseline snapshot and
+    /// get misattributed as a *new* error this scenario introduced. Draining any in-flight output
+    /// before the baseline is read closes that window without changing any existing timeout or
+    /// retrying the scenario itself. <paramref name="maxWait"/> is a safety cap only -- a
+    /// chatty-but-legitimate backend does not fail this wait, it just returns once the cap is hit.
+    /// </summary>
+    public async Task WaitForQuiescenceAsync(
+        TimeSpan idleWindow,
+        TimeSpan maxWait,
+        CancellationToken cancellationToken = default)
+    {
+        var deadline = DateTimeOffset.UtcNow + maxWait;
+        while (true)
+        {
+            var remaining = deadline - DateTimeOffset.UtcNow;
+            if (remaining <= TimeSpan.Zero)
+            {
+                return;
+            }
+
+            Task signalTask;
+            lock (_signalGate)
+            {
+                signalTask = _signal.Task;
+            }
+
+            var waitFor = remaining < idleWindow ? remaining : idleWindow;
+            cancellationToken.ThrowIfCancellationRequested();
+            var idleTask = Task.Delay(waitFor, cancellationToken);
+            var completed = await Task.WhenAny(signalTask, idleTask).ConfigureAwait(false);
+            if (completed == idleTask && waitFor == idleWindow)
+            {
+                // No new output arrived during a full idle window -- quiescent.
+                return;
+            }
+            if (completed == idleTask)
+            {
+                // Hit maxWait before ever observing a full idle window -- give up, but never
+                // throw: this is a best-effort settling wait, not a correctness gate.
+                return;
+            }
+            // A new line landed (signalTask completed first) -- loop and re-arm a fresh idle
+            // window instead of returning early on a stale one.
+        }
+    }
 
     /// <summary>
     /// Counts unhandled-error incidents in captured stderr — a python.exe subprocess implementation

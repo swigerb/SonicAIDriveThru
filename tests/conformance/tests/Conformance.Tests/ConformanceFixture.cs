@@ -114,6 +114,16 @@ public class ConformanceFixture : IAsyncLifetime
     private static readonly TimeSpan ScenarioTeardownTimeout = TimeSpan.FromSeconds(30);
 
     /// <summary>
+    /// #62: how long the backend's captured stdout/stderr must stay quiet before a baseline error
+    /// count is trusted, and the safety cap on how long to wait for that quiet period at all. Kept
+    /// deliberately short in the common case (most scenarios' baseline reads are already
+    /// quiescent, so this rarely actually waits) with the same generous upper bound used elsewhere
+    /// in this file for genuinely unusual contention (<see cref="ScenarioTeardownTimeout"/>).
+    /// </summary>
+    private static readonly TimeSpan BaselineQuiescenceWindow = TimeSpan.FromMilliseconds(250);
+    private static readonly TimeSpan BaselineQuiescenceMaxWait = ScenarioTeardownTimeout;
+
+    /// <summary>
     /// Wraps a scenario body so any failure carries the backend's captured stdout/stderr in the
     /// exception message — xUnit displays inner-exception text on failure without needing
     /// ITestOutputHelper plumbing through every scenario. Equivalent to
@@ -181,6 +191,23 @@ public class ConformanceFixture : IAsyncLifetime
         // makes the invariant "this scenario introduced no new unhandled backend errors" --
         // which is what review item N5 actually wants -- immune to run order (PR #22 review
         // item N5).
+        //
+        // #62: drained for quiescence first. CountUnhandledErrors() reflects only the stderr
+        // lines the async ErrorDataReceived callback has actually dispatched so far -- under
+        // ThreadPool/CPU contention, a previous scenario's own already-accounted-for line can
+        // still be in flight at the instant that scenario's own "actual" check read the count (it
+        // simply wasn't visible yet, so that check under-counted and still passed). If that line
+        // then lands *after* this baseline snapshot instead of before it, this scenario's own
+        // zero-tolerance check would misattribute someone else's expected error as a new one it
+        // introduced. Waiting for a short quiet period first (event-driven, not a blind sleep; see
+        // CapturedProcessOutput.WaitForQuiescenceAsync) closes that window without changing what
+        // counts as an error or retrying anything.
+        if (Backend is not null)
+        {
+            await Backend.WaitForOutputQuiescenceAsync(
+                BaselineQuiescenceWindow, BaselineQuiescenceMaxWait, TestContext.Current.CancellationToken)
+                .ConfigureAwait(false);
+        }
         var baselineUnhandledErrors = Backend?.UnhandledErrorCount() ?? 0;
 
         try
